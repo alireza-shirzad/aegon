@@ -1,0 +1,104 @@
+[package]
+name = "akd"
+version = "0.12.0-pre.12"
+authors = ["akd contributors"]
+description = "An implementation of an auditable key directory"
+license = "MIT OR Apache-2.0"
+edition = "2021"
+keywords = ["key-transparency", "akd"]
+repository = "https://github.com/facebook/akd"
+readme = "../README.md"
+
+[features]
+# Supported configurations
+whatsapp_v1 = ["akd_core/whatsapp_v1"]
+experimental = ["akd_core/experimental"]
+
+# Default features mix (experimental + audit-proof protobuf mgmt support)
+default = [
+    "public_auditing",
+    "parallel_vrf",
+    "preload_history",
+    "greedy_lookup_preload",
+    "experimental",
+]
+
+bench = ["experimental", "public_tests", "tokio/rt-multi-thread"]
+# Greedy loading of lookup proof nodes
+greedy_lookup_preload = []
+public_auditing = ["dep:protobuf", "akd_core/protobuf"]
+# Parallelize VRF calculations during publish
+parallel_vrf = ["akd_core/parallel_vrf"]
+# Enable pre-loading of the nodes when generating history proofs
+preload_history = []
+public_tests = [
+    "rand",
+    "dep:colored",
+    "dep:once_cell",
+    "serde_serialization",
+    "akd_core/public_tests",
+    "akd_core/rand",
+    "dep:paste",
+]
+rand = ["dep:rand"]
+# Collect runtime metrics on db access calls + timing
+runtime_metrics = []
+serde_serialization = ["dep:serde", "akd_core/serde_serialization"]
+# TESTING ONLY: Artifically slow the in-memory database (for benchmarking)
+slow_internal_db = []
+# Tracing instrumentation
+tracing = ["dep:tracing"]
+# Tracing-based instrumentation
+tracing_instrument = ["tracing/attributes"]
+
+[dependencies]
+## Required dependencies ##
+akd_core = { version = "0.12.0-pre.12", path = "../akd_core", default-features = false, features = [
+    "vrf",
+] }
+async-recursion = "1"
+async-trait = "0.1"
+dashmap = "5"
+hex = "0.4"
+log = { version = "0.4", features = ["kv_unstable"] }
+tokio = { version = "1", features = ["sync", "time", "rt"] }
+
+## Optional dependencies ##
+colored = { version = "2", optional = true }
+once_cell = { version = "1", optional = true }
+paste = { version = "1", optional = true }
+protobuf = { version = "3", optional = true }
+rand = { version = "0.8", optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+tracing = { version = "0.1.40", optional = true }
+
+[dev-dependencies]
+criterion = "0.5"
+serial_test = "2"
+proptest = "1"
+proptest-derive = "0.4"
+colored = "2"
+once_cell = "1"
+ctor = "0.2"
+tokio-test = "0.4"
+tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
+mockall = "0.11"
+futures = "0.3"
+itertools = "0.11"
+
+# To enable the public_tests feature in tests
+akd = { path = ".", features = [
+    "public_tests",
+    "whatsapp_v1",
+    "experimental",
+], default-features = false }
+
+[[bench]]
+name = "azks"
+harness = false
+required-features = ["bench"]
+
+[[bench]]
+name = "directory"
+harness = false
+required-features = ["bench"]

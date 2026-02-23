@@ -1,6 +1,4 @@
-[package]
-name = "aegon"
-version = "0.1.0"
-edition = "2024"
+[workspace]
 
-[dependencies]
+members = ["akd", "akd_core", "examples", "xtask"]
+resolver = "2"

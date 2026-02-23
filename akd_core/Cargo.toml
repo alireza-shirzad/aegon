@@ -1,0 +1,72 @@
+[package]
+name = "akd_core"
+version = "0.12.0-pre.12"
+authors = ["akd contributors"]
+description = "Core utilities for the akd crate"
+license = "MIT OR Apache-2.0"
+edition = "2021"
+keywords = ["key-transparency", "akd"]
+repository = "https://github.com/facebook/akd"
+readme = "../README.md"
+# Uncomment for automated building of the protobuf Rust sources. Necessary if the .proto specs change
+build = "src/build.rs"
+
+[build-dependencies]
+protobuf-codegen = "3"
+protobuf-parse = "3"
+
+[features]
+# Disable all STD for the crate
+nostd = []
+# Supported configurations
+whatsapp_v1 = ["dep:blake3"]
+experimental = ["dep:blake3"]
+# Include the VRF verification logic
+vrf = ["ed25519-dalek", "curve25519-dalek"]
+serde_serialization = ["dep:serde", "dep:serde_bytes", "ed25519-dalek/serde"]
+# Parallelize VRF calculations during publish
+parallel_vrf = ["tokio"]
+
+bench = ["parallel_vrf", "experimental", "vrf", "tokio/rt-multi-thread"]
+public_tests = ["dep:paste"]
+protobuf = ["dep:protobuf"]
+
+# Default features mix
+default = ["vrf", "experimental"]
+
+[dependencies]
+## Required dependencies ##
+async-trait = "0.1"
+curve25519-dalek = { version = "4", optional = true }
+ed25519-dalek = { version = "2", features = [
+    "digest",
+    "legacy_compatibility",
+], optional = true }
+hex = "0.4"
+zeroize = "1"
+
+## Optional dependencies ##
+blake3 = { version = "1", optional = true, default-features = false }
+protobuf = { version = "3", optional = true }
+rand = { version = "0.8", optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+serde_bytes = { version = "0.11", optional = true }
+tokio = { version = "1", features = ["rt"], optional = true }
+paste = { version = "1", optional = true }
+
+[dev-dependencies]
+bincode = "1"
+itertools = "0.13"
+proptest = "1"
+proptest-derive = "0.6"
+rand = "0.8"
+serde = { version = "1", features = ["derive"] }
+criterion = "0.5"
+
+# To enable the public-tests feature in tests
+akd_core = { path = ".", features = ["public_tests"] }
+
+[[bench]]
+name = "parallel_vrfs"
+harness = false
+required-features = ["bench"]
