@@ -1,0 +1,40 @@
+[package]
+name = "subroutines"
+version = "0.1.0"
+edition = "2021"
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+arithmetic = { path = "../arithmetic" }
+ark-bn254 = { workspace = true }
+ark-ec = { workspace = true }
+ark-ff = { workspace = true }
+ark-poly = { workspace = true }
+ark-serialize = { workspace = true }
+ark-std = { workspace = true }
+derivative = { workspace = true }
+displaydoc = { workspace = true }
+rand_chacha = { workspace = true }
+rayon = { workspace = true, optional = true }
+rand = { workspace = true }
+ndarray = { workspace = true, features = ["serde"] }
+transcript = { path = "../transcript" }
+util = { path = "../util" }
+num-bigint = { workspace = true }
+num-traits = { workspace = true }
+once_cell = { workspace = true }
+smallvec = "1.13"
+[features]
+parallel = [
+    "rayon",
+    "ark-std/parallel",
+    "ark-ff/parallel",
+    "ark-poly/parallel",
+    "ark-ec/parallel",
+    "util/parallel",
+    "arithmetic/parallel",
+    "ndarray/rayon",
+]
+print-trace = ["arithmetic/print-trace", "ark-std/print-trace"]
+[profile.bench]
+debug = true

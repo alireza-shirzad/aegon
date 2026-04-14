@@ -1,0 +1,28 @@
+[package]
+name = "arithmetic"
+version = "0.1.0"
+edition = "2021"
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+displaydoc = { workspace = true }
+rand_chacha = { workspace = true }
+ark-std = { workspace = true }
+ark-ff = { workspace = true }
+ark-poly = { workspace = true }
+ark-serialize = { workspace = true }
+ark-bn254 = { workspace = true }
+rayon = { workspace = true, optional = true }
+
+[dev-dependencies]
+ark-ec = { workspace = true }
+criterion = { workspace = true }
+
+[features]
+parallel = ["rayon", "ark-std/parallel", "ark-ff/parallel", "ark-poly/parallel"]
+print-trace = ["ark-std/print-trace"]
+
+[[bench]]
+name = "mle_eval"
+path = "benches/bench.rs"
+harness = false
