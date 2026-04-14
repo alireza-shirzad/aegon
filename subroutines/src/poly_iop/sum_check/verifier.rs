@@ -13,7 +13,6 @@ use crate::poly_iop::{
 };
 use arithmetic::virtual_polynomial::VPAuxInfo;
 use ark_ff::PrimeField;
-use ark_std::{end_timer, start_timer};
 use transcript::IOPTranscript;
 
 #[cfg(feature = "parallel")]
@@ -27,8 +26,8 @@ impl<F: PrimeField> SumCheckVerifier<F> for IOPVerifierState<F> {
     type SumCheckSubClaim = SumCheckSubClaim<F>;
 
     /// Initialize the verifier's state.
+    #[tracing::instrument(level = "debug", skip_all, name = "sum check verifier init")]
     fn verifier_init(index_info: &Self::VPAuxInfo) -> Self {
-        let start = start_timer!(|| "sum check verifier init");
         let res = Self {
             round: 1,
             num_vars: index_info.num_variables,
@@ -37,7 +36,6 @@ impl<F: PrimeField> SumCheckVerifier<F> for IOPVerifierState<F> {
             polynomials_received: Vec::with_capacity(index_info.num_variables),
             challenges: Vec::with_capacity(index_info.num_variables),
         };
-        end_timer!(start);
         res
     }
 
@@ -47,14 +45,12 @@ impl<F: PrimeField> SumCheckVerifier<F> for IOPVerifierState<F> {
     /// challenges; and update the verifier's state accordingly. The actual
     /// verifications are deferred (in batch) to `check_and_generate_subclaim`
     /// at the last step.
+    #[tracing::instrument(level = "debug", skip_all, name = "sum check verify round and update state", fields(round = self.round))]
     fn verify_round_and_update_state(
         &mut self,
         prover_msg: &Self::ProverMessage,
         transcript: &mut Self::Transcript,
     ) -> Result<Self::Challenge, PolyIOPErrors> {
-        let start =
-            start_timer!(|| format!("sum check verify {}-th round and update state", self.round));
-
         if self.finished {
             return Err(PolyIOPErrors::InvalidVerifier(
                 "Incorrect verifier state: Verifier is already finished.".to_string(),
@@ -82,7 +78,6 @@ impl<F: PrimeField> SumCheckVerifier<F> for IOPVerifierState<F> {
             self.round += 1;
         }
 
-        end_timer!(start);
         Ok(challenge)
     }
 
@@ -94,11 +89,11 @@ impl<F: PrimeField> SumCheckVerifier<F> for IOPVerifierState<F> {
     /// evaluated at `subclaim.point` will be `subclaim.expected_evaluation`.
     /// Otherwise, it is highly unlikely that those two will be equal.
     /// Larger field size guarantees smaller soundness error.
+    #[tracing::instrument(level = "debug", skip_all, name = "sum check check and generate subclaim")]
     fn check_and_generate_subclaim(
         &self,
         asserted_sum: &F,
     ) -> Result<Self::SumCheckSubClaim, PolyIOPErrors> {
-        let start = start_timer!(|| "sum check check and generate subclaim");
         if !self.finished {
             return Err(PolyIOPErrors::InvalidVerifier(
                 "Incorrect verifier state: Verifier has not finished.".to_string(),
@@ -166,7 +161,6 @@ impl<F: PrimeField> SumCheckVerifier<F> for IOPVerifierState<F> {
                 ));
             }
         }
-        end_timer!(start);
         Ok(SumCheckSubClaim {
             point: self.challenges.clone(),
             // the last expected value (not checked within this function) will be included in the
@@ -186,9 +180,8 @@ impl<F: PrimeField> SumCheckVerifier<F> for IOPVerifierState<F> {
 /// negligible compared to field operations.
 /// TODO: The quadratic term can be removed by precomputing the lagrange
 /// coefficients.
+#[tracing::instrument(level = "debug", skip_all, name = "sum check interpolate uni poly opt")]
 fn interpolate_uni_poly<F: PrimeField>(p_i: &[F], eval_at: F) -> Result<F, PolyIOPErrors> {
-    let start = start_timer!(|| "sum check interpolate uni poly opt");
-
     let len = p_i.len();
     let mut evals = vec![];
     let mut prod = eval_at;
@@ -282,7 +275,6 @@ fn interpolate_uni_poly<F: PrimeField>(p_i: &[F], eval_at: F) -> Result<F, PolyI
             }
         }
     }
-    end_timer!(start);
     Ok(res)
 }
 

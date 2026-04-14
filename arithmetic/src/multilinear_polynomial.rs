@@ -4,9 +4,9 @@ use ark_poly::{
     univariate::DenseOrSparsePolynomial, MultilinearExtension, SparseMultilinearExtension,
 };
 use ark_std::{
-    cfg_iter, end_timer,
+    cfg_iter,
     rand::{Rng, RngCore},
-    start_timer, UniformRand,
+    UniformRand,
 };
 #[cfg(feature = "parallel")]
 use rayon::iter::{
@@ -24,12 +24,12 @@ use crate::bits_le_to_usize;
 /// Returns
 /// - the list of polynomials,
 /// - its sum of polynomial evaluations over the boolean hypercube.
+#[tracing::instrument(level = "debug", skip_all, name = "sample random mle list")]
 pub fn random_mle_list<F: PrimeField, R: RngCore>(
     nv: usize,
     degree: usize,
     rng: &mut R,
 ) -> (Vec<Arc<DenseMultilinearExtension<F>>>, F) {
-    let start = start_timer!(|| "sample random mle list");
     let mut multiplicands = Vec::with_capacity(degree);
     for _ in 0..degree {
         multiplicands.push(Vec::with_capacity(1usize << nv))
@@ -52,18 +52,16 @@ pub fn random_mle_list<F: PrimeField, R: RngCore>(
         .map(|x| Arc::new(DenseMultilinearExtension::from_evaluations_vec(nv, x)))
         .collect();
 
-    end_timer!(start);
     (list, sum)
 }
 
 // Build a randomize list of mle-s whose sum is zero.
+#[tracing::instrument(level = "debug", skip_all, name = "sample random zero mle list")]
 pub fn random_zero_mle_list<F: PrimeField, R: RngCore>(
     nv: usize,
     degree: usize,
     rng: &mut R,
 ) -> Vec<Arc<DenseMultilinearExtension<F>>> {
-    let start = start_timer!(|| "sample random zero mle list");
-
     let mut multiplicands = Vec::with_capacity(degree);
     for _ in 0..degree {
         multiplicands.push(Vec::with_capacity(1usize << nv))
@@ -80,7 +78,6 @@ pub fn random_zero_mle_list<F: PrimeField, R: RngCore>(
         .map(|x| Arc::new(DenseMultilinearExtension::from_evaluations_vec(nv, x)))
         .collect();
 
-    end_timer!(start);
     list
 }
 

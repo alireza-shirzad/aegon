@@ -13,6 +13,7 @@ ark-poly = { workspace = true }
 ark-serialize = { workspace = true }
 ark-bn254 = { workspace = true }
 rayon = { workspace = true, optional = true }
+tracing = { workspace = true }
 
 [dev-dependencies]
 ark-ec = { workspace = true }

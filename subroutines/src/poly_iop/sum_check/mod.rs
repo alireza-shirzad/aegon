@@ -14,7 +14,6 @@ use crate::poly_iop::{
 use arithmetic::virtual_polynomial::{VPAuxInfo, VirtualPolynomial};
 use ark_ff::PrimeField;
 use ark_poly::DenseMultilinearExtension;
-use ark_std::{end_timer, start_timer};
 use std::{fmt::Debug, sync::Arc};
 use transcript::IOPTranscript;
 
@@ -137,25 +136,23 @@ impl<F: PrimeField> SumCheck<F> for PolyIOP<F> {
     type SumCheckSubClaim = SumCheckSubClaim<F>;
     type Transcript = IOPTranscript<F>;
 
+    #[tracing::instrument(level = "debug", skip_all, name = "extract sum")]
     fn extract_sum(proof: &Self::SumCheckProof) -> F {
-        let start = start_timer!(|| "extract sum");
         let res = proof.proofs[0].evaluations[0] + proof.proofs[0].evaluations[1];
-        end_timer!(start);
         res
     }
 
+    #[tracing::instrument(level = "debug", skip_all, name = "init transcript")]
     fn init_transcript() -> Self::Transcript {
-        let start = start_timer!(|| "init transcript");
         let res = IOPTranscript::<F>::new(b"Initializing SumCheck transcript");
-        end_timer!(start);
         res
     }
 
+    #[tracing::instrument(level = "debug", skip_all, name = "sum check prove")]
     fn prove(
         mut poly: Self::VirtualPolynomial,
         transcript: &mut Self::Transcript,
     ) -> Result<Self::SumCheckProof, PolyIOPErrors> {
-        let start = start_timer!(|| "sum check prove");
         transcript.append_serializable_element(b"aux info", &poly.aux_info)?;
         let num_vars = poly.aux_info.num_variables;
 
@@ -174,21 +171,19 @@ impl<F: PrimeField> SumCheck<F> for PolyIOP<F> {
             prover_state.challenges.push(p)
         };
 
-        end_timer!(start);
         Ok(IOPProof {
             point: prover_state.challenges,
             proofs: prover_msgs,
         })
     }
 
+    #[tracing::instrument(level = "debug", skip_all, name = "sum check verify")]
     fn verify(
         claimed_sum: F,
         proof: &Self::SumCheckProof,
         aux_info: &Self::VPAuxInfo,
         transcript: &mut Self::Transcript,
     ) -> Result<Self::SumCheckSubClaim, PolyIOPErrors> {
-        let start = start_timer!(|| "sum check verify");
-
         transcript.append_serializable_element(b"aux info", aux_info)?;
         let mut verifier_state = IOPVerifierState::verifier_init(aux_info);
         for i in 0..aux_info.num_variables {
@@ -203,7 +198,6 @@ impl<F: PrimeField> SumCheck<F> for PolyIOP<F> {
 
         let res = IOPVerifierState::check_and_generate_subclaim(&verifier_state, &claimed_sum);
 
-        end_timer!(start);
         res
     }
 }

@@ -51,9 +51,9 @@ use ark_ff::One;
 use ark_poly::{DenseMultilinearExtension, MultilinearExtension, SparseMultilinearExtension};
 use ark_serialize::CanonicalDeserialize;
 use ark_std::{
-    cfg_into_iter, cfg_iter, cfg_iter_mut, end_timer,
+    cfg_into_iter, cfg_iter, cfg_iter_mut,
     rand::Rng,
-    start_timer, test_rng, Zero,
+    test_rng, Zero,
 };
 use std::{
     borrow::Borrow,
@@ -185,17 +185,16 @@ where
     /// non-zk variant based on the SRS configuration. In the non-zk case the
     /// commitment is `C = <f, H_1>` (Figure 14, Commit); in the zk case it
     /// is blinded as `C + tau*h` (Appendix D).
+    #[tracing::instrument(level = "debug", skip_all, name = "KZH::Commit")]
     fn commit(
         prover_param: impl Borrow<Self::ProverParam>,
         poly: &Self::Polynomial,
     ) -> Result<(Self::Commitment, Self::State), PCSError> {
-        let timer = start_timer!(|| "KZH::Commit");
         let result = if !prover_param.borrow().is_zk() {
             Ok(Self::commit_non_zk(prover_param, poly).unwrap())
         } else {
             Self::commit_zk(prover_param, poly)
         };
-        end_timer!(timer);
         result
     }
 
@@ -218,6 +217,7 @@ where
     /// of `f` at the point `(x_1, ..., x_k)` and the evaluation `y = f(x)`.
     /// Dispatches to the zk Sigma-protocol variant (Appendix D) when the
     /// SRS is hiding.
+    #[tracing::instrument(level = "debug", skip_all, name = "KZH::Open")]
     fn open(
         prover_param: impl Borrow<Self::ProverParam>,
         commitment: &Self::Commitment,
@@ -226,14 +226,12 @@ where
         state: &Self::State,
         transcript: &mut IOPTranscript<E::ScalarField>,
     ) -> Result<(Self::Proof, Self::Evaluation), PCSError> {
-        let timer = start_timer!(|| "KZH::Open");
         let result = if !prover_param.borrow().is_zk() {
             Self::open_non_zk(prover_param, commitment, polynomial, point, state)
         } else {
             Self::open_zk(prover_param, commitment, polynomial, point, state, transcript)
         };
 
-        end_timer!(timer);
         result
     }
 
@@ -262,6 +260,7 @@ where
     /// Sigma-protocol fields `r_hide`, `y_r`, `rho_prime`) determines
     /// whether the zk verifier (Appendix D) or the plain verifier
     /// (Figure 14) is invoked.
+    #[tracing::instrument(level = "debug", skip_all, name = "KZH::Verify")]
     fn verify(
         verifier_param: &Self::VerifierParam,
         commitment: &Self::Commitment,
@@ -270,14 +269,12 @@ where
         proof: &Self::Proof,
         _transcript: &mut IOPTranscript<E::ScalarField>,
     ) -> Result<bool, PCSError> {
-        let timer = start_timer!(|| "KZH::Verify");
         let result = match (proof.get_r_hide(), proof.get_y_r(), proof.get_rho_prime()) {
             (Some(_), Some(_), Some(_)) => {
                 Self::verify_zk(verifier_param, commitment, point, value, None, proof)
             },
             _ => Self::verify_non_zk(verifier_param, commitment, point, value, None, proof),
         };
-        end_timer!(timer);
         result
     }
 
@@ -313,11 +310,11 @@ impl<E: Pairing> KZHK<E> {
     /// appending `(tau, h)` to the scalar/base inputs — avoiding the extra
     /// scalar multiplication and group addition that a post-hoc blinding
     /// would incur.
+    #[tracing::instrument(level = "debug", skip_all, name = "KZH::Commit-ZK")]
     fn commit_zk(
         prover_param: impl Borrow<KZHKProverParam<E>>,
         poly: &DenseOrSparseMLE<E::ScalarField>,
     ) -> Result<(KZHKCommitment<E>, KZHKState<E>), PCSError> {
-        let timer = start_timer!(|| "KZH::Commit-ZK");
         let pp: &KZHKProverParam<E> = prover_param.borrow();
         let tau = E::ScalarField::rand(&mut test_rng());
         let blinding = Some((tau, pp.get_h()));
@@ -326,41 +323,38 @@ impl<E: Pairing> KZHK<E> {
             DenseOrSparseMLE::Sparse(poly) => Self::commit_sparse_inner(pp, poly, blinding)?,
         };
         let result = Ok((com, KZHKState::new(Some(tau), None)));
-        end_timer!(timer);
         result
     }
 
     /// Plain KZH-k commitment `C = <f, H_1>` (Figure 14, Commit). The
     /// MSM is selected by polynomial representation (dense vs sparse).
+    #[tracing::instrument(level = "debug", skip_all, name = "KZH::Commit-Non-ZK")]
     fn commit_non_zk(
         prover_param: impl Borrow<KZHKProverParam<E>>,
         poly: &DenseOrSparseMLE<E::ScalarField>,
     ) -> Result<(KZHKCommitment<E>, KZHKState<E>), PCSError> {
-        let timer = start_timer!(|| "KZH::Commit-Non-ZK");
         let non_zk_com = match poly {
             DenseOrSparseMLE::Dense(poly) => Self::commit_dense_inner(prover_param, poly, None),
             DenseOrSparseMLE::Sparse(poly) => Self::commit_sparse_inner(prover_param, poly, None),
         };
         let result = Ok((non_zk_com.unwrap(), KZHKState::default()));
-        end_timer!(timer);
         result
     }
 
     /// Computes the Boolean auxiliary table of row-commitments and stores
     /// it in `state`. Used as backing store for the free-Boolean-opening
     /// shortcut (see [`KZHK::update_state`]).
+    #[tracing::instrument(level = "debug", skip_all, name = "KZH::CompAux")]
     fn update_state_inner(
         prover_param: impl Borrow<KZHKProverParam<E>>,
         polynomial: &DenseOrSparseMLE<E::ScalarField>,
         com: &KZHKCommitment<E>,
         state: &mut KZHKState<E>,
     ) -> Result<(), PCSError> {
-        let timer = start_timer!(|| "KZH::CompAux");
         let result = match polynomial {
             DenseOrSparseMLE::Dense(poly) => Self::update_state_dense(prover_param, poly, com, state),
             DenseOrSparseMLE::Sparse(poly) => Self::update_state_sparse(prover_param, poly, com, state),
         };
-        end_timer!(timer);
         result
     }
 
@@ -370,6 +364,7 @@ impl<E: Pairing> KZHK<E> {
     /// of four specialized implementations depending on whether the
     /// polynomial is dense/sparse and whether the point is Boolean
     /// (Boolean points trigger the free-opening shortcut).
+    #[tracing::instrument(level = "debug", skip_all, name = "KZH::Open-Non-ZK")]
     fn open_non_zk(
         prover_param: impl Borrow<KZHKProverParam<E>>,
         _commitment: &KZHKCommitment<E>,
@@ -377,7 +372,7 @@ impl<E: Pairing> KZHK<E> {
         point: &[E::ScalarField],
         state: &KZHKState<E>,
     ) -> Result<(KZHKOpeningProof<E>, E::ScalarField), PCSError> {
-        let timer = start_timer!(|| "KZH::Open-Non-ZK");
+        //TODO: Make the iters here parallel
         let is_boolean_point = point.iter().all(|&x| x.is_zero() || x.is_one());
         let result = match (is_boolean_point, polynomial) {
             (true, DenseOrSparseMLE::Dense(poly)) => {
@@ -393,7 +388,6 @@ impl<E: Pairing> KZHK<E> {
                 Self::open_sparse_non_bool_inner(prover_param, poly, point, state)
             },
         };
-        end_timer!(timer);
         result
     }
 
@@ -403,6 +397,7 @@ impl<E: Pairing> KZHK<E> {
     /// the non-hiding combination `alpha*f + r` at the challenge point,
     /// and sends `rho_prime = alpha*tau + rho` to derandomize the
     /// verifier's linearization.
+    #[tracing::instrument(level = "debug", skip_all, name = "KZH::Open-ZK")]
     fn open_zk(
         prover_param: impl Borrow<KZHKProverParam<E>>,
         commitment: &KZHKCommitment<E>,
@@ -411,7 +406,6 @@ impl<E: Pairing> KZHK<E> {
         state: &KZHKState<E>,
         _transcript: &mut IOPTranscript<E::ScalarField>,
     ) -> Result<(KZHKOpeningProof<E>, E::ScalarField), PCSError> {
-        let timer = start_timer!(|| "KZH::Open-ZK");
         let prover_param: &KZHKProverParam<E> = prover_param.borrow();
         // The zk path
         let (non_zk_opening, non_zk_value) =
@@ -423,14 +417,14 @@ impl<E: Pairing> KZHK<E> {
             &mut test_rng(),
         );
         let r_poly_wrapped = DenseOrSparseMLE::Sparse(r_poly.clone());
-        // Commit to the sparse masking polynomial r(X).
-        let (r_hide, r_aux) = Self::commit(prover_param, &r_poly_wrapped)?;
-        let rho = r_aux.get_tau();
-        // r is sparse with no Boolean auxiliary; pass a default state so the
-        // sparse non-Boolean opening path is used directly.
-        let dummy_state = KZHKState::default();
+        // Commit to the sparse masking polynomial r(X), then build its
+        // Boolean-opening state. The opening of r itself is plain (non-zk):
+        // r is the mask, it doesn't need to be re-masked.
+        let (r_hide, mut r_state) = Self::commit(prover_param, &r_poly_wrapped)?;
+        let rho = *r_state.get_tau();
+        Self::update_state(prover_param, &r_poly_wrapped, &r_hide, &mut r_state)?;
         let (r_opening, y_r) =
-            Self::open_sparse_non_bool_inner(prover_param, &r_poly, point, &dummy_state)?;
+            Self::open_non_zk(prover_param, &r_hide, &r_poly_wrapped, point, &r_state)?;
         // Sigma-protocol challenge (currently fixed to 1; a transcript-derived
         // Fiat-Shamir challenge would replace this in a production setting).
         let alpha = E::ScalarField::one();
@@ -443,7 +437,6 @@ impl<E: Pairing> KZHK<E> {
         output_opening.set_y_r(y_r);
         output_opening.set_rho_prime(rho_prime);
         let result = Ok((output_opening, non_zk_value));
-        end_timer!(timer);
         result
     }
 
@@ -499,6 +492,7 @@ impl<E: Pairing> KZHK<E> {
     /// `alpha*C_hide + R_hide - rho_prime*h` and the non-hiding value
     /// `alpha*y + y_r`, then delegates to [`Self::verify_non_zk`] on the
     /// linearized instance.
+    #[tracing::instrument(level = "debug", skip_all, name = "KZH::Verify-ZK")]
     fn verify_zk(
         verifier_param: &KZHKVerifierParam<E>,
         commitment: &KZHKCommitment<E>,
@@ -507,7 +501,6 @@ impl<E: Pairing> KZHK<E> {
         _state: Option<&KZHKState<E>>,
         proof: &KZHKOpeningProof<E>,
     ) -> Result<bool, PCSError> {
-        let timer = start_timer!(|| "KZH::Verify-ZK");
         let alpha = E::ScalarField::one();
         let c_lin = (commitment.get_commitment().into_group() * alpha
             + proof.get_r_hide().unwrap().get_commitment().into_group()
@@ -523,7 +516,6 @@ impl<E: Pairing> KZHK<E> {
             None,
             proof,
         );
-        end_timer!(timer);
         result
     }
 
@@ -534,6 +526,7 @@ impl<E: Pairing> KZHK<E> {
     ///    After passing, fold `C_j = <D_j, eq(point_j)>` for the next step.
     /// 2. Finally check `C_{k-1} = <f_{x_1..x_{k-1}}, H_k>` and that the
     ///    tail polynomial evaluates to `y` at `x_k`.
+    #[tracing::instrument(level = "debug", skip_all, name = "KZH::Verify-Non-ZK")]
     fn verify_non_zk(
         verifier_param: &KZHKVerifierParam<E>,
         commitment: &KZHKCommitment<E>,
@@ -542,11 +535,11 @@ impl<E: Pairing> KZHK<E> {
         _state: Option<&KZHKState<E>>,
         proof: &KZHKOpeningProof<E>,
     ) -> Result<bool, PCSError> {
-        let timer = start_timer!(|| "KZH::Verify-Non-ZK");
         let k = verifier_param.get_dimensions().len();
         let mut cj = commitment.get_commitment();
         let decomposed_point = KZHK::<E>::decompose_point(verifier_param.get_dimensions(), point);
-        let pairing_loop_timer = start_timer!(|| "KZH::Verify::PairingLoop");
+        let pairing_loop_span = tracing::debug_span!("KZH::Verify::PairingLoop");
+        let pairing_loop_guard = pairing_loop_span.enter();
 
         // TODO: See if it's worth it to randomely combine all multi-pairings
         for (j, point_part) in decomposed_point.iter().take(k - 1).enumerate() {
@@ -573,9 +566,10 @@ impl<E: Pairing> KZHK<E> {
             let eq_poly = build_eq_x_r(point_part).unwrap();
             cj = msm_wrapper_g1::<E>(&proof.get_d()[j], &eq_poly.evaluations).into_affine();
         }
-        end_timer!(pairing_loop_timer);
+        drop(pairing_loop_guard);
         // Checking c_{k-1}
-        let cj_check_timer = start_timer!(|| "KZH::Verify::CJCheck");
+        let cj_check_span = tracing::debug_span!("KZH::Verify::CJCheck");
+        let cj_check_guard = cj_check_span.enter();
         let alleged_last_cj = E::G1::msm(
             verifier_param
                 .get_h_tensor()
@@ -586,9 +580,10 @@ impl<E: Pairing> KZHK<E> {
         .unwrap()
         .into_affine();
         assert_eq!(cj, alleged_last_cj);
-        end_timer!(cj_check_timer);
+        drop(cj_check_guard);
         // Evaluation Check
-        let eval_check_timer = start_timer!(|| "KZH::Verify::EvalCheck");
+        let eval_check_span = tracing::debug_span!("KZH::Verify::EvalCheck");
+        let eval_check_guard = eval_check_span.enter();
         let _p = match proof.get_f() {
             DenseOrSparseMLE::Dense(f) => {
                 fix_last_variables(f, &decomposed_point[k - 1])[0] == *value
@@ -597,8 +592,7 @@ impl<E: Pairing> KZHK<E> {
                 fix_last_variables_sparse(f, &decomposed_point[k - 1])[0] == *value
             },
         };
-        end_timer!(eval_check_timer);
-        end_timer!(timer);
+        drop(eval_check_guard);
         Ok(true)
     }
 
@@ -638,12 +632,12 @@ impl<E: Pairing> KZHK<E> {
     /// inputs so the returned commitment is `C + tau*h` (Appendix D). This
     /// folds the hiding factor into the single MSM rather than performing
     /// a separate scalar multiplication.
+    #[tracing::instrument(level = "debug", skip_all, name = "KZH::Commit_Dense")]
     fn commit_dense_inner(
         prover_param: impl Borrow<KZHKProverParam<E>>,
         poly: &DenseMultilinearExtension<E::ScalarField>,
         blinding: Option<(E::ScalarField, E::G1Affine)>,
     ) -> Result<KZHKCommitment<E>, PCSError> {
-        let commit_timer = start_timer!(|| "KZH::Commit_Dense");
         let prover_param: &KZHKProverParam<E> = prover_param.borrow();
         let h_bases = prover_param.get_h_tensors()[0]
             .as_slice_memory_order()
@@ -659,7 +653,6 @@ impl<E: Pairing> KZHK<E> {
         } else {
             msm_wrapper_g1::<E>(h_bases, &poly.evaluations)
         };
-        end_timer!(commit_timer);
         Ok(KZHKCommitment::new(com.into(), poly.num_vars()))
     }
 
@@ -670,12 +663,12 @@ impl<E: Pairing> KZHK<E> {
     ///
     /// When `blinding = Some((tau, h))`, `(tau, h)` is appended to the
     /// MSM so the returned commitment is `C + tau*h` (Appendix D).
+    #[tracing::instrument(level = "debug", skip_all, name = "KZH::Commit_Sparse")]
     fn commit_sparse_inner(
         prover_param: impl Borrow<KZHKProverParam<E>>,
         sparse_poly: &SparseMultilinearExtension<E::ScalarField>,
         blinding: Option<(E::ScalarField, E::G1Affine)>,
     ) -> Result<KZHKCommitment<E>, PCSError> {
-        let commit_timer = start_timer!(|| "KZH::Commit_Sparse");
         let prover_param: &KZHKProverParam<E> = prover_param.borrow();
         let h_mat = prover_param.get_h_tensors()[0]
             .as_slice_memory_order()
@@ -693,7 +686,6 @@ impl<E: Pairing> KZHK<E> {
             scalars.push(tau);
         }
         let com = msm_wrapper_g1::<E>(&bases, &scalars);
-        end_timer!(commit_timer);
         Ok(KZHKCommitment::new(
             com.into_affine(),
             sparse_poly.num_vars(),
@@ -705,13 +697,13 @@ impl<E: Pairing> KZHK<E> {
     /// `aux_{b_1,...,b_j} = <f(b_1,...,b_j, X_{j+1},...), H_{j+1}>` by
     /// splitting the dense evaluation table into contiguous chunks and
     /// running one MSM per chunk.
+    #[tracing::instrument(level = "debug", skip_all, name = "KZH::CompAux_Dense")]
     fn update_state_dense(
         prover_param: impl Borrow<KZHKProverParam<E>>,
         polynomial: &DenseMultilinearExtension<E::ScalarField>,
         _com: &KZHKCommitment<E>,
         state: &mut KZHKState<E>,
     ) -> Result<(), PCSError> {
-        let timer = start_timer!(|| "KZH::CompAux_Dense");
         let prover_param: &KZHKProverParam<E> = prover_param.borrow();
         let dimensions = prover_param.get_dimensions();
         let k = dimensions.len();
@@ -746,20 +738,19 @@ impl<E: Pairing> KZHK<E> {
             d_bool.push(d_j);
         }
         state.set_d_bool(d_bool);
-        end_timer!(timer);
         Ok(())
     }
 
     /// Sparse counterpart of [`Self::update_state_dense`]: exploits the
     /// sparse coefficient map so that each per-chunk MSM sees only the
     /// non-zero entries falling in its Boolean window.
+    #[tracing::instrument(level = "debug", skip_all, name = "KZH::CompAux_Sparse")]
     fn update_state_sparse(
         prover_param: impl Borrow<KZHKProverParam<E>>,
         polynomial: &SparseMultilinearExtension<E::ScalarField>,
         _com: &KZHKCommitment<E>,
         state: &mut KZHKState<E>,
     ) -> Result<(), PCSError> {
-        let timer = start_timer!(|| "KZH::CompAux_Sparse");
         let prover_param: &KZHKProverParam<E> = prover_param.borrow();
         let dimensions = prover_param.get_dimensions();
         let k = dimensions.len();
@@ -818,7 +809,6 @@ impl<E: Pairing> KZHK<E> {
         };
 
         state.set_d_bool(d_bool);
-        end_timer!(timer);
         Ok(())
     }
 
@@ -826,13 +816,13 @@ impl<E: Pairing> KZHK<E> {
     /// commits `f`'s current dense partial-evaluation table chunk-wise
     /// against `H_{j+1}` to produce `D_j`, then reduces the polynomial
     /// by `fix_last_variables` on block `j`.
+    #[tracing::instrument(level = "debug", skip_all, name = "KZH::Open_Dense")]
     fn open_dense_non_bool_inner(
         prover_param: impl Borrow<KZHKProverParam<E>>,
         polynomial: &DenseMultilinearExtension<E::ScalarField>,
         point: &[E::ScalarField],
         _state: &KZHKState<E>,
     ) -> Result<(KZHKOpeningProof<E>, E::ScalarField), PCSError> {
-        let timer = start_timer!(|| "KZH::Open_Dense");
         let prover_param: &KZHKProverParam<E> = prover_param.borrow();
         let mut d = Vec::new();
         let k = prover_param.get_dimensions().len();
@@ -862,7 +852,6 @@ impl<E: Pairing> KZHK<E> {
         }
         let f = DenseOrSparseMLE::Dense(partial_polynomial.clone());
         let eval = fix_last_variables(&partial_polynomial, &decomposed_point[k - 1])[0];
-        end_timer!(timer);
         Ok((KZHKOpeningProof::new(d, f, None, None, None), eval))
     }
 
@@ -870,13 +859,13 @@ impl<E: Pairing> KZHK<E> {
     /// point is Boolean, each `D_j` is a contiguous slice of the
     /// precomputed auxiliary table `aux_d_bool[j]` — no group
     /// operations are needed, only indexing.
+    #[tracing::instrument(level = "debug", skip_all, name = "KZH::Open_Dense_Boolean")]
     fn open_dense_bool_inner(
         prover_param: impl Borrow<KZHKProverParam<E>>,
         polynomial: &DenseMultilinearExtension<E::ScalarField>,
         point: &[E::ScalarField],
         state: &KZHKState<E>,
     ) -> Result<(KZHKOpeningProof<E>, E::ScalarField), PCSError> {
-        let timer = start_timer!(|| "KZH::Open_Dense_Boolean");
         let prover_param: &KZHKProverParam<E> = prover_param.borrow();
 
         let aux_d_bool = state.get_d_bool();
@@ -918,19 +907,18 @@ impl<E: Pairing> KZHK<E> {
         let f = DenseOrSparseMLE::Dense(partial_polynomial.clone());
         let eval = fix_last_variables_boolean(&partial_polynomial, &decomposed_point[k - 1])[0];
 
-        end_timer!(timer);
         Ok((KZHKOpeningProof::new(d, f, None, None, None), eval))
     }
     /// Sparse non-Boolean opening: same level structure as the dense
     /// variant but each per-chunk MSM only sees the non-zero entries
     /// of the current sparse partial polynomial within that window.
+    #[tracing::instrument(level = "debug", skip_all, name = "KZH::Open_Sparse")]
     fn open_sparse_non_bool_inner(
         prover_param: impl Borrow<KZHKProverParam<E>>,
         polynomial: &SparseMultilinearExtension<E::ScalarField>,
         point: &[E::ScalarField],
         _state: &KZHKState<E>,
     ) -> Result<(KZHKOpeningProof<E>, E::ScalarField), PCSError> {
-        let timer = start_timer!(|| "KZH::Open_Sparse");
         let prover_param: &KZHKProverParam<E> = prover_param.borrow();
         let mut d = Vec::new();
         let k = prover_param.get_dimensions().len();
@@ -978,20 +966,19 @@ impl<E: Pairing> KZHK<E> {
 
         let f = DenseOrSparseMLE::Sparse(partial_polynomial.clone());
         let eval = fix_last_variables_sparse(&partial_polynomial, &decomposed_point[k - 1])[0];
-        end_timer!(timer);
         Ok((KZHKOpeningProof::new(d, f, None, None, None), eval))
     }
 
     /// Sparse Boolean opening: sparse analogue of
     /// [`Self::open_dense_bool_inner`] — `D_j` is read directly from the
     /// auxiliary table, no cryptographic work per level.
+    #[tracing::instrument(level = "debug", skip_all, name = "KZH::Open_Sparse_Boolean")]
     fn open_sparse_bool_inner(
         prover_param: impl Borrow<KZHKProverParam<E>>,
         polynomial: &SparseMultilinearExtension<E::ScalarField>,
         point: &[E::ScalarField],
         state: &KZHKState<E>,
     ) -> Result<(KZHKOpeningProof<E>, E::ScalarField), PCSError> {
-        let timer = start_timer!(|| "KZH::Open_Sparse_Boolean");
         let prover_param: &KZHKProverParam<E> = prover_param.borrow();
         let dims = prover_param.get_dimensions();
         let k = dims.len();
@@ -1032,7 +1019,6 @@ impl<E: Pairing> KZHK<E> {
         let eval =
             fix_last_variables_boolean_sparse(&partial_polynomial, &decomposed_point[k - 1])[0];
 
-        end_timer!(timer);
         Ok((KZHKOpeningProof::new(d, f, None, None, None), eval))
     }
 

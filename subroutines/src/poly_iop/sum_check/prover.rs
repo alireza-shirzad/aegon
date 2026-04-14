@@ -16,7 +16,7 @@ use arithmetic::{
 };
 use ark_ff::{batch_inversion, PrimeField};
 use ark_poly::DenseMultilinearExtension;
-use ark_std::{cfg_into_iter, cfg_iter, end_timer, start_timer, vec::Vec};
+use ark_std::{cfg_into_iter, cfg_iter, vec::Vec};
 #[cfg(feature = "parallel")]
 use rayon::iter::{IntoParallelRefMutIterator, ParallelIterator};
 #[cfg(feature = "parallel")]
@@ -29,14 +29,13 @@ impl<F: PrimeField> SumCheckProver<F> for IOPProverState<F> {
 
     /// Initialize the prover state to argue for the sum of the input polynomial
     /// over {0,1}^`num_vars`.
+    #[tracing::instrument(level = "debug", skip_all, name = "sum check prover init")]
     fn prover_init(polynomial: Self::VirtualPolynomial) -> Result<Self, PolyIOPErrors> {
-        let start = start_timer!(|| "sum check prover init");
         if polynomial.aux_info.num_variables == 0 {
             return Err(PolyIOPErrors::InvalidParameters(
                 "Attempt to prove a constant.".to_string(),
             ));
         }
-        end_timer!(start);
 
         Ok(Self {
             challenges: Vec::with_capacity(polynomial.aux_info.num_variables),

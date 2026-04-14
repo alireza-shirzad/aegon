@@ -18,7 +18,7 @@ use crate::{
 };
 use ark_ec::{pairing::Pairing, scalar_mul::BatchMulPreprocessing, CurveGroup};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
-use ark_std::{end_timer, rand::Rng, start_timer, One, UniformRand};
+use ark_std::{rand::Rng, One, UniformRand};
 use ndarray::{ArrayD, IxDyn};
 use num_bigint::BigUint;
 use num_traits::ToPrimitive;
@@ -312,7 +312,8 @@ impl<E: Pairing> StructuredReferenceString<E> for KZHKUniversalParams<E> {
         let dimensions_arc = Arc::new(dimensions.clone());
 
         // ---------- Build H_t tensors (outer sequential to bound RAM) ----------
-        let h_tenso_timer = start_timer!(|| "KZHK::gen_srs_for_testing::h_tensors");
+        let h_tenso_span = tracing::debug_span!("KZHK::gen_srs_for_testing::h_tensors");
+        let h_tenso_guard = h_tenso_span.enter();
         let mut h_tensors: Vec<Tensor<E::G1Affine>> = Vec::with_capacity(k);
 
         for t in 0..k {
@@ -376,11 +377,12 @@ impl<E: Pairing> StructuredReferenceString<E> for KZHKUniversalParams<E> {
         }
 
         let h_tensors = Arc::new(h_tensors);
-        end_timer!(h_tenso_timer);
+        drop(h_tenso_guard);
 
         // ---------- Build v_mat (parallel per j), also via BatchMulPreprocessing
         // ----------
-        let v_mat_timer = start_timer!(|| "KZHK::gen_srs_for_testing::v_mat");
+        let v_mat_span = tracing::debug_span!("KZHK::gen_srs_for_testing::v_mat");
+        let v_mat_guard = v_mat_span.enter();
 
         let v_mat: Vec<Vec<<E as Pairing>::G2Prepared>> = {
             #[cfg(feature = "parallel")]
@@ -413,8 +415,8 @@ impl<E: Pairing> StructuredReferenceString<E> for KZHKUniversalParams<E> {
         };
 
         let v_mat = Arc::new(v_mat);
-        end_timer!(v_mat_timer);
-        
+        drop(v_mat_guard);
+       //TODO: Double check if k is multiplied here 
         let hiding_sparsity = if zk {
             Some(ceil_k_root_scaled(1u128 << num_vars, k as u32) as usize)
         } else {

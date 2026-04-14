@@ -12,7 +12,6 @@ use crate::poly_iop::{errors::PolyIOPErrors, sum_check::SumCheck, PolyIOP};
 use arithmetic::virtual_polynomial::eq_eval;
 use ark_ff::PrimeField;
 use ark_serialize::CanonicalSerialize;
-use ark_std::{end_timer, start_timer};
 use transcript::IOPTranscript;
 
 /// A zero check IOP subclaim for `f(x)` consists of the following:
@@ -67,27 +66,25 @@ impl<F: PrimeField> ZeroCheck<F> for PolyIOP<F> {
         IOPTranscript::<F>::new(b"Initializing ZeroCheck transcript")
     }
 
+    #[tracing::instrument(level = "debug", skip_all, name = "zero check prove")]
     fn prove(
         poly: &Self::VirtualPolynomial,
         transcript: &mut Self::Transcript,
     ) -> Result<Self::ZeroCheckProof, PolyIOPErrors> {
-        let start = start_timer!(|| "zero check prove");
         let length = poly.aux_info.num_variables;
         let r = transcript.get_and_append_challenge_vectors(b"0check r", length)?;
         let f_hat = poly.build_f_hat(r.as_ref())?;
         let res = <Self as SumCheck<F>>::prove(f_hat, transcript);
 
-        end_timer!(start);
         res
     }
 
+    #[tracing::instrument(level = "debug", skip_all, name = "zero check verify")]
     fn verify(
         proof: &Self::ZeroCheckProof,
         fx_aux_info: &Self::VPAuxInfo,
         transcript: &mut Self::Transcript,
     ) -> Result<Self::ZeroCheckSubClaim, PolyIOPErrors> {
-        let start = start_timer!(|| "zero check verify");
-
         // check that the sum is zero
         if proof.proofs[0].evaluations[0] + proof.proofs[0].evaluations[1] != F::zero() {
             return Err(PolyIOPErrors::InvalidProof(format!(
@@ -111,7 +108,6 @@ impl<F: PrimeField> ZeroCheck<F> for PolyIOP<F> {
         let eq_x_r_eval = eq_eval(&sum_subclaim.point, &r)?;
         let expected_evaluation = sum_subclaim.expected_evaluation / eq_x_r_eval;
 
-        end_timer!(start);
         Ok(ZeroCheckSubClaim {
             point: sum_subclaim.point,
             expected_evaluation,

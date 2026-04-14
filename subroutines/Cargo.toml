@@ -24,6 +24,16 @@ num-bigint = { workspace = true }
 num-traits = { workspace = true }
 once_cell = { workspace = true }
 smallvec = "1.13"
+tracing = { workspace = true }
+
+[dev-dependencies]
+divan = "0.1"
+util = { path = "../util", features = ["tracing"] }
+
+[[bench]]
+name = "kzhk"
+harness = false
+
 [features]
 parallel = [
     "rayon",
