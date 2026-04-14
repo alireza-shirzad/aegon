@@ -31,7 +31,7 @@ pub trait PolynomialCommitmentScheme<E: Pairing> {
         + Sync;
     type Proof: Clone + CanonicalSerialize + CanonicalDeserialize + Debug + PartialEq + Eq;
     type BatchProof: CanonicalSerialize + CanonicalDeserialize + Clone + Debug + Eq;
-    type Aux: Clone
+    type State: Clone
         + CanonicalSerialize
         + CanonicalDeserialize
         + Debug
@@ -42,10 +42,9 @@ pub trait PolynomialCommitmentScheme<E: Pairing> {
         + Sync;
 
     fn gen_srs_for_testing<R: Rng>(
-        conf: Option<Self::Config>,
+        conf: Self::Config,
         rng: &mut R,
         supported_size: usize,
-        zk: bool,
     ) -> Result<Self::SRS, PCSError>;
 
     fn trim(
@@ -57,13 +56,13 @@ pub trait PolynomialCommitmentScheme<E: Pairing> {
     fn commit(
         prover_param: impl Borrow<Self::ProverParam>,
         poly: &Self::Polynomial,
-    ) -> Result<(Self::Commitment, Self::Aux), PCSError>;
+    ) -> Result<(Self::Commitment, Self::State), PCSError>;
 
-    fn update_aux(
+    fn update_state(
         prover_param: impl Borrow<Self::ProverParam>,
         polynomial: &Self::Polynomial,
         com: &Self::Commitment,
-        aux: &mut Self::Aux,
+        state: &mut Self::State,
     ) -> Result<(), PCSError> {
         unimplemented!()
     }
@@ -73,7 +72,7 @@ pub trait PolynomialCommitmentScheme<E: Pairing> {
         commitment: &Self::Commitment,
         polynomial: &Self::Polynomial,
         point: &Self::Point,
-        aux: &Self::Aux,
+        state: &Self::State,
         _transcript: &mut IOPTranscript<E::ScalarField>,
     ) -> Result<(Self::Proof, Self::Evaluation), PCSError>;
 
@@ -82,7 +81,7 @@ pub trait PolynomialCommitmentScheme<E: Pairing> {
         commitment: &Self::Commitment,
         _polynomials: &[&Self::Polynomial],
         _point: &Self::Point,
-        _auxes: &[Self::Aux],
+        _states: &[Self::State],
         _transcript: &mut IOPTranscript<E::ScalarField>,
     ) -> Result<(Self::BatchProof, Self::Evaluation), PCSError> {
         unimplemented!()
@@ -100,7 +99,7 @@ pub trait PolynomialCommitmentScheme<E: Pairing> {
     fn batch_verify(
         _verifier_param: &Self::VerifierParam,
         _commitments: &[Self::Commitment],
-        _auxs: Option<&[Self::Aux]>,
+        _states: Option<&[Self::State]>,
         _point: &Self::Point,
         _values: &[E::ScalarField],
         _batch_proof: &Self::BatchProof,

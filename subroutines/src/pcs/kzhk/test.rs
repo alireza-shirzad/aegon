@@ -1,4 +1,5 @@
 use super::*;
+use crate::pcs::kzhk::structs::KZHKConfig;
 use ark_bn254::{Bn254 as E, Fr};
 use ark_std::{test_rng, vec::Vec, UniformRand};
 
@@ -16,7 +17,7 @@ fn test_single_helper(
         DenseOrSparseMLE::Dense(DenseMultilinearExtension::<Fr>::rand(nv, &mut rng))
     };
     let mut prover_transcript = IOPTranscript::new(b"test_kzhk");
-    let params = KZHK::<E>::gen_srs_for_testing(Some(k), &mut rng, nv, zk)?;
+    let params = KZHK::<E>::gen_srs_for_testing(KZHKConfig::new(k, zk), &mut rng, nv)?;
     let (ck, vk) = KZHK::trim(params, None, Some(nv))?;
     let point = match is_boolean {
         true => (0..nv)
@@ -24,14 +25,14 @@ fn test_single_helper(
             .collect::<Vec<_>>(),
         false => (0..nv).map(|_| Fr::rand(&mut rng)).collect::<Vec<_>>(),
     };
-    let (com, mut aux) = KZHK::<E>::commit(&ck, &poly)?;
-    KZHK::<E>::update_aux(&ck, &poly, &com, &mut aux)?;
+    let (com, mut state) = KZHK::<E>::commit(&ck, &poly)?;
+    KZHK::<E>::update_state(&ck, &poly, &com, &mut state)?;
     let (proof, value) = KZHK::<E>::open(
         &ck,
         &com,
         &poly,
         &point,
-        &aux,
+        &state,
         &mut prover_transcript,
     )?;
     let mut verif_transcript = IOPTranscript::new(b"test_kzhk");

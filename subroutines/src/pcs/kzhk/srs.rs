@@ -1,46 +1,56 @@
+//! KZH-k structured reference string (SRS).
+//!
+//! Implements the setup described in Figure 14 of ePrint 2025/1580: for
+//! each block `j in [k]` the setup samples a vector of trapdoors
+//! `mu_{b,j}` indexed by `b in {0,1}^{d_j}`, then forms the `G1` tensors
+//! `H_t[b_t, ..., b_k] = g^{prod_{j=t}^{k} mu_{b_j, j}}` for `t = 1..k`
+//! (with the full-product tensor `H_1` used for commitments and the
+//! partial-product tensors `H_2..H_k` used for opening), and the `G2`
+//! side elements `V_{b,j} = v^{mu_{b,j}}` used for the per-level pairing
+//! checks in verification. The optional `hiding_sparsity` records the
+//! Appendix-D sparse-masking parameter `k * N^{1/k}` for zk openings.
+
 use std::sync::Arc;
 
 use crate::{
-    cfg_for_each_with_scratch,
     pcs::{kzhk::structs::Tensor, PCSGlobalParam},
     PCSError, StructuredReferenceString,
 };
-use ark_ec::{
-    pairing::Pairing, scalar_mul::BatchMulPreprocessing, AffineRepr, CurveGroup, PrimeGroup,
-};
-use ark_ff::PrimeField;
+use ark_ec::{pairing::Pairing, scalar_mul::BatchMulPreprocessing, CurveGroup};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
-use ark_std::{cfg_into_iter, cfg_iter_mut, end_timer, rand::Rng, start_timer, One, UniformRand};
+use ark_std::{end_timer, rand::Rng, start_timer, One, UniformRand};
 use ndarray::{ArrayD, IxDyn};
 use num_bigint::BigUint;
 use num_traits::ToPrimitive;
 #[cfg(feature = "parallel")]
-use rayon::{
-    iter::{
-        IndexedParallelIterator, IntoParallelIterator, IntoParallelRefIterator,
-        IntoParallelRefMutIterator, ParallelIterator,
-    },
-    vec,
-};
-/// Universal Parameter
+use rayon::iter::{IntoParallelIterator, ParallelIterator};
+
+/// Universal parameters for KZH-k.
+///
+/// Fields correspond to the SRS described in Figure 14 / Appendix E:
+///
+/// - `dimensions` = `[d_1, ..., d_k]`, the block sizes. Their sum is
+///   `log_2 N`, the total number of variables.
+/// - `h_tensors` = `[H_1, H_2, ..., H_k]`: for each `t`, `H_t` is the
+///   `(d_t + d_{t+1} + ... + d_k)`-dimensional `G1` tensor whose entry
+///   at index `(b_t, ..., b_k)` is `g` raised to the product of the
+///   corresponding trapdoors. `H_1` is used for commitments; `H_t` for
+///   `t > 1` is used to commit to partial evaluations during opening.
+/// - `v_mat` = `V_{b,j}` for `j in [k]`, `b in {0,1}^{d_j}`: the `G2`-side
+///   powers `v^{mu_{b,j}}` preprocessed for pairings.
+/// - `v`, `g`: `G2` and `G1` generators used during setup.
+/// - `h`: independent `G1` generator with unknown discrete log with
+///   respect to `g` used as the hiding base for Appendix-D blinding.
+/// - `hiding_sparsity`: `Some(k * N^{1/k})` for zk SRS (drives the sparse
+///   masking polynomial size from Lemmas 4 and 5); `None` for plain KZH-k.
 #[derive(CanonicalSerialize, CanonicalDeserialize, Clone, Debug)]
 pub struct KZHKUniversalParams<E: Pairing> {
-    // A vector of size k representing the dimensions of the tensor
-    // In case of k=2, the dimensions would be [nu, mu]
-    // Also, the product of the dimensions would be N: the total number of elements in the tensor
-    // (the size of polynomial)
     dimensions: Vec<usize>,
-    // h_tensors = [H1,H2,...,Hk]
     h_tensors: Arc<Vec<Tensor<E::G1Affine>>>,
-    // Vij: i\in[d], j\in[k]
     v_mat: Arc<Vec<Vec<E::G2Prepared>>>,
-    // -V : The inverse of the G2 generator
     v: E::G2Affine,
-    // G : The G1 generator
     g: E::G1Affine,
-    // h: Another G1 generator
     h: E::G1Affine,
-    // hiding_sparsity
     hiding_sparsity: Option<usize>,
 }
 
@@ -99,7 +109,10 @@ impl<E: Pairing> KZHKUniversalParams<E> {
     }
 }
 
-/// Prover Parameters
+/// Prover parameters: the subset of the universal SRS needed to commit,
+/// update auxiliaries, and open. Mirrors the notation of Figure 14:
+/// keeps all `H_t` tensors and `v_mat`, plus the hiding base `h` and
+/// the optional sparsity for the zk masking polynomial.
 #[derive(CanonicalSerialize, CanonicalDeserialize, Clone, Debug)]
 pub struct KZHKProverParam<E: Pairing> {
     dimensions: Vec<usize>,
@@ -151,7 +164,15 @@ impl<E: Pairing> PCSGlobalParam for KZHKVerifierParam<E> {
         self.hiding_sparsity.is_some()
     }
 }
-/// Verifier Parameters
+/// Verifier parameters: the small projection of the universal SRS the
+/// verifier needs.
+///
+/// Keeps only `H_k` (the innermost tensor, used to check the final
+/// commitment against the tail polynomial), the prepared `v_mat` used
+/// in the per-level pairing equations, the hiding base `h`, and
+/// `minus_v = -v` which is cached to rewrite the per-level check
+/// `e(C_{j-1}, V) = prod_b e(D_{j,b}, V_{b,j})` as a single multi-pairing
+/// that must equal 1.
 #[derive(CanonicalSerialize, CanonicalDeserialize, Clone, Debug)]
 pub struct KZHKVerifierParam<E: Pairing> {
     dimensions: Vec<usize>,
@@ -250,6 +271,15 @@ impl<E: Pairing> StructuredReferenceString<E> for KZHKUniversalParams<E> {
         ))
     }
 
+    /// Samples a fresh KZH-k SRS supporting polynomials in `num_vars`
+    /// variables split into `k` blocks. Implements the setup procedure
+    /// of Figure 14: samples fresh trapdoors `{mu_{b,j}}`, builds the
+    /// tensor family `H_1..H_k` by expanding products of trapdoors and
+    /// performing a batched scalar multiplication against `g`, and
+    /// builds `v_mat` by batched scalar multiplication against `v`.
+    /// When `zk` is set, additionally records
+    /// `hiding_sparsity = ceil(k * N^{1/k})` as prescribed by
+    /// Lemmas 4 and 5 of Appendix D for the sparse masking polynomial.
     fn gen_srs_for_testing<R: Rng>(
         rng: &mut R,
         k: usize,
@@ -403,43 +433,35 @@ impl<E: Pairing> StructuredReferenceString<E> for KZHKUniversalParams<E> {
     }
 }
 
-// Helper: mixed-radix decode of a flat index into coordinates (C-order).
-#[inline]
-fn decode_coords(mut idx: usize, bases: &[usize], out_coords: &mut Vec<usize>) {
-    // C-order (row-major): last axis varies fastest.
-    out_coords.clear();
-    out_coords.reserve_exact(bases.len());
-    for &base in bases.iter().rev() {
-        let c = idx % base;
-        idx /= base;
-        out_coords.push(c);
-    }
-    out_coords.reverse();
-}
-/// ceil( k * N^{1/k} ) exactly (no floating-point).
-pub fn ceil_k_root_scaled(N: u128, k: u32) -> u128 {
+/// Computes `ceil(k * n^{1/k})` exactly in integer arithmetic.
+///
+/// Used to size the sparse masking polynomial in the zk variant
+/// (Appendix D, Lemmas 4 and 5): the number of non-zero coefficients
+/// needed for hiding is `k * N^{1/k}` and this helper rounds up without
+/// resorting to floating-point roots.
+pub fn ceil_k_root_scaled(n: u128, k: u32) -> u128 {
     debug_assert!(k > 0, "k must be >= 1");
-    if N == 0 {
+    if n == 0 {
         return 0;
     }
     if k == 1 {
-        return N;
+        return n;
     }
 
-    // Floor k-th root of N (u128), by integer binary search.
-    let r_floor = kth_root_floor_u128(N, k);
+    // Floor k-th root of n (u128), by integer binary search.
+    let r_floor = kth_root_floor_u128(n, k);
 
     // Search m in [k*r_floor, k*(r_floor+1)] s.t. m is the smallest with (m/k)^k >=
-    // N. Equivalently: m^k >= N * k^k.
-    let lo = (r_floor as u128).saturating_mul(k as u128);
+    // n. Equivalently: m^k >= n * k^k.
+    let lo = (r_floor).saturating_mul(k as u128);
     let hi = ((r_floor + 1) as u128).saturating_mul(k as u128);
 
-    let target = BigUint::from(N) * pow_big(&BigUint::from(k as u128), k);
+    let target = BigUint::from(n) * pow_big(&BigUint::from(k as u128), k);
     let mut l = BigUint::from(lo);
     let mut r = BigUint::from(hi);
     let one = BigUint::one();
 
-    while &l < &r {
+    while l < r {
         let mid = (&l + &r) >> 1; // integer mid
         let lhs = pow_big(&mid, k); // mid^k
         if lhs >= target {
@@ -451,18 +473,18 @@ pub fn ceil_k_root_scaled(N: u128, k: u32) -> u128 {
     l.to_u128().expect("result does not fit in u128")
 }
 
-/// floor( N^{1/k} ) for u128 by binary search.
-fn kth_root_floor_u128(N: u128, k: u32) -> u128 {
-    if N <= 1 {
-        return N;
+/// `floor(n^{1/k})` for `u128` via binary search.
+fn kth_root_floor_u128(n: u128, k: u32) -> u128 {
+    if n <= 1 {
+        return n;
     }
     let mut lo: u128 = 1;
-    let mut hi: u128 = N; // 128 iterations worst-case
+    let mut hi: u128 = n; // 128 iterations worst-case
 
     let mut ans = 1;
     while lo <= hi {
         let mid = lo + ((hi - lo) >> 1);
-        if pow_le_u128(mid, k, N) {
+        if pow_le_u128(mid, k, n) {
             ans = mid;
             lo = mid + 1;
         } else {
@@ -472,8 +494,8 @@ fn kth_root_floor_u128(N: u128, k: u32) -> u128 {
     ans
 }
 
-/// Returns true iff x^k <= n, computed without overflow (early exit).
-fn pow_le_u128(mut x: u128, k: u32, n: u128) -> bool {
+/// Returns true iff `x^k <= n`, computed without overflow (early exit).
+fn pow_le_u128(x: u128, k: u32, n: u128) -> bool {
     if k == 0 {
         return 1 <= n;
     }

@@ -13,6 +13,9 @@ use rayon::ThreadPoolBuilder;
 // Public API (G1 / G2)
 // ===============================
 
+/// MSM in `G1` sized by input length. One-element inputs use a direct
+/// scalar multiplication; larger inputs fall back to arkworks'
+/// variable-base MSM, optionally inside a sized rayon pool.
 pub fn msm_wrapper_g1<E: Pairing>(
     bases: &[<E::G1 as CurveGroup>::Affine],
     scalars: &[E::ScalarField],
@@ -24,6 +27,9 @@ where
     msm_wrapper_affine::<E, <E::G1 as CurveGroup>::Affine>(bases, scalars)
 }
 
+/// `G2` counterpart of [`msm_wrapper_g1`]. KZH-k currently performs most
+/// multi-scalar multiplications in `G1`; this entry point exists for
+/// symmetry and for any future `G2`-side aggregations.
 pub fn msm_wrapper_g2<E: Pairing>(
     bases: &[<E::G2 as CurveGroup>::Affine],
     scalars: &[E::ScalarField],

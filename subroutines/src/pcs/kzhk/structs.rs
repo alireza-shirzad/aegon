@@ -14,6 +14,28 @@ use rayon::iter::{
     IntoParallelRefMutIterator, ParallelIterator,
 };
 use std::ops::{Add, Deref, DerefMut};
+
+/// Configuration for the KZH-k scheme.
+///
+/// - `k`: number of blocks the polynomial variables are split across
+///   (see the module-level docs in `mod.rs` for the proof-size/cost
+///   trade-off).
+/// - `zk`: whether to instantiate the hiding/zero-knowledge variant
+///   from Appendix D. When `false`, the plain KZH-k of Figure 14 is
+///   used.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct KZHKConfig {
+    pub k: usize,
+    pub zk: bool,
+}
+
+impl KZHKConfig {
+    /// Constructs a new configuration with the given `k` and zk flag.
+    pub fn new(k: usize, zk: bool) -> Self {
+        Self { k, zk }
+    }
+}
+
 ///////////////// Commitment //////////////////////
 
 #[derive(Derivative, CanonicalSerialize, CanonicalDeserialize)]
@@ -26,9 +48,14 @@ use std::ops::{Add, Deref, DerefMut};
     PartialEq(bound = ""),
     Eq(bound = "")
 )]
-/// A commitment is an Affine point.
+/// A KZH-k commitment `C = <f, H_1>` (Figure 14, Commit), or its
+/// hiding variant `C + tau*h` (Appendix D) when the SRS is zk.
+///
+/// - `com`: the `G1` group element itself.
+/// - `nv`: the number of variables of the committed polynomial,
+///   retained so that addition of commitments can sanity-check
+///   compatibility.
 pub struct KZHKCommitment<E: Pairing> {
-    /// the actual commitment is an affine point.
     com: E::G1Affine,
     nv: usize,
 }
@@ -87,26 +114,38 @@ impl<E: Pairing> KZHKCommitment<E> {
     }
 }
 
-////////////// Auxiliary information /////////////////
+////////////// Prover state /////////////////
 
+/// Prover-side state attached to a commitment.
+///
+/// - `d_bool`: the table of precomputed row-commitments
+///   `aux_{b_1,...,b_j} = <f(b_1,...,b_j, X_{j+1},...), H_{j+1}>`
+///   for levels `j = 1..k-1` (Figure 14). Each inner `Vec` holds
+///   the `2^{d_1+...+d_j}` auxiliary group elements for level `j`
+///   in little-endian ordering. This table powers the free Boolean
+///   opening: when the query point is Boolean, the level-`j` proof
+///   vector `D_j` is a contiguous slice of `d_bool[j]`.
+/// - `tau`: the hiding scalar sampled by [`crate::pcs::kzhk::KZHK::commit`]
+///   when the SRS is zk (Appendix D). Retained so the prover can
+///   derandomize during opening.
 #[derive(Debug, Derivative, CanonicalSerialize, CanonicalDeserialize, Clone, PartialEq, Eq)]
-pub struct KZHKAuxInfo<E: Pairing> {
+pub struct KZHKState<E: Pairing> {
     tau: Option<E::ScalarField>,
     d_bool: Option<Vec<Vec<E::G1Affine>>>,
 }
 
-impl<E: Pairing> KZHKAuxInfo<E> {
-    /// Create a new auxiliary information
+impl<E: Pairing> KZHKState<E> {
+    /// Create a new prover state.
     pub fn new(tau: Option<E::ScalarField>, d_bool: Option<Vec<Vec<E::G1Affine>>>) -> Self {
         Self { tau, d_bool }
     }
 
-    /// Get the auxiliary information
+    /// Borrow the Boolean auxiliary table `d_bool`.
     pub fn get_d_bool(&self) -> &Vec<Vec<E::G1Affine>> {
         self.d_bool.as_ref().unwrap()
     }
 
-    /// Get the auxiliary information
+    /// Borrow the hiding scalar `tau` (zk variant only).
     pub fn get_tau(&self) -> &E::ScalarField {
         self.tau.as_ref().unwrap()
     }
@@ -116,23 +155,23 @@ impl<E: Pairing> KZHKAuxInfo<E> {
     }
 }
 
-impl<E: Pairing> Default for KZHKAuxInfo<E> {
+impl<E: Pairing> Default for KZHKState<E> {
     fn default() -> Self {
-        KZHKAuxInfo {
+        KZHKState {
             d_bool: None,
             tau: None,
         }
     }
 }
 
-impl<E: Pairing> Add for KZHKAuxInfo<E> {
+impl<E: Pairing> Add for KZHKState<E> {
     type Output = Self;
 
     fn add(self, rhs: Self) -> Self::Output {
-        if self == KZHKAuxInfo::default() {
+        if self == KZHKState::default() {
             return rhs;
         }
-        if rhs == KZHKAuxInfo::default() {
+        if rhs == KZHKState::default() {
             return self;
         }
         assert_eq!(
@@ -151,21 +190,21 @@ impl<E: Pairing> Add for KZHKAuxInfo<E> {
                     .collect()
             })
             .collect();
-        KZHKAuxInfo {
+        KZHKState {
             d_bool: Some(out_d_bool),
             tau: None,
         }
     }
 }
 
-impl<E: Pairing> Sub for KZHKAuxInfo<E> {
+impl<E: Pairing> Sub for KZHKState<E> {
     type Output = Self;
 
     fn sub(self, rhs: Self) -> Self::Output {
-        if self == KZHKAuxInfo::default() {
+        if self == KZHKState::default() {
             return rhs;
         }
-        if rhs == KZHKAuxInfo::default() {
+        if rhs == KZHKState::default() {
             return self;
         }
         assert_eq!(
@@ -184,7 +223,7 @@ impl<E: Pairing> Sub for KZHKAuxInfo<E> {
                     .collect()
             })
             .collect();
-        KZHKAuxInfo {
+        KZHKState {
             d_bool: Some(out_d_bool),
             tau: None,
         }
@@ -193,9 +232,22 @@ impl<E: Pairing> Sub for KZHKAuxInfo<E> {
 
 ///////////// Opening Proof /////////////////
 
+/// KZH-k opening proof `pi = ({D_j}_{j=1}^{k-1}, f_{x_1..x_{k-1}})`
+/// (Figure 14) extended with the Sigma-protocol transcript used by the
+/// zero-knowledge variant from Appendix D.
+///
+/// - `d`: per-level row-commitment vectors `D_j` that the verifier
+///   checks pairwise against the previous level's commitment.
+/// - `f`: the tail polynomial `f_{x_1..x_{k-1}}` — i.e. `f` partially
+///   evaluated at the first `k-1` block sub-points. In the last step
+///   the verifier opens it at `x_k` to obtain the claimed value.
+/// - `r_hide`, `y_r`, `rho_prime`: Sigma-protocol components of the
+///   zk opener. `r_hide` is the commitment to the sparse masking
+///   polynomial `r(X)`, `y_r = r(x)`, and
+///   `rho_prime = alpha*tau + rho` is the derandomizing scalar that
+///   lets the verifier linearize away the hiding bases. All three are
+///   `None` for plain openings.
 #[derive(CanonicalSerialize, CanonicalDeserialize, Clone, Debug, PartialEq, Eq)]
-
-/// proof of opening
 pub struct KZHKOpeningProof<E: Pairing> {
     d: Vec<Vec<E::G1Affine>>,
     f: DenseOrSparseMLE<E::ScalarField>,
