@@ -135,9 +135,9 @@ impl Visit for FilteredFields {
 /// `Ok(())` without replacing it. Safe to call from multiple bench / test
 /// entry points.
 pub fn init() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-        EnvFilter::new("warn,subroutines=debug,arithmetic=debug,transcript=debug")
-    });
+    // Default to silent when RUST_LOG is unset. Set e.g. RUST_LOG=debug or
+    // RUST_LOG=subroutines=debug to enable span output.
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("off"));
 
     let subscriber = tracing_subscriber::fmt()
         .with_env_filter(filter)

@@ -70,7 +70,7 @@ const CASES: &[BenchCase] = &[
     // case(17, 2, true, true),
     // case(18, 2, true, true),
     // case(19, 2, true, true),
-    case(20, 2, true, true),
+    case(25, 5, true, true),
 ];
 
 type ProverParam = <KZHK<E> as PolynomialCommitmentScheme<E>>::ProverParam;

@@ -33,11 +33,12 @@
 //!
 //! The unified [`KZHKConfig`] struct (fields `k` and `zk`) selects the
 //! variant when generating the SRS.
-
+#[cfg(feature = "parallel")]
+use rayon::iter::IntoParallelRefMutIterator;
 use crate::{
     pcs::{
         kzhk::{
-            msm::msm_wrapper_g1,
+            msm::{msm_wrapper_g1, NAIVE_MSM_THRESHOLD},
             srs::{KZHKProverParam, KZHKUniversalParams, KZHKVerifierParam},
             structs::{KZHKState, KZHKCommitment, KZHKConfig, KZHKOpeningProof},
         },
@@ -322,7 +323,8 @@ impl<E: Pairing> KZHK<E> {
             DenseOrSparseMLE::Dense(poly) => Self::commit_dense_inner(pp, poly, blinding)?,
             DenseOrSparseMLE::Sparse(poly) => Self::commit_sparse_inner(pp, poly, blinding)?,
         };
-        let result = Ok((com, KZHKState::new(Some(tau), None)));
+        let sparsity = sparsity_of(poly);
+        let result = Ok((com, KZHKState::new(Some(tau), None, Some(sparsity))));
         result
     }
 
@@ -337,7 +339,9 @@ impl<E: Pairing> KZHK<E> {
             DenseOrSparseMLE::Dense(poly) => Self::commit_dense_inner(prover_param, poly, None),
             DenseOrSparseMLE::Sparse(poly) => Self::commit_sparse_inner(prover_param, poly, None),
         };
-        let result = Ok((non_zk_com.unwrap(), KZHKState::default()));
+        let sparsity = sparsity_of(poly);
+        let state = KZHKState::new(None, None, Some(sparsity));
+        let result = Ok((non_zk_com.unwrap(), state));
         result
     }
 
@@ -727,13 +731,28 @@ impl<E: Pairing> KZHK<E> {
                 .as_slice_memory_order()
                 .expect("H_t must be contiguous (standard layout)");
 
-            // Build d_{j}
-            // TODO: Why can't we use d_j.par_iter_mut()?
+            // Build d_{j}.
+            //
+            // We parallelize the outer loop *only* when every per-chunk MSM
+            // is small enough that `msm_wrapper_g1` takes its naive path
+            // (no nested rayon pool inside arkworks' Pippenger). For dense
+            // inputs, `eval_len` is a tight bound on the per-chunk MSM size.
+            let per_msm_size = eval_len;
+            let parallel_outer_safe = per_msm_size <= NAIVE_MSM_THRESHOLD;
             let mut d_j = vec![E::G1Affine::zero(); dj_size];
-            cfg_iter_mut!(d_j).enumerate().for_each(|(i, d_j_i)| {
-                let scalars = partially_eval_dense_poly_on_bool_point(polynomial, i, eval_len);
-                *d_j_i = msm_wrapper_g1::<E>(h_slice, scalars.as_slice()).into_affine()
-            });
+            if parallel_outer_safe {
+                cfg_iter_mut!(d_j).enumerate().for_each(|(i, d_j_i)| {
+                    let scalars =
+                        partially_eval_dense_poly_on_bool_point(polynomial, i, eval_len);
+                    *d_j_i = msm_wrapper_g1::<E>(h_slice, scalars.as_slice()).into_affine();
+                });
+            } else {
+                d_j.iter_mut().enumerate().for_each(|(i, d_j_i)| {
+                    let scalars =
+                        partially_eval_dense_poly_on_bool_point(polynomial, i, eval_len);
+                    *d_j_i = msm_wrapper_g1::<E>(h_slice, scalars.as_slice()).into_affine();
+                });
+            }
 
             d_bool.push(d_j);
         }
@@ -769,41 +788,99 @@ impl<E: Pairing> KZHK<E> {
                 .collect()
         };
 
-        // Compute d_bool without shared mutation; preserve order across j.
+        // Compute the Boolean aux table d_bool. For each level
+        // `j = 0..k-1` we must produce `d_j[i] = <f(b_1..b_j=i, X_{j+1..k}), H_{j+1}>`
+        // for every Boolean prefix `i ∈ [0, 2^{prefix_var})` (Figure 14).
+        //
+        // The previous implementation called `partially_eval_sparse_poly_on_bool_point`
+        // once per prefix, doing `dj_size` BTreeMap range seeks. For highly sparse
+        // polynomials that was wasteful (each seek is `O(log nnz)` and yields few
+        // entries). Instead we:
+        //   1. Single-pass bucket the sparse entries by prefix in `O(nnz)` — each
+        //      non-zero at global index `g` lives in exactly one prefix `g >> rem_vars`
+        //      with local index `g & mask`.
+        //   2. Run the per-prefix MSMs in parallel (they're independent and use the
+        //      same `H_{j+1}` bases).
+        //
+        // Both the outer level loop and inner bucket loop stay sequential;
+        // the parallelism comes from the per-bucket MSM itself. See the
+        // comment on step (2) below.
         let d_bool: Vec<Vec<E::G1Affine>> = {
-            cfg_into_iter!(0..k - 1)
+            (0..k - 1)
                 .map(|j| {
                     let prefix_var = prefix_vars_vec[j];
-                    // Number of i's (outer loop) and length of each partial evaluation
+                    // `dj_size` = number of Boolean prefixes at this level.
+                    // `rem_vars` = variables left after fixing the prefix; `eval_len`
+                    // is the size of each per-prefix partial evaluation.
                     let dj_size = 1usize << prefix_var;
                     let rem_vars = polynomial.num_vars() - prefix_var;
-                    let eval_len = 1usize << rem_vars;
+                    let mask = (1usize << rem_vars) - 1;
 
-                    // Choose H_t. Natural generalization uses [j]; if you intended to always
-                    // use [0], replace j with 0 below.
+                    // `H_{j+1}` is the tensor used for this level's inner commitments.
                     let h_slice = prover_param.get_h_tensors()[j + 1]
                         .as_slice_memory_order()
                         .expect("H_t must be contiguous (standard layout)");
 
-                    // Build d_{j}
-                    let mut d_j = vec![E::G1Affine::zero(); dj_size];
-                    d_j.iter_mut().enumerate().for_each(|(i, d_j_i)| {
-                        let scalars_map =
-                            partially_eval_sparse_poly_on_bool_point(polynomial, i, eval_len);
-                        let mut bases = Vec::new();
-                        let mut scalars = Vec::new();
-                        for (local_idx, s) in scalars_map {
-                            bases.push(h_slice[local_idx]);
-                            scalars.push(*s);
-                        }
+                    // (1) Bucket non-zero entries by prefix in a single pass.
+                    // BTreeMap iteration is sequential and O(nnz); avoids the
+                    // per-prefix range seeks the old implementation was doing.
+                    let mut buckets: Vec<(Vec<E::G1Affine>, Vec<E::ScalarField>)> =
+                        (0..dj_size).map(|_| (Vec::new(), Vec::new())).collect();
+                    for (&global_idx, &value) in polynomial.evaluations.iter() {
+                        let prefix = global_idx >> rem_vars;
+                        let local_idx = global_idx & mask;
+                        let (bases, scalars) = &mut buckets[prefix];
+                        bases.push(h_slice[local_idx]);
+                        scalars.push(value);
+                    }
 
-                        *d_j_i = if scalars.is_empty() {
-                            E::G1Affine::zero()
-                        } else {
-                            msm_wrapper_g1::<E>(&bases, &scalars).into_affine()
-                        };
-                    });
-                    d_j
+                    // (2) Run the per-prefix MSMs. What matters for the
+                    // outer parallelism decision is the *max per-bucket*
+                    // size, not `c`: when the non-zeros spread across many
+                    // buckets (typical for random sparse inputs, e.g. the
+                    // Appendix-D masking polynomial with `c = k·2^(n/k)`
+                    // spread over `2^(n/k)` prefixes → ~`k` per bucket),
+                    // every individual MSM is tiny and takes the naive
+                    // path in `msm_wrapper_g1` — no arkworks Pippenger, no
+                    // nested rayon pool build — so it's safe to
+                    // parallelize the outer bucket loop. One extra
+                    // O(dj_size) scan to find the max is negligible next
+                    // to the MSM work.
+                    let max_bucket =
+                        buckets.iter().map(|(_, s)| s.len()).max().unwrap_or(0);
+                    let parallel_outer_safe = max_bucket <= NAIVE_MSM_THRESHOLD;
+
+                    // Compute all per-bucket MSMs in PROJECTIVE form first,
+                    // then fold them into affine in a single batched
+                    // normalization. One batched `normalize_batch` amortizes
+                    // Montgomery's trick over all `dj_size` points — a
+                    // single field inversion total instead of one per bucket.
+                    // Field inversion is ~100× more expensive than field
+                    // multiplication on BN254, so for `dj_size = 1024` this
+                    // shaves roughly `1023` inversions off the critical path.
+                    let projective: Vec<E::G1> = if parallel_outer_safe {
+                        cfg_into_iter!(buckets)
+                            .map(|(bases, scalars)| {
+                                if scalars.is_empty() {
+                                    E::G1::zero()
+                                } else {
+                                    msm_wrapper_g1::<E>(&bases, &scalars)
+                                }
+                            })
+                            .collect()
+                    } else {
+                        buckets
+                            .into_iter()
+                            .map(|(bases, scalars)| {
+                                if scalars.is_empty() {
+                                    E::G1::zero()
+                                } else {
+                                    msm_wrapper_g1::<E>(&bases, &scalars)
+                                }
+                            })
+                            .collect()
+                    };
+                    <E::G1 as CurveGroup>::normalize_batch(&projective)
                 })
                 .collect()
         };
@@ -1059,6 +1136,20 @@ macro_rules! cfg_for_each_with_scratch {
 /// `sqrt(N)` — a reasonable balance between proof size and prover cost
 /// for general-purpose use. Callers should supply their own `k` via
 /// [`KZHKConfig`] when optimizing for a specific workload.
+/// Upper bound on the number of non-zero coefficients of `poly`.
+///
+/// For a dense polynomial this is `2^num_vars` (the full evaluation table);
+/// for a sparse polynomial it's the size of the non-zero coefficient map.
+/// `update_state` uses this to decide whether per-chunk / per-bucket MSMs
+/// are small enough to run through the naive-MSM fast path in
+/// `msm_wrapper_g1`, in which case the outer loop can safely parallelize.
+fn sparsity_of<F: ark_ff::Field>(poly: &DenseOrSparseMLE<F>) -> usize {
+    match poly {
+        DenseOrSparseMLE::Dense(p) => p.evaluations.len(),
+        DenseOrSparseMLE::Sparse(p) => p.evaluations.len(),
+    }
+}
+
 pub fn compute_k(poly_size: usize, _is_zk: bool) -> usize {
     poly_size / 2
 }

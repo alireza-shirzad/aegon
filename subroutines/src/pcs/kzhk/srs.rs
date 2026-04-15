@@ -416,7 +416,6 @@ impl<E: Pairing> StructuredReferenceString<E> for KZHKUniversalParams<E> {
 
         let v_mat = Arc::new(v_mat);
         drop(v_mat_guard);
-       //TODO: Double check if k is multiplied here 
         let hiding_sparsity = if zk {
             Some(ceil_k_root_scaled(1u128 << num_vars, k as u32) as usize)
         } else {

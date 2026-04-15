@@ -128,16 +128,29 @@ impl<E: Pairing> KZHKCommitment<E> {
 /// - `tau`: the hiding scalar sampled by [`crate::pcs::kzhk::KZHK::commit`]
 ///   when the SRS is zk (Appendix D). Retained so the prover can
 ///   derandomize during opening.
+/// - `sparsity`: upper bound on the number of non-zero coefficients of the
+///   committed polynomial, recorded at commit time. For a dense polynomial
+///   this is `2^num_vars`; for a sparse polynomial it's the size of its
+///   non-zero coefficient map. `update_state` reads this to decide whether
+///   the per-chunk / per-bucket MSMs are small enough (≤ the naive-MSM
+///   threshold in `msm.rs`) that the outer loop can be parallelized
+///   without triggering nested rayon pool builds inside arkworks'
+///   Pippenger.
 #[derive(Debug, Derivative, CanonicalSerialize, CanonicalDeserialize, Clone, PartialEq, Eq)]
 pub struct KZHKState<E: Pairing> {
     tau: Option<E::ScalarField>,
     d_bool: Option<Vec<Vec<E::G1Affine>>>,
+    sparsity: Option<usize>,
 }
 
 impl<E: Pairing> KZHKState<E> {
     /// Create a new prover state.
-    pub fn new(tau: Option<E::ScalarField>, d_bool: Option<Vec<Vec<E::G1Affine>>>) -> Self {
-        Self { tau, d_bool }
+    pub fn new(
+        tau: Option<E::ScalarField>,
+        d_bool: Option<Vec<Vec<E::G1Affine>>>,
+        sparsity: Option<usize>,
+    ) -> Self {
+        Self { tau, d_bool, sparsity }
     }
 
     /// Borrow the Boolean auxiliary table `d_bool`.
@@ -150,6 +163,12 @@ impl<E: Pairing> KZHKState<E> {
         self.tau.as_ref().unwrap()
     }
 
+    /// Upper bound on the committed polynomial's non-zero count, or `None`
+    /// if it wasn't recorded.
+    pub fn get_sparsity(&self) -> Option<usize> {
+        self.sparsity
+    }
+
     pub fn set_d_bool(&mut self, d_bool: Vec<Vec<E::G1Affine>>) {
         self.d_bool = Some(d_bool);
     }
@@ -160,6 +179,7 @@ impl<E: Pairing> Default for KZHKState<E> {
         KZHKState {
             d_bool: None,
             tau: None,
+            sparsity: None,
         }
     }
 }
@@ -193,6 +213,7 @@ impl<E: Pairing> Add for KZHKState<E> {
         KZHKState {
             d_bool: Some(out_d_bool),
             tau: None,
+            sparsity: None,
         }
     }
 }
@@ -226,6 +247,7 @@ impl<E: Pairing> Sub for KZHKState<E> {
         KZHKState {
             d_bool: Some(out_d_bool),
             tau: None,
+            sparsity: None,
         }
     }
 }
