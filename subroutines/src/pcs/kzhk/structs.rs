@@ -1,4 +1,4 @@
-use ark_ec::{pairing::Pairing, CurveGroup};
+use ark_ec::{pairing::Pairing, AffineRepr, CurveGroup};
 
 use crate::poly::DenseOrSparseMLE;
 use ark_serialize::{
@@ -13,7 +13,8 @@ use rayon::iter::{
     IndexedParallelIterator, IntoParallelIterator, IntoParallelRefIterator,
     IntoParallelRefMutIterator, ParallelIterator,
 };
-use std::ops::{Add, Deref, DerefMut};
+use std::collections::BTreeMap;
+use std::ops::{Add, Deref, DerefMut, Range};
 
 /// Configuration for the KZH-k scheme.
 ///
@@ -116,15 +117,207 @@ impl<E: Pairing> KZHKCommitment<E> {
 
 ////////////// Prover state /////////////////
 
+/// One row of the Boolean auxiliary table.
+///
+/// Logically a `Vec<G1Affine>` of length `dj_size = 2^{d_1+...+d_j}`, but
+/// stored either as a flat dense vector (the default for dense input
+/// polynomials) or as a `BTreeMap` of just the non-zero positions (for
+/// sparse input polynomials whose aux row would otherwise be
+/// overwhelmingly empty). Positions absent from a `Sparse` row are
+/// implicitly the affine zero (`G1Affine::zero()`).
+///
+/// The `Sparse` variant is the optimisation used by `update_state_sparse`
+/// when `nnz << dj_size`: it avoids the `O(dj_size)` allocation,
+/// per-empty-bucket `G1::zero()` write, and `normalize_batch` over the
+/// full row. The opening side (`open_*_bool_inner`) then extracts the
+/// proof's `2^{d_j}`-sized slice via `O(2^{d_j})` map lookups instead of
+/// slice indexing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AuxRow<E: Pairing> {
+    Dense(Vec<E::G1Affine>),
+    Sparse {
+        len: usize,
+        entries: BTreeMap<usize, E::G1Affine>,
+    },
+}
+
+// Manual `CanonicalSerialize`/`CanonicalDeserialize`/`Valid` impls.
+// The arkworks derive macro panics on enums with `BTreeMap` and a
+// pairing-bound generic; we encode by-hand instead. Format:
+//   * Dense:  tag = 0u8, then the inner `Vec<G1Affine>`.
+//   * Sparse: tag = 1u8, then `len` (u64), then the entries as
+//             `Vec<(u64, G1Affine)>`.
+// The encoding is non-canonical (a `Sparse` row that happens to be
+// fully populated round-trips to the same `Sparse`, not to `Dense`),
+// but it's only used as opaque transport for `KZHKState`, which we
+// never compare across the boundary.
+impl<E: Pairing> CanonicalSerialize for AuxRow<E> {
+    fn serialize_with_mode<W: Write>(
+        &self,
+        mut writer: W,
+        compress: Compress,
+    ) -> Result<(), SerializationError> {
+        match self {
+            AuxRow::Dense(v) => {
+                0u8.serialize_with_mode(&mut writer, compress)?;
+                v.serialize_with_mode(&mut writer, compress)?;
+            }
+            AuxRow::Sparse { len, entries } => {
+                1u8.serialize_with_mode(&mut writer, compress)?;
+                (*len as u64).serialize_with_mode(&mut writer, compress)?;
+                let pairs: Vec<(u64, E::G1Affine)> =
+                    entries.iter().map(|(&k, &v)| (k as u64, v)).collect();
+                pairs.serialize_with_mode(&mut writer, compress)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn serialized_size(&self, compress: Compress) -> usize {
+        match self {
+            AuxRow::Dense(v) => 0u8.serialized_size(compress) + v.serialized_size(compress),
+            AuxRow::Sparse { len, entries } => {
+                let pairs: Vec<(u64, E::G1Affine)> =
+                    entries.iter().map(|(&k, &v)| (k as u64, v)).collect();
+                1u8.serialized_size(compress)
+                    + (*len as u64).serialized_size(compress)
+                    + pairs.serialized_size(compress)
+            }
+        }
+    }
+}
+
+impl<E: Pairing> Valid for AuxRow<E> {
+    fn check(&self) -> Result<(), SerializationError> {
+        match self {
+            AuxRow::Dense(v) => v.check(),
+            AuxRow::Sparse { entries, .. } => {
+                for (_, p) in entries {
+                    p.check()?;
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+impl<E: Pairing> CanonicalDeserialize for AuxRow<E> {
+    fn deserialize_with_mode<R: Read>(
+        mut reader: R,
+        compress: Compress,
+        validate: Validate,
+    ) -> Result<Self, SerializationError> {
+        let tag = u8::deserialize_with_mode(&mut reader, compress, validate)?;
+        match tag {
+            0 => {
+                let v =
+                    Vec::<E::G1Affine>::deserialize_with_mode(&mut reader, compress, validate)?;
+                Ok(AuxRow::Dense(v))
+            }
+            1 => {
+                let len = u64::deserialize_with_mode(&mut reader, compress, validate)? as usize;
+                let pairs = Vec::<(u64, E::G1Affine)>::deserialize_with_mode(
+                    &mut reader,
+                    compress,
+                    validate,
+                )?;
+                let entries: BTreeMap<usize, E::G1Affine> =
+                    pairs.into_iter().map(|(k, v)| (k as usize, v)).collect();
+                Ok(AuxRow::Sparse { len, entries })
+            }
+            _ => Err(SerializationError::InvalidData),
+        }
+    }
+}
+
+impl<E: Pairing> AuxRow<E> {
+    /// Logical length of the row (matches the dense `dj_size`).
+    pub fn len(&self) -> usize {
+        match self {
+            AuxRow::Dense(v) => v.len(),
+            AuxRow::Sparse { len, .. } => *len,
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Read position `i`. Returns the affine zero for sparse rows when
+    /// the position has no stored entry.
+    #[inline]
+    pub fn get(&self, i: usize) -> E::G1Affine {
+        match self {
+            AuxRow::Dense(v) => v[i],
+            AuxRow::Sparse { entries, .. } => {
+                entries.get(&i).copied().unwrap_or_else(E::G1Affine::zero)
+            },
+        }
+    }
+
+    /// Materialize the slice `[range.start, range.end)` as a `Vec<G1Affine>`.
+    /// Used by the open paths to build the proof's `D_j` vector. Length of
+    /// the returned vec is `range.end - range.start`.
+    pub fn slice(&self, range: Range<usize>) -> Vec<E::G1Affine> {
+        match self {
+            AuxRow::Dense(v) => v[range].to_vec(),
+            AuxRow::Sparse { entries, .. } => {
+                let len = range.end - range.start;
+                let mut out = vec![E::G1Affine::zero(); len];
+                for (&k, &v) in entries.range(range.clone()) {
+                    out[k - range.start] = v;
+                }
+                out
+            },
+        }
+    }
+
+    /// Force the row into the dense representation. Used by the
+    /// `Add`/`Sub` impls on `KZHKState` when one operand is sparse and
+    /// the other is dense — combining them homogeneously is simpler
+    /// than maintaining a separate Sparse + Sparse code path that
+    /// has to be careful about implicit zeros.
+    pub fn into_dense(self) -> Vec<E::G1Affine> {
+        match self {
+            AuxRow::Dense(v) => v,
+            AuxRow::Sparse { len, entries } => {
+                let mut v = vec![E::G1Affine::zero(); len];
+                for (k, val) in entries {
+                    v[k] = val;
+                }
+                v
+            },
+        }
+    }
+
+    /// Pairwise combine two rows under `op` (used by the `Add`/`Sub`
+    /// impls). `Dense + Dense` stays dense; everything else densifies
+    /// first for simplicity.
+    fn pairwise<F>(self, rhs: Self, op: F) -> Self
+    where
+        F: Fn(E::G1Affine, E::G1Affine) -> E::G1Affine + Sync,
+    {
+        let lhs = self.into_dense();
+        let rhs = rhs.into_dense();
+        assert_eq!(lhs.len(), rhs.len(), "AuxRow: length mismatch in combine");
+        let out: Vec<E::G1Affine> =
+            cfg_iter!(lhs).zip(cfg_iter!(rhs)).map(|(&a, &b)| op(a, b)).collect();
+        AuxRow::Dense(out)
+    }
+}
+
 /// Prover-side state attached to a commitment.
 ///
 /// - `d_bool`: the table of precomputed row-commitments
 ///   `aux_{b_1,...,b_j} = <f(b_1,...,b_j, X_{j+1},...), H_{j+1}>`
-///   for levels `j = 1..k-1` (Figure 14). Each inner `Vec` holds
-///   the `2^{d_1+...+d_j}` auxiliary group elements for level `j`
-///   in little-endian ordering. This table powers the free Boolean
+///   for levels `j = 1..k-1` (Figure 14). Each [`AuxRow`] holds the
+///   `2^{d_1+...+d_j}` auxiliary group elements for level `j` in
+///   little-endian ordering. This table powers the free Boolean
 ///   opening: when the query point is Boolean, the level-`j` proof
-///   vector `D_j` is a contiguous slice of `d_bool[j]`.
+///   vector `D_j` is a contiguous slice of `d_bool[j]`. The row may
+///   be stored sparsely (see [`AuxRow::Sparse`]) when the input
+///   polynomial is sparse enough that allocating a dense `dj_size`-
+///   length vector would be wasteful.
 /// - `tau`: the hiding scalar sampled by [`crate::pcs::kzhk::KZHK::commit`]
 ///   when the SRS is zk (Appendix D). Retained so the prover can
 ///   derandomize during opening.
@@ -139,7 +332,7 @@ impl<E: Pairing> KZHKCommitment<E> {
 #[derive(Debug, Derivative, CanonicalSerialize, CanonicalDeserialize, Clone, PartialEq, Eq)]
 pub struct KZHKState<E: Pairing> {
     tau: Option<E::ScalarField>,
-    d_bool: Option<Vec<Vec<E::G1Affine>>>,
+    d_bool: Option<Vec<AuxRow<E>>>,
     sparsity: Option<usize>,
 }
 
@@ -147,14 +340,14 @@ impl<E: Pairing> KZHKState<E> {
     /// Create a new prover state.
     pub fn new(
         tau: Option<E::ScalarField>,
-        d_bool: Option<Vec<Vec<E::G1Affine>>>,
+        d_bool: Option<Vec<AuxRow<E>>>,
         sparsity: Option<usize>,
     ) -> Self {
         Self { tau, d_bool, sparsity }
     }
 
     /// Borrow the Boolean auxiliary table `d_bool`.
-    pub fn get_d_bool(&self) -> &Vec<Vec<E::G1Affine>> {
+    pub fn get_d_bool(&self) -> &Vec<AuxRow<E>> {
         self.d_bool.as_ref().unwrap()
     }
 
@@ -169,7 +362,7 @@ impl<E: Pairing> KZHKState<E> {
         self.sparsity
     }
 
-    pub fn set_d_bool(&mut self, d_bool: Vec<Vec<E::G1Affine>>) {
+    pub fn set_d_bool(&mut self, d_bool: Vec<AuxRow<E>>) {
         self.d_bool = Some(d_bool);
     }
 }
@@ -194,21 +387,17 @@ impl<E: Pairing> Add for KZHKState<E> {
         if rhs == KZHKState::default() {
             return self;
         }
+        let lhs_rows = self.d_bool.unwrap();
+        let rhs_rows = rhs.d_bool.unwrap();
         assert_eq!(
-            self.d_bool.as_ref().unwrap().len(),
-            rhs.d_bool.as_ref().unwrap().len(),
+            lhs_rows.len(),
+            rhs_rows.len(),
             "Auxiliary information must have the same length"
         );
-        let out_d_bool = cfg_iter!(self.d_bool.as_ref().unwrap())
-            .zip(cfg_iter!(rhs.d_bool.as_ref().unwrap()))
-            .map(|(ra, rb)| {
-                assert_eq!(ra.len(), rb.len(), "column count mismatch in a row");
-                cfg_iter!(ra)
-                    .cloned()
-                    .zip(cfg_iter!(rb))
-                    .map(|(x, y)| (x + y).into_affine())
-                    .collect()
-            })
+        let out_d_bool: Vec<AuxRow<E>> = lhs_rows
+            .into_iter()
+            .zip(rhs_rows.into_iter())
+            .map(|(ra, rb)| ra.pairwise(rb, |x, y| (x + y).into_affine()))
             .collect();
         KZHKState {
             d_bool: Some(out_d_bool),
@@ -228,21 +417,17 @@ impl<E: Pairing> Sub for KZHKState<E> {
         if rhs == KZHKState::default() {
             return self;
         }
+        let lhs_rows = self.d_bool.unwrap();
+        let rhs_rows = rhs.d_bool.unwrap();
         assert_eq!(
-            self.d_bool.as_ref().unwrap().len(),
-            rhs.d_bool.as_ref().unwrap().len(),
+            lhs_rows.len(),
+            rhs_rows.len(),
             "Auxiliary information must have the same length"
         );
-        let out_d_bool = cfg_iter!(self.d_bool.as_ref().unwrap())
-            .zip(cfg_iter!(rhs.d_bool.as_ref().unwrap()))
-            .map(|(ra, rb)| {
-                assert_eq!(ra.len(), rb.len(), "column count mismatch in a row");
-                cfg_iter!(ra)
-                    .cloned()
-                    .zip(cfg_iter!(rb))
-                    .map(|(x, y)| (x - y).into_affine())
-                    .collect()
-            })
+        let out_d_bool: Vec<AuxRow<E>> = lhs_rows
+            .into_iter()
+            .zip(rhs_rows.into_iter())
+            .map(|(ra, rb)| ra.pairwise(rb, |x, y| (x - y).into_affine()))
             .collect();
         KZHKState {
             d_bool: Some(out_d_bool),

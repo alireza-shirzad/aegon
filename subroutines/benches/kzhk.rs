@@ -83,10 +83,13 @@ const CASES: &[BenchCase] = &[
     // case(18, 2, true,  true,  100),
     // case(19, 2, true,  true,  100),
     // case(27, 8, true,  true,  100),
-    case(28, 2, false, true, 5),
-    case(28, 2, false, true, 10),
-    case(28, 2, false, true, 20),
-    case(28, 2, false, true, 50),
+    // sp values below ~3% trigger the new sparse-aux path (`nnz · 4 < dj_size`
+    // at the deepest level, dj_size ≈ 33.5M).
+    case(28, 8, true, true, 1),
+    case(28, 8, true, true, 5),
+    case(28, 8, true, true, 10),
+    case(28, 8, true, true, 20),
+    case(28, 8, true, true, 50),
 ];
 
 type ProverParam = <KZHK<E> as PolynomialCommitmentScheme<E>>::ProverParam;
@@ -133,17 +136,17 @@ fn prepare(c: BenchCase) -> Prepared {
 // update_state (boolean is ignored; fills the `d_bool` Boolean-opening table)
 // ---------------------------------------------------------------------------
 
-// #[divan::bench(args = CASES, sample_count = 1, sample_size = 1)]
-// fn update_state(bencher: Bencher, c: &BenchCase) {
-//     let (ck, _vk, poly, _point) = prepare(*c);
-//     let (com, state0) = KZHK::<E>::commit(&ck, &poly).unwrap();
-//     bencher
-//         .with_inputs(|| state0.clone())
-//         .bench_local_values(|mut state| {
-//             KZHK::<E>::update_state(&ck, &poly, &com, &mut state).unwrap();
-//             black_box(state);
-//         });
-// }
+#[divan::bench(args = CASES, sample_count = 1, sample_size = 1)]
+fn update_state(bencher: Bencher, c: &BenchCase) {
+    let (ck, _vk, poly, _point) = prepare(*c);
+    let (com, state0) = KZHK::<E>::commit(&ck, &poly).unwrap();
+    bencher
+        .with_inputs(|| state0.clone())
+        .bench_local_values(|mut state| {
+            KZHK::<E>::update_state(&ck, &poly, &com, &mut state).unwrap();
+            black_box(state);
+        });
+}
 
 // ---------------------------------------------------------------------------
 // open

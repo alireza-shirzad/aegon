@@ -35,12 +35,13 @@
 //! variant when generating the SRS.
 #[cfg(feature = "parallel")]
 use rayon::iter::IntoParallelRefMutIterator;
+use std::collections::BTreeMap;
 use crate::{
     pcs::{
         kzhk::{
-            msm::{msm_wrapper_g1, NAIVE_MSM_THRESHOLD},
+            msm::{msm, NAIVE_THRESHOLD},
             srs::{KZHKProverParam, KZHKUniversalParams, KZHKVerifierParam},
-            structs::{KZHKState, KZHKCommitment, KZHKConfig, KZHKOpeningProof},
+            structs::{AuxRow, KZHKState, KZHKCommitment, KZHKConfig, KZHKOpeningProof},
         },
         PCSGlobalParam,
     },
@@ -70,8 +71,7 @@ pub mod structs;
 use arithmetic::{
     bits_le_to_usize,
     multilinear_polynomial::{
-        fix_last_variables, fix_last_variables_boolean,
-        fix_last_variables_boolean_sparse, fix_last_variables_sparse,
+        fix_last_variables, fix_last_variables_boolean, fix_last_variables_sparse,
         partially_eval_dense_poly_on_bool_point, partially_eval_sparse_poly_on_bool_point,
         rand_sparse_mle,
     },
@@ -118,8 +118,9 @@ where
     /// builds the tensor families `H_1, ..., H_k` in `G1` and the pairing
     /// elements `V_{b,j}` in `G2` described in Figure 14. Because SRS
     /// generation is expensive (multiple MSMs of size `N`), the result is
-    /// cached on disk under `../artifacts/srs/srs_{k}_{supported_size}.bin`
-    /// and reused on subsequent invocations of the same size.
+    /// cached on disk under
+    /// `../artifacts/srs/srs_{k}_{supported_size}_{zk}.bin` and reused on
+    /// subsequent invocations of the same size.
     fn gen_srs_for_testing<R: Rng>(
         conf: Self::Config,
         _rng: &mut R,
@@ -127,12 +128,18 @@ where
     ) -> Result<Self::SRS, PCSError> {
         let k = conf.k;
         let zk = conf.zk;
-        // SRS is cached on disk keyed by (k, num_vars) because generating it
-        // requires k full-size MSMs in G1 — reusing across test runs saves
-        // significant time.
-        let srs_path = current_dir()
-            .unwrap()
-            .join(format!("../artifacts/srs/srs_{:?}_{}.bin", k, supported_size));
+        // SRS is cached on disk keyed by (k, num_vars, zk) because generating
+        // it requires k full-size MSMs in G1 — reusing across test runs saves
+        // significant time. The `zk` tag is part of the key because the zk
+        // SRS carries a `hiding_sparsity` field that flips `is_zk()`, which
+        // changes the open dispatch — sharing a file across both flavours
+        // would silently route non-zk runs through the zk path.
+        let srs_path = current_dir().unwrap().join(format!(
+            "../artifacts/srs/srs_{:?}_{}_{}.bin",
+            k,
+            supported_size,
+            if zk { "zk" } else { "nozk" }
+        ));
         let srs = if srs_path.exists() {
             eprintln!("Loading SRS");
             let mut buffer = Vec::new();
@@ -421,9 +428,16 @@ impl<E: Pairing> KZHK<E> {
             &mut test_rng(),
         );
         let r_poly_wrapped = DenseOrSparseMLE::Sparse(r_poly.clone());
-        // Commit to the sparse masking polynomial r(X), then build its
-        // Boolean-opening state. The opening of r itself is plain (non-zk):
-        // r is the mask, it doesn't need to be re-masked.
+        // Commit to the sparse masking polynomial r(X). The opening of r
+        // itself is plain (non-zk): r is the mask, it doesn't need to
+        // be re-masked.
+        //
+        // `update_state_sparse` now uses sparsity-aware aux storage
+        // (`AuxRow::Sparse`), so building r's aux costs O((k-1)·c)
+        // instead of O(sum(dj_size)). With c ≈ k·N^{1/k} non-zeros
+        // (~91 at n=28, k=8) the call is microseconds, and the generic
+        // `open_non_zk` reads the same precomputed slices the rest of
+        // the codebase uses.
         let (r_hide, mut r_state) = Self::commit(prover_param, &r_poly_wrapped)?;
         let rho = *r_state.get_tau();
         Self::update_state(prover_param, &r_poly_wrapped, &r_hide, &mut r_state)?;
@@ -568,7 +582,7 @@ impl<E: Pairing> KZHK<E> {
             debug_assert!(prod.is_zero());
 
             let eq_poly = build_eq_x_r(point_part).unwrap();
-            cj = msm_wrapper_g1::<E>(&proof.get_d()[j], &eq_poly.evaluations).into_affine();
+            cj = msm::<E::G1>(&proof.get_d()[j], &eq_poly.evaluations).into_affine();
         }
         drop(pairing_loop_guard);
         // Checking c_{k-1}
@@ -653,9 +667,9 @@ impl<E: Pairing> KZHK<E> {
             let mut scalars: Vec<E::ScalarField> = Vec::with_capacity(poly.evaluations.len() + 1);
             scalars.extend_from_slice(&poly.evaluations);
             scalars.push(tau);
-            msm_wrapper_g1::<E>(&bases, &scalars)
+            msm::<E::G1>(&bases, &scalars)
         } else {
-            msm_wrapper_g1::<E>(h_bases, &poly.evaluations)
+            msm::<E::G1>(h_bases, &poly.evaluations)
         };
         Ok(KZHKCommitment::new(com.into(), poly.num_vars()))
     }
@@ -689,7 +703,7 @@ impl<E: Pairing> KZHK<E> {
             bases.push(h);
             scalars.push(tau);
         }
-        let com = msm_wrapper_g1::<E>(&bases, &scalars);
+        let com = msm::<E::G1>(&bases, &scalars);
         Ok(KZHKCommitment::new(
             com.into_affine(),
             sparse_poly.num_vars(),
@@ -713,7 +727,7 @@ impl<E: Pairing> KZHK<E> {
         let k = dimensions.len();
         debug_assert!(k >= 2, "need at least 2 blocks to build d_i's");
 
-        let mut d_bool: Vec<Vec<E::G1Affine>> = Vec::with_capacity(k - 1);
+        let mut d_bool: Vec<AuxRow<E>> = Vec::with_capacity(k - 1);
         let mut prefix_vars: usize = 0;
 
         for (j, &dim) in dimensions.iter().take(k - 1).enumerate() {
@@ -734,27 +748,27 @@ impl<E: Pairing> KZHK<E> {
             // Build d_{j}.
             //
             // We parallelize the outer loop *only* when every per-chunk MSM
-            // is small enough that `msm_wrapper_g1` takes its naive path
+            // is small enough that `msm` takes its naive path
             // (no nested rayon pool inside arkworks' Pippenger). For dense
             // inputs, `eval_len` is a tight bound on the per-chunk MSM size.
             let per_msm_size = eval_len;
-            let parallel_outer_safe = per_msm_size <= NAIVE_MSM_THRESHOLD;
+            let parallel_outer_safe = per_msm_size <= NAIVE_THRESHOLD;
             let mut d_j = vec![E::G1Affine::zero(); dj_size];
             if parallel_outer_safe {
                 cfg_iter_mut!(d_j).enumerate().for_each(|(i, d_j_i)| {
                     let scalars =
                         partially_eval_dense_poly_on_bool_point(polynomial, i, eval_len);
-                    *d_j_i = msm_wrapper_g1::<E>(h_slice, scalars.as_slice()).into_affine();
+                    *d_j_i = msm::<E::G1>(h_slice, scalars.as_slice()).into_affine();
                 });
             } else {
                 d_j.iter_mut().enumerate().for_each(|(i, d_j_i)| {
                     let scalars =
                         partially_eval_dense_poly_on_bool_point(polynomial, i, eval_len);
-                    *d_j_i = msm_wrapper_g1::<E>(h_slice, scalars.as_slice()).into_affine();
+                    *d_j_i = msm::<E::G1>(h_slice, scalars.as_slice()).into_affine();
                 });
             }
 
-            d_bool.push(d_j);
+            d_bool.push(AuxRow::Dense(d_j));
         }
         state.set_d_bool(d_bool);
         Ok(())
@@ -792,101 +806,176 @@ impl<E: Pairing> KZHK<E> {
         // `j = 0..k-1` we must produce `d_j[i] = <f(b_1..b_j=i, X_{j+1..k}), H_{j+1}>`
         // for every Boolean prefix `i ∈ [0, 2^{prefix_var})` (Figure 14).
         //
-        // The previous implementation called `partially_eval_sparse_poly_on_bool_point`
-        // once per prefix, doing `dj_size` BTreeMap range seeks. For highly sparse
-        // polynomials that was wasteful (each seek is `O(log nnz)` and yields few
-        // entries). Instead we:
-        //   1. Single-pass bucket the sparse entries by prefix in `O(nnz)` — each
-        //      non-zero at global index `g` lives in exactly one prefix `g >> rem_vars`
-        //      with local index `g & mask`.
-        //   2. Run the per-prefix MSMs in parallel (they're independent and use the
-        //      same `H_{j+1}` bases).
+        // We pick the row representation per level based on sparsity:
         //
-        // Both the outer level loop and inner bucket loop stay sequential;
-        // the parallelism comes from the per-bucket MSM itself. See the
-        // comment on step (2) below.
-        let d_bool: Vec<Vec<E::G1Affine>> = {
-            (0..k - 1)
-                .map(|j| {
-                    let prefix_var = prefix_vars_vec[j];
-                    // `dj_size` = number of Boolean prefixes at this level.
-                    // `rem_vars` = variables left after fixing the prefix; `eval_len`
-                    // is the size of each per-prefix partial evaluation.
-                    let dj_size = 1usize << prefix_var;
-                    let rem_vars = polynomial.num_vars() - prefix_var;
-                    let mask = (1usize << rem_vars) - 1;
+        //   • Sparse path (`AuxRow::Sparse`) when `nnz · SPARSE_DENOM <
+        //     dj_size`, i.e. when at most ~`1/SPARSE_DENOM` of buckets
+        //     could possibly be non-empty. We bucket non-zeros into a
+        //     `BTreeMap<prefix, (bases, scalars)>` (only allocates
+        //     entries for non-empty prefixes), run an MSM per non-empty
+        //     prefix, and `normalize_batch` over only the non-zero
+        //     projectives. The output is a `BTreeMap<prefix, G1Affine>`
+        //     of size at most `nnz`. No `O(dj_size)` allocation, scan,
+        //     or batch-inversion anywhere on the critical path.
+        //
+        //   • Dense path (`AuxRow::Dense`) otherwise — original
+        //     `Vec<(Vec, Vec)>`-of-length-`dj_size` bucketing. Faster
+        //     than the sparse path when `nnz ≈ dj_size` because the
+        //     dense bucket lookup is array indexing (no hashing or tree
+        //     descent).
+        //
+        // Threshold: 4 means "sparse path when at most 25% of buckets
+        // could be non-empty". Picked as a conservative cross-over to
+        // keep the sparse path's per-entry constant factors (BTreeMap
+        // ops, ~tens of ns/entry on bn254) from regressing
+        // dense-leaning inputs. Refine if profiling argues otherwise.
+        const SPARSE_DENOM: usize = 4;
+        let nnz = polynomial.evaluations.len();
 
-                    // `H_{j+1}` is the tensor used for this level's inner commitments.
-                    let h_slice = prover_param.get_h_tensors()[j + 1]
-                        .as_slice_memory_order()
-                        .expect("H_t must be contiguous (standard layout)");
+        let d_bool: Vec<AuxRow<E>> = (0..k - 1)
+            .map(|j| {
+                let prefix_var = prefix_vars_vec[j];
+                let dj_size = 1usize << prefix_var;
+                let rem_vars = polynomial.num_vars() - prefix_var;
+                let mask = if rem_vars == 0 { 0 } else { (1usize << rem_vars) - 1 };
 
-                    // (1) Bucket non-zero entries by prefix in a single pass.
-                    // BTreeMap iteration is sequential and O(nnz); avoids the
-                    // per-prefix range seeks the old implementation was doing.
-                    let mut buckets: Vec<(Vec<E::G1Affine>, Vec<E::ScalarField>)> =
-                        (0..dj_size).map(|_| (Vec::new(), Vec::new())).collect();
-                    for (&global_idx, &value) in polynomial.evaluations.iter() {
-                        let prefix = global_idx >> rem_vars;
-                        let local_idx = global_idx & mask;
-                        let (bases, scalars) = &mut buckets[prefix];
-                        bases.push(h_slice[local_idx]);
-                        scalars.push(value);
-                    }
+                let h_slice = prover_param.get_h_tensors()[j + 1]
+                    .as_slice_memory_order()
+                    .expect("H_t must be contiguous (standard layout)");
 
-                    // (2) Run the per-prefix MSMs. What matters for the
-                    // outer parallelism decision is the *max per-bucket*
-                    // size, not `c`: when the non-zeros spread across many
-                    // buckets (typical for random sparse inputs, e.g. the
-                    // Appendix-D masking polynomial with `c = k·2^(n/k)`
-                    // spread over `2^(n/k)` prefixes → ~`k` per bucket),
-                    // every individual MSM is tiny and takes the naive
-                    // path in `msm_wrapper_g1` — no arkworks Pippenger, no
-                    // nested rayon pool build — so it's safe to
-                    // parallelize the outer bucket loop. One extra
-                    // O(dj_size) scan to find the max is negligible next
-                    // to the MSM work.
-                    let max_bucket =
-                        buckets.iter().map(|(_, s)| s.len()).max().unwrap_or(0);
-                    let parallel_outer_safe = max_bucket <= NAIVE_MSM_THRESHOLD;
+                // Choose representation. `nnz.saturating_mul` guards
+                // against overflow at very high `nnz`; for our use
+                // case `nnz ≤ 2^num_vars` so it's a non-issue, but the
+                // guard makes the threshold check obviously safe.
+                let go_sparse = nnz.saturating_mul(SPARSE_DENOM) < dj_size;
 
-                    // Compute all per-bucket MSMs in PROJECTIVE form first,
-                    // then fold them into affine in a single batched
-                    // normalization. One batched `normalize_batch` amortizes
-                    // Montgomery's trick over all `dj_size` points — a
-                    // single field inversion total instead of one per bucket.
-                    // Field inversion is ~100× more expensive than field
-                    // multiplication on BN254, so for `dj_size = 1024` this
-                    // shaves roughly `1023` inversions off the critical path.
-                    let projective: Vec<E::G1> = if parallel_outer_safe {
-                        cfg_into_iter!(buckets)
-                            .map(|(bases, scalars)| {
-                                if scalars.is_empty() {
-                                    E::G1::zero()
-                                } else {
-                                    msm_wrapper_g1::<E>(&bases, &scalars)
-                                }
-                            })
-                            .collect()
+                if go_sparse {
+                    Self::aux_row_sparse(polynomial, h_slice, dj_size, rem_vars, mask)
+                } else {
+                    Self::aux_row_dense(polynomial, h_slice, dj_size, rem_vars, mask)
+                }
+            })
+            .collect();
+
+        state.set_d_bool(d_bool);
+        Ok(())
+    }
+
+    /// Sparse-row builder for one level of `update_state_sparse`.
+    ///
+    /// Walks the polynomial's `nnz` non-zero entries, bucketing them by
+    /// prefix into a `BTreeMap<prefix, (bases, scalars)>` so that no
+    /// memory is touched for empty prefixes. Runs one MSM per non-empty
+    /// prefix, then `normalize_batch`-es over only the non-zero
+    /// projective points. Total work per level: `O(nnz · log nnz)` for
+    /// the bucketing, `O((k-1)·nnz)` group ops for the MSMs, and
+    /// `O(non_empty_buckets)` field ops for `normalize_batch` — no
+    /// `O(dj_size)` term anywhere.
+    fn aux_row_sparse(
+        polynomial: &SparseMultilinearExtension<E::ScalarField>,
+        h_slice: &[E::G1Affine],
+        dj_size: usize,
+        rem_vars: usize,
+        mask: usize,
+    ) -> AuxRow<E> {
+        // Bucket non-zeros by prefix. BTreeMap so entries stay ordered
+        // (cheap range queries downstream and deterministic iteration).
+        let mut buckets: BTreeMap<usize, (Vec<E::G1Affine>, Vec<E::ScalarField>)> =
+            BTreeMap::new();
+        for (&global_idx, &value) in polynomial.evaluations.iter() {
+            let prefix = if rem_vars == 0 { 0 } else { global_idx >> rem_vars };
+            let local_idx = global_idx & mask;
+            let entry = buckets.entry(prefix).or_default();
+            entry.0.push(h_slice[local_idx]);
+            entry.1.push(value);
+        }
+
+        // Run per-bucket MSMs. Pull keys + scalars out into parallel
+        // Vecs so we can run the MSMs in a rayon-friendly shape; recombine
+        // after `normalize_batch`.
+        let prefixes: Vec<usize> = buckets.keys().copied().collect();
+        let bucket_data: Vec<(Vec<E::G1Affine>, Vec<E::ScalarField>)> =
+            buckets.into_values().collect();
+
+        // Same parallel-outer-safety check as the dense path: only spawn
+        // an outer rayon iter if every per-bucket MSM is below the
+        // naive-MSM threshold (so no nested arkworks Pippenger pool).
+        let max_bucket = bucket_data
+            .iter()
+            .map(|(_, s)| s.len())
+            .max()
+            .unwrap_or(0);
+        let parallel_outer_safe = max_bucket <= NAIVE_THRESHOLD;
+
+        let projective: Vec<E::G1> = if parallel_outer_safe {
+            cfg_into_iter!(bucket_data)
+                .map(|(bases, scalars)| msm::<E::G1>(&bases, &scalars))
+                .collect()
+        } else {
+            bucket_data
+                .into_iter()
+                .map(|(bases, scalars)| msm::<E::G1>(&bases, &scalars))
+                .collect()
+        };
+
+        let affine = <E::G1 as CurveGroup>::normalize_batch(&projective);
+        let entries: BTreeMap<usize, E::G1Affine> =
+            prefixes.into_iter().zip(affine.into_iter()).collect();
+
+        AuxRow::Sparse {
+            len: dj_size,
+            entries,
+        }
+    }
+
+    /// Dense-row builder for one level of `update_state_sparse` — used
+    /// when `nnz ≥ dj_size / SPARSE_DENOM`. Same logic as the previous
+    /// monolithic implementation: allocate `dj_size` buckets, walk
+    /// non-zeros, MSM, batch-normalize.
+    fn aux_row_dense(
+        polynomial: &SparseMultilinearExtension<E::ScalarField>,
+        h_slice: &[E::G1Affine],
+        dj_size: usize,
+        rem_vars: usize,
+        mask: usize,
+    ) -> AuxRow<E> {
+        let mut buckets: Vec<(Vec<E::G1Affine>, Vec<E::ScalarField>)> =
+            (0..dj_size).map(|_| (Vec::new(), Vec::new())).collect();
+        for (&global_idx, &value) in polynomial.evaluations.iter() {
+            let prefix = if rem_vars == 0 { 0 } else { global_idx >> rem_vars };
+            let local_idx = global_idx & mask;
+            let (bases, scalars) = &mut buckets[prefix];
+            bases.push(h_slice[local_idx]);
+            scalars.push(value);
+        }
+
+        let max_bucket = buckets.iter().map(|(_, s)| s.len()).max().unwrap_or(0);
+        let parallel_outer_safe = max_bucket <= NAIVE_THRESHOLD;
+
+        let projective: Vec<E::G1> = if parallel_outer_safe {
+            cfg_into_iter!(buckets)
+                .map(|(bases, scalars)| {
+                    if scalars.is_empty() {
+                        E::G1::zero()
                     } else {
-                        buckets
-                            .into_iter()
-                            .map(|(bases, scalars)| {
-                                if scalars.is_empty() {
-                                    E::G1::zero()
-                                } else {
-                                    msm_wrapper_g1::<E>(&bases, &scalars)
-                                }
-                            })
-                            .collect()
-                    };
-                    <E::G1 as CurveGroup>::normalize_batch(&projective)
+                        msm::<E::G1>(&bases, &scalars)
+                    }
+                })
+                .collect()
+        } else {
+            buckets
+                .into_iter()
+                .map(|(bases, scalars)| {
+                    if scalars.is_empty() {
+                        E::G1::zero()
+                    } else {
+                        msm::<E::G1>(&bases, &scalars)
+                    }
                 })
                 .collect()
         };
 
-        state.set_d_bool(d_bool);
-        Ok(())
+        AuxRow::Dense(<E::G1 as CurveGroup>::normalize_batch(&projective))
     }
 
     /// Dense non-Boolean opening path of Figure 14: at each level `j`,
@@ -920,7 +1009,7 @@ impl<E: Pairing> KZHK<E> {
                 .map(|i| {
                     let off = i * chunk_len;
                     let chunk = &partial_polynomial_evals[off..off + chunk_len];
-                    msm_wrapper_g1::<E>(h_slice, chunk).into_affine()
+                    msm::<E::G1>(h_slice, chunk).into_affine()
                 })
                 .collect();
             d.push(dj);
@@ -966,10 +1055,10 @@ impl<E: Pairing> KZHK<E> {
             let aux_vec = &aux_d_bool[j];
             debug_assert!(end <= aux_vec.len(), "state slice OOB");
 
-            // Parallel clone of the state slice -> d_j
-            let d_j: Vec<E::G1Affine> = cfg_iter!(aux_vec[start..end]).cloned().collect();
-
-            d.push(d_j);
+            // `AuxRow::slice` gives the proof's `D_j` directly — for
+            // a Dense row this is a `to_vec` memcpy; for a Sparse row
+            // it's `2^{d_j}` map lookups, defaulting to affine zero.
+            d.push(aux_vec.slice(start..end));
 
             // Reduce the dense polynomial on this boolean block (sequential dependency)
             partial_polynomial = fix_last_variables_boolean(&partial_polynomial, partial_point);
@@ -1031,7 +1120,7 @@ impl<E: Pairing> KZHK<E> {
                 let acc = if scalars.is_empty() {
                     E::G1Affine::zero()
                 } else {
-                    msm_wrapper_g1::<E>(&bases, &scalars).into_affine()
+                    msm::<E::G1>(&bases, &scalars).into_affine()
                 };
                 *d_j_i = acc;
             });
@@ -1049,6 +1138,16 @@ impl<E: Pairing> KZHK<E> {
     /// Sparse Boolean opening: sparse analogue of
     /// [`Self::open_dense_bool_inner`] — `D_j` is read directly from the
     /// auxiliary table, no cryptographic work per level.
+    ///
+    /// Implementation note: fixing blocks `0..k-1` to a Boolean prefix
+    /// `(b_1, ..., b_{k-1})` is exactly the contiguous slice of
+    /// `polynomial.evaluations` at indices `[eb << d_k, (eb+1) << d_k)`
+    /// where `eb` packs the prefix bits. We compute `eb` from the aux
+    /// reads (no polynomial work in the loop), then materialize the
+    /// residual `f` with a single `BTreeMap::range` and look up the
+    /// final evaluation with a single `BTreeMap::get`. This avoids the
+    /// `O(nnz)` polynomial clone + chained `fix_last_variables_*` calls
+    /// that the previous implementation performed at every level.
     #[tracing::instrument(level = "debug", skip_all, name = "KZH::Open_Sparse_Boolean")]
     fn open_sparse_bool_inner(
         prover_param: impl Borrow<KZHKProverParam<E>>,
@@ -1063,40 +1162,58 @@ impl<E: Pairing> KZHK<E> {
         let aux_d_bool = state.get_d_bool();
         let decomposed_point = KZHK::<E>::decompose_point(dims, point);
 
+        // Per-level aux reads only. After the loop, `eb` holds the full
+        // packed prefix `[b_1][b_2]...[b_{k-1}]` (LE, MSB-first across
+        // blocks).
         let mut d: Vec<Vec<E::G1Affine>> = Vec::with_capacity(k - 1);
-        let mut partial_polynomial = polynomial.clone();
-
-        // eb encodes the already-fixed boolean prefix in little-endian
         let mut eb: usize = 0;
-
         for (j, partial_point) in decomposed_point.iter().take(k - 1).enumerate() {
             let block_dim = dims[j];
-            let start = eb << block_dim; // == eb * 2^{block_dim}
+            let start = eb << block_dim;
             let end = start + (1 << block_dim);
 
             let aux_vec = &aux_d_bool[j];
             debug_assert!(end <= aux_vec.len(), "state slice OOB");
 
-            // Parallel clone of state slice -> d_j
-            let d_j: Vec<E::G1Affine> = cfg_iter!(aux_vec[start..end]).cloned().collect();
+            // `AuxRow::slice` gives the proof's `D_j` directly. For a
+            // `Dense` row this is a `to_vec` memcpy; for a `Sparse` row
+            // it's `2^{d_j}` `BTreeMap::get`s defaulting to affine zero
+            // (cheap because `2^{d_j}` is small — typically 2..16 in
+            // KZH-k regimes).
+            d.push(aux_vec.slice(start..end));
 
-            d.push(d_j);
-
-            // Reduce the last block on the sparse polynomial (sequential dependency)
-            partial_polynomial =
-                fix_last_variables_boolean_sparse(&partial_polynomial, partial_point);
-
-            // Update eb to include this block for next iteration:
-            // new_bits = [partial_point || old_bits] (LE)
-            let s = bits_le_to_usize(partial_point);
-            eb = s + (eb << block_dim);
+            eb = bits_le_to_usize(partial_point) + (eb << block_dim);
         }
 
-        let f = DenseOrSparseMLE::Sparse(partial_polynomial.clone());
-        let eval =
-            fix_last_variables_boolean_sparse(&partial_polynomial, &decomposed_point[k - 1])[0];
+        // Materialize the residual `f` directly from the original
+        // polynomial via one `BTreeMap::range` over the prefix window.
+        // Equivalent to the chain of `fix_last_variables_boolean_sparse`
+        // calls but touches only `O(nnz / 2^{n - d_k})` entries instead
+        // of `O(nnz)`.
+        let last_dim = dims[k - 1];
+        let win_start = eb << last_dim;
+        let win_end = win_start + (1 << last_dim);
+        let pairs: Vec<(usize, E::ScalarField)> = polynomial
+            .evaluations
+            .range(win_start..win_end)
+            .map(|(&g, &v)| (g - win_start, v))
+            .collect();
+        let f_residual = SparseMultilinearExtension::from_evaluations(last_dim, &pairs);
 
-        Ok((KZHKOpeningProof::new(d, f, None, None, None), eval))
+        // The final evaluation is `polynomial(b_1, ..., b_{k-1}, b_k)` —
+        // a single Boolean point in the original hypercube. One
+        // `BTreeMap::get` instead of another full reduction pass.
+        let final_idx = win_start | bits_le_to_usize(&decomposed_point[k - 1]);
+        let eval = polynomial
+            .evaluations
+            .get(&final_idx)
+            .copied()
+            .unwrap_or_else(E::ScalarField::zero);
+
+        Ok((
+            KZHKOpeningProof::new(d, DenseOrSparseMLE::Sparse(f_residual), None, None, None),
+            eval,
+        ))
     }
 
     /// Splits a flat evaluation point into `k` block-sized sub-points
@@ -1142,7 +1259,7 @@ macro_rules! cfg_for_each_with_scratch {
 /// for a sparse polynomial it's the size of the non-zero coefficient map.
 /// `update_state` uses this to decide whether per-chunk / per-bucket MSMs
 /// are small enough to run through the naive-MSM fast path in
-/// `msm_wrapper_g1`, in which case the outer loop can safely parallelize.
+/// `msm`, in which case the outer loop can safely parallelize.
 fn sparsity_of<F: ark_ff::Field>(poly: &DenseOrSparseMLE<F>) -> usize {
     match poly {
         DenseOrSparseMLE::Dense(p) => p.evaluations.len(),

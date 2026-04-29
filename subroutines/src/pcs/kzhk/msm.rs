@@ -1,217 +1,364 @@
-//! Size-aware multi-scalar-multiplication wrapper used throughout KZH-k.
+//! MSM wrapper that picks a strategy based on the input size and hardware.
 //!
-//! # Why not call arkworks directly
+//! Workflow:
+//! * When `bases.len() < NAIVE_THRESHOLD`, we run a plain scalar-mul + sum —
+//!   cheap to set up and faster than Pippenger for tiny inputs.
+//! * Otherwise we call `VariableBaseMSM::msm_unchecked` (arkworks Pippenger)
+//!   inside a rayon thread pool whose width is looked up from `THREAD_TABLE`.
 //!
-//! `ark_ec::VariableBaseMSM::msm_unchecked` always goes through Pippenger,
-//! which pays bucket-allocation and reduction overhead even for very small
-//! inputs, and (with its `parallel` feature) builds a fresh rayon
-//! `ThreadPool` per call. Neither is desirable for the access patterns
-//! KZH-k generates — in particular, `update_state_*` produces thousands of
-//! tiny per-chunk / per-bucket MSMs, and those calls can fire from inside
-//! an already-parallel region in which a nested pool build would exhaust
-//! the OS thread limit.
-//!
-//! This wrapper adds three decisions on top of `msm_unchecked`:
-//!
-//! 1. **Algorithm selection by size.** For `N ≤ NAIVE_MSM_THRESHOLD` we
-//!    skip Pippenger entirely and just compute `∑ sᵢ·Bᵢ` with a tight
-//!    `mul_bigint` + add loop. On BN254, Pippenger only starts winning
-//!    around ~32–100 terms; below that, naive summation is both simpler
-//!    and faster because it has zero setup cost. The threshold is
-//!    conservative (100) so that callers parallelizing an outer loop of
-//!    small MSMs can rely on *every* inner call taking the naive path.
-//!
-//! 2. **Nested-pool avoidance.** Under `--features parallel`, if we are
-//!    already inside a rayon worker (`rayon::current_thread_index()` is
-//!    `Some`), we call `msm_unchecked` directly without building a pool.
-//!    This uses the ambient pool's parallelism and avoids the macOS
-//!    `EAGAIN` / `ThreadPoolBuildError` failures that occur when many
-//!    parallel tasks each try to spawn their own OS threads.
-//!
-//! 3. **Sized ad-hoc pool for top-level calls.** When called from outside
-//!    a rayon region and `N` is large enough to warrant parallelism, we
-//!    build a short-lived rayon pool whose thread count is picked by
-//!    [`threads_for_n`] — a small step function of `N`, capped by the
-//!    machine's physical core count. The heuristic targets ≥ ~128 terms
-//!    per worker so Pippenger's overhead is amortized; `N < 32` runs
-//!    single-threaded (and in practice takes the naive path above
-//!    anyway), while very large `N` (≥ 4096) is allowed up to 64
-//!    threads. See the table in [`threads_for_n`].
-//!
-//! # Feature gating
-//!
-//! Without `--features parallel` the code compiles down to: small-N
-//! naive path, or `msm_unchecked` sequentially. No rayon dependency is
-//! pulled in.
+//! Tune `NAIVE_THRESHOLD` and `THREAD_TABLE` for your hardware by running
+//! `calibrate::calibrate::<G>()` and pasting the recommended values into
+//! this file.
 
-use ark_ec::{pairing::Pairing, AffineRepr, CurveGroup, VariableBaseMSM};
-use ark_ff::PrimeField;
+use ark_ec::scalar_mul::variable_base::VariableBaseMSM;
 
-use ark_ec::PrimeGroup;
-use ark_std::Zero;
-
-/// Upper bound below which `msm_wrapper_g1` uses a naive sum-of-scalar-mults
-/// instead of arkworks' Pippenger. Exposed so callers can decide whether
-/// their per-chunk / per-bucket MSMs are all small enough that the outer
-/// loop can be parallelized without causing nested rayon pool builds
-/// inside arkworks' Pippenger.
-pub const NAIVE_MSM_THRESHOLD: usize = 100;
-#[cfg(feature = "parallel")]
-use rayon::ThreadPoolBuilder;
-// ===============================
-// Public API (G1 / G2)
-// ===============================
-
-/// MSM in `G1` sized by input length.
+/// Input size strictly below this threshold runs through `naive_msm`.
+/// Override by running [`calibrate::calibrate`] and replacing this constant.
 ///
-/// Dispatch rules (see module docs for the rationale):
+/// Calibrated on bn254 G1 on a 16-thread machine: at `n=2` naive (177 µs)
+/// still beats Pippenger (215 µs); at `n=4` Pippenger (251 µs) overtakes
+/// naive (343 µs).
+pub const NAIVE_THRESHOLD: usize = 4;
+
+/// Size-range → rayon thread-count table used when `bases.len() >= NAIVE_THRESHOLD`.
 ///
-/// - `N ≤ NAIVE_MSM_THRESHOLD` → naive `∑ sᵢ·Bᵢ` loop, no rayon pool.
-/// - Already inside a rayon worker → `ark_ec::VariableBaseMSM::msm_unchecked`
-///   directly, using the ambient pool.
-/// - Top-level call, `N` large → build a short-lived rayon pool sized by
-///   [`threads_for_n`] and run `msm_unchecked` inside it.
-/// - `--features parallel` disabled → always sequential `msm_unchecked`
-///   (after the naive path).
-pub fn msm_wrapper_g1<E: Pairing>(
-    bases: &[<E::G1 as CurveGroup>::Affine],
-    scalars: &[E::ScalarField],
-) -> E::G1
-where
-    E::ScalarField: PrimeField,
-    <E::G1 as CurveGroup>::Affine: AffineRepr<ScalarField = E::ScalarField, Group = E::G1>,
-{
-    msm_wrapper_affine::<E, <E::G1 as CurveGroup>::Affine>(bases, scalars)
-}
+/// Format: `(min_size_inclusive, max_size_exclusive, threads)`. Ranges must
+/// cover `[NAIVE_THRESHOLD, usize::MAX)` without gaps or overlap; the last
+/// entry should extend to `usize::MAX`.
+///
+/// Calibrated on bn254 G1, 16-thread machine. Each benchmarked size's
+/// preferred thread count is held until the next benchmarked size (no
+/// gap-fallback to 1 thread). Small-n thread counts (≤ 32) are noise-dominated;
+/// the moderate-to-large rows reflect the meaningful regime.
+pub const THREAD_TABLE: &[(usize, usize, usize)] = &[
+    (0, 2, 9),
+    (2, 4, 7),
+    (4, 8, 3),
+    (8, 16, 4),
+    (16, 32, 5),
+    (32, 512, 4),
+    (512, 1024, 8),
+    (1024, 4096, 15),
+    (4096, 8192, 14),
+    (8192, 16384, 16),
+    (16384, 32768, 14),
+    (32768, usize::MAX, 16),
+];
 
-/// `G2` counterpart of [`msm_wrapper_g1`]. KZH-k currently performs most
-/// multi-scalar multiplications in `G1`; this entry point exists for
-/// symmetry and for any future `G2`-side aggregations.
-pub fn msm_wrapper_g2<E: Pairing>(
-    bases: &[<E::G2 as CurveGroup>::Affine],
-    scalars: &[E::ScalarField],
-) -> E::G2
-where
-    E::ScalarField: PrimeField,
-    <E::G2 as CurveGroup>::Affine: AffineRepr<ScalarField = E::ScalarField, Group = E::G2>,
-{
-    msm_wrapper_affine::<E, <E::G2 as CurveGroup>::Affine>(bases, scalars)
-}
-
-// ===============================
-// Core wrapper (generic Affine)
-// ===============================
-
-pub fn msm_wrapper_affine<E, A>(bases: &[A], scalars: &[E::ScalarField]) -> A::Group
-where
-    E: Pairing,
-    E::ScalarField: PrimeField,
-    A: AffineRepr<ScalarField = E::ScalarField>,
-    A::Group: VariableBaseMSM,
-{
-    // Length check matches arkworks' msm API
-    if bases.len() != scalars.len() {
-        panic!()
-    }
-
-    // Small-input fast path: naive summation of scalar-mults.
-    //
-    // Arkworks' `msm_unchecked` always goes through Pippenger, which pays
-    // bucket-allocation and reduction overhead even for very small `N`.
-    // For BN254 Pippenger only starts winning around ~32 terms; below that
-    // a plain `sum(s_i * B_i)` is faster. This matters a lot for sparse
-    // polynomials where the per-bucket MSMs in `update_state_sparse`
-    // degenerate to 1–tens of terms each (see `KZHK::update_state_sparse`).
-    if bases.len() <= NAIVE_MSM_THRESHOLD {
-        let mut acc = A::Group::zero();
-        for (b, s) in bases.iter().zip(scalars.iter()) {
-            acc += b.into_group().mul_bigint(s.into_bigint());
+/// Look up the preferred thread count for an MSM of size `n`.
+#[inline]
+pub fn threads_for_size(n: usize) -> usize {
+    for &(lo, hi, t) in THREAD_TABLE {
+        if n >= lo && n < hi {
+            return t.max(1);
         }
-        return acc;
     }
+    1
+}
 
-    // Non-parallel build: just call arkworks MSM
-    #[cfg(not(feature = "parallel"))]
-    {
-        return <A::Group as VariableBaseMSM>::msm_unchecked(bases, scalars);
+/// Naive MSM: `sum_i bases[i] * scalars[i]`. Used below `NAIVE_THRESHOLD`.
+pub fn naive_msm<G: VariableBaseMSM>(bases: &[G::MulBase], scalars: &[G::ScalarField]) -> G {
+    debug_assert_eq!(
+        bases.len(),
+        scalars.len(),
+        "msm: bases/scalars length mismatch"
+    );
+    bases
+        .iter()
+        .zip(scalars.iter())
+        .map(|(b, s)| *b * *s)
+        .fold(G::zero(), |acc, term| acc + term)
+}
+
+/// Entry point: switches between naive and Pippenger based on size and pins
+/// the Pippenger call to a rayon pool sized from `THREAD_TABLE`.
+///
+/// The preferred thread count from `THREAD_TABLE` is clamped against
+/// `rayon::current_num_threads()` so we never escape a caller-imposed budget
+/// (e.g. `RAYON_NUM_THREADS=1` benches stay single-threaded).
+pub fn msm<G: VariableBaseMSM>(bases: &[G::MulBase], scalars: &[G::ScalarField]) -> G {
+    debug_assert_eq!(
+        bases.len(),
+        scalars.len(),
+        "msm: bases/scalars length mismatch"
+    );
+    let n = bases.len();
+    if n < NAIVE_THRESHOLD {
+        return naive_msm::<G>(bases, scalars);
     }
-
-    // Parallel build: run MSM inside a small pool with fixed-heuristic threads
     #[cfg(feature = "parallel")]
     {
-        // If we're already inside a rayon worker thread, don't build a nested
-        // `ThreadPool` — that spawns fresh OS threads per call and will
-        // exhaust the per-process thread limit when the caller is itself
-        // running many MSMs in parallel (e.g. `update_state_dense`'s
-        // `cfg_iter_mut!` over `d_j`). The ambient pool already has
-        // parallelism; arkworks' `msm_unchecked` will use it.
-        if rayon::current_thread_index().is_some() {
-            return <A::Group as VariableBaseMSM>::msm_unchecked(bases, scalars);
-        }
-
-        let n = bases.len();
-        let phys = detect_cores();
-        let threads = threads_for_n(n, phys);
-
-        // If threads == 1, avoid building a pool
+        let preferred = threads_for_size(n);
+        let budget = rayon::current_num_threads().max(1);
+        let threads = preferred.min(budget);
         if threads <= 1 {
-            return <A::Group as VariableBaseMSM>::msm_unchecked(bases, scalars);
+            // Caller only allows one worker — skip the pool dance entirely so we
+            // don't pay install overhead on every call.
+            G::msm_unchecked(bases, scalars)
+        } else {
+            pool::install(threads, || G::msm_unchecked(bases, scalars))
         }
-
-        let pool = ThreadPoolBuilder::new()
-            .num_threads(threads)
-            .build()
-            .expect("failed to build rayon pool");
-
-        pool.install(|| <A::Group as VariableBaseMSM>::msm_unchecked(bases, scalars))
+    }
+    #[cfg(not(feature = "parallel"))]
+    {
+        G::msm_unchecked(bases, scalars)
     }
 }
 
-// ===============================
-// Fixed heuristic thread picker
-// ===============================
-
-/// Picks a rayon worker count for a top-level MSM of size `n`.
-///
-/// Fixed step function — no autotuning, no runtime sampling:
-///
-/// | n             | threads |
-/// |---------------|---------|
-/// | `< 32`        | 1       |
-/// | `< 256`       | 2       |
-/// | `< 512`       | 16      |
-/// | `< 4096`      | 32      |
-/// | `≥ 4096`      | 64      |
-///
-/// Then capped by the machine's physical core count.
-///
-/// Rationale: Pippenger's per-worker overhead dominates for very small
-/// `n` (and we've already short-circuited those through the naive path);
-/// as `n` grows we let more cores in, but the cap keeps us from
-/// saturating a big machine on a moderate MSM and helps avoid nested
-/// pool explosions when several wrappers fire concurrently.
 #[cfg(feature = "parallel")]
-fn threads_for_n(n: usize, phys_cores: usize) -> usize {
-    let t = if n < 32 {
-        1
-    } else if n < 256 {
-        2
-    } else if n < 512 {
-        16
-    } else if n < 4096 {
-        32
-    } else {
-        64
-    };
-    t.min(phys_cores.max(1))
+mod pool {
+    //! Cache rayon thread pools per distinct thread count so we don't rebuild
+    //! one on every MSM call.
+
+    use std::collections::BTreeMap;
+    use std::sync::{Arc, Mutex, OnceLock};
+
+    type PoolMap = Mutex<BTreeMap<usize, Arc<rayon::ThreadPool>>>;
+    static POOLS: OnceLock<PoolMap> = OnceLock::new();
+
+    fn get_or_build(threads: usize) -> Arc<rayon::ThreadPool> {
+        let pools = POOLS.get_or_init(|| Mutex::new(BTreeMap::new()));
+        let mut guard = pools.lock().expect("MSM pool mutex poisoned");
+        Arc::clone(guard.entry(threads).or_insert_with(|| {
+            Arc::new(
+                rayon::ThreadPoolBuilder::new()
+                    .num_threads(threads)
+                    .thread_name(move |i| format!("msm-t{threads}-{i}"))
+                    .build()
+                    .expect("failed to build MSM rayon pool"),
+            )
+        }))
+    }
+
+    pub fn install<OP, R>(threads: usize, op: OP) -> R
+    where
+        OP: FnOnce() -> R + Send,
+        R: Send,
+    {
+        get_or_build(threads).install(op)
+    }
 }
 
-/// Physical-core estimate used as an upper bound in [`threads_for_n`].
-/// Falls back to 1 if the platform can't answer.
-#[cfg(feature = "parallel")]
-fn detect_cores() -> usize {
-    std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(1)
-        .max(1)
+/// Hardware calibration: sweep sizes + thread counts, measure `msm_unchecked`
+/// timings, and print a recommended `NAIVE_THRESHOLD` / `THREAD_TABLE`.
+pub mod calibrate {
+    use super::*;
+    use ark_std::{rand::Rng, UniformRand};
+    use std::time::{Duration, Instant};
+
+    /// Result of a calibration sweep.
+    #[derive(Debug, Clone)]
+    pub struct Calibration {
+        /// Smallest size at which Pippenger (via arkworks) beats the naive loop.
+        pub naive_threshold: usize,
+        /// Per-range best thread count: `(min_inclusive, max_exclusive, threads)`.
+        pub thread_table: Vec<(usize, usize, usize)>,
+    }
+
+    impl Calibration {
+        /// Print the calibration as copy-pasteable constants for this file.
+        pub fn print_as_constants(&self) {
+            println!(
+                "pub const NAIVE_THRESHOLD: usize = {};",
+                self.naive_threshold
+            );
+            println!("pub const THREAD_TABLE: &[(usize, usize, usize)] = &[");
+            for (lo, hi, t) in &self.thread_table {
+                let hi_str = if *hi == usize::MAX {
+                    "usize::MAX".to_string()
+                } else {
+                    hi.to_string()
+                };
+                println!("    ({}, {}, {}),", lo, hi_str, t);
+            }
+            println!("];");
+        }
+    }
+
+    /// Calibrate on the current hardware.
+    ///
+    /// * `sizes` — sizes to benchmark (should span the range you care about).
+    /// * `max_threads` — upper bound for thread counts to try.
+    /// * `iters` — timing iterations per measurement (more = steadier, slower).
+    ///
+    /// The resulting `Calibration` picks the fastest Pippenger thread count per
+    /// size, then collapses adjacent sizes with the same winner into a single
+    /// table row.
+    pub fn calibrate<G: VariableBaseMSM>(
+        sizes: &[usize],
+        max_threads: usize,
+        iters: usize,
+    ) -> Calibration {
+        assert!(!sizes.is_empty(), "calibrate: sizes is empty");
+        assert!(max_threads >= 1, "calibrate: max_threads must be >= 1");
+        assert!(iters >= 1, "calibrate: iters must be >= 1");
+        let mut rng = ark_std::test_rng();
+
+        let mut naive_threshold = usize::MAX;
+        let mut per_size: Vec<(usize, usize)> = Vec::with_capacity(sizes.len());
+
+        for &n in sizes {
+            let (bases, scalars) = random_inputs::<G, _>(n, &mut rng);
+
+            let naive_time = time_it(iters, || {
+                let _ = naive_msm::<G>(&bases, &scalars);
+            });
+
+            // Best thread count for Pippenger at this size.
+            let mut best_threads = 1usize;
+            let mut best_pip_time = Duration::MAX;
+            for t in 1..=max_threads {
+                let elapsed = bench_pippenger::<G>(t, iters, &bases, &scalars);
+                if elapsed < best_pip_time {
+                    best_pip_time = elapsed;
+                    best_threads = t;
+                }
+            }
+
+            // Smallest size where Pippenger wins → becomes the naive threshold.
+            if naive_threshold == usize::MAX && best_pip_time < naive_time {
+                naive_threshold = n;
+            }
+
+            println!(
+                "  n={n:>7}  naive={naive_time:?}  pippenger(best t={best_threads})={best_pip_time:?}"
+            );
+            per_size.push((n, best_threads));
+        }
+
+        if naive_threshold == usize::MAX {
+            // Pippenger never won in the swept range — keep naive for everything.
+            naive_threshold = *sizes.last().unwrap();
+        }
+
+        // Collapse adjacent sizes with the same winning thread count into ranges.
+        let mut thread_table: Vec<(usize, usize, usize)> = Vec::new();
+        for (n, t) in &per_size {
+            match thread_table.last_mut() {
+                Some(last) if last.2 == *t => last.1 = *n + 1,
+                _ => thread_table.push((*n, *n + 1, *t)),
+            }
+        }
+        // Extend the first row down to 0 and the last row to usize::MAX so the
+        // table covers the full input space.
+        if let Some(first) = thread_table.first_mut() {
+            first.0 = 0;
+        }
+        if let Some(last) = thread_table.last_mut() {
+            last.1 = usize::MAX;
+        }
+
+        Calibration {
+            naive_threshold,
+            thread_table,
+        }
+    }
+
+    fn bench_pippenger<G: VariableBaseMSM>(
+        threads: usize,
+        iters: usize,
+        bases: &[G::MulBase],
+        scalars: &[G::ScalarField],
+    ) -> Duration {
+        #[cfg(feature = "parallel")]
+        {
+            pool::install(threads, || {
+                time_it(iters, || {
+                    let _ = G::msm_unchecked(bases, scalars);
+                })
+            })
+        }
+        #[cfg(not(feature = "parallel"))]
+        {
+            let _ = threads;
+            time_it(iters, || {
+                let _ = G::msm_unchecked(bases, scalars);
+            })
+        }
+    }
+
+    fn time_it<F: FnMut()>(iters: usize, mut f: F) -> Duration {
+        // Warm-up so caches, thread pools, and JIT-like state are primed.
+        f();
+        let start = Instant::now();
+        for _ in 0..iters {
+            f();
+        }
+        start.elapsed() / iters as u32
+    }
+
+    fn random_inputs<G: VariableBaseMSM, R: Rng>(
+        n: usize,
+        rng: &mut R,
+    ) -> (Vec<G::MulBase>, Vec<G::ScalarField>) {
+        let bases_proj: Vec<G> = (0..n).map(|_| G::rand(rng)).collect();
+        let bases = G::batch_convert_to_mul_base(&bases_proj);
+        let scalars: Vec<G::ScalarField> = (0..n).map(|_| G::ScalarField::rand(rng)).collect();
+        (bases, scalars)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn msm_matches_naive_on_bn254_g1() {
+        use ark_bn254::{Fr, G1Projective};
+        use ark_ec::ScalarMul;
+        use ark_std::{test_rng, UniformRand};
+
+        let mut rng = test_rng();
+
+        // Span both sides of the naive threshold so both code paths get hit.
+        for n in [
+            1usize,
+            5,
+            NAIVE_THRESHOLD.saturating_sub(1),
+            NAIVE_THRESHOLD,
+            NAIVE_THRESHOLD + 17,
+            256,
+            1024,
+        ] {
+            if n == 0 {
+                continue;
+            }
+            let bases_proj: Vec<G1Projective> =
+                (0..n).map(|_| G1Projective::rand(&mut rng)).collect();
+            let bases = G1Projective::batch_convert_to_mul_base(&bases_proj);
+            let scalars: Vec<Fr> = (0..n).map(|_| Fr::rand(&mut rng)).collect();
+
+            let fast: G1Projective = msm(&bases, &scalars);
+            let naive: G1Projective = naive_msm(&bases, &scalars);
+            assert_eq!(fast, naive, "msm mismatch at n={n}");
+        }
+    }
+
+    /// Run with: `cargo test --release -p subroutines --features parallel \
+    ///   pcs::kzhk::msm::tests::run_calibration -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn run_calibration() {
+        use ark_bn254::G1Projective;
+
+        // Sizes covering the per-bucket / per-chunk MSM regimes that KZH-k
+        // actually invokes (small to a few hundred K). Skips powers of 2 we
+        // don't care about so the sweep finishes in reasonable time.
+        let sizes: &[usize] = &[
+            1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536,
+            131072,
+        ];
+        let max_threads = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1);
+        let iters = 5;
+
+        println!(
+            "calibrating bn254 G1 MSM, max_threads={max_threads}, iters={iters} on {} sizes",
+            sizes.len()
+        );
+        let cal = calibrate::calibrate::<G1Projective>(sizes, max_threads, iters);
+        println!("\n--- recommended constants ---");
+        cal.print_as_constants();
+    }
 }
