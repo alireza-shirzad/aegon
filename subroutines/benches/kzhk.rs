@@ -85,11 +85,12 @@ const CASES: &[BenchCase] = &[
     // case(27, 8, true,  true,  100),
     // sp values below ~3% trigger the new sparse-aux path (`nnz · 4 < dj_size`
     // at the deepest level, dj_size ≈ 33.5M).
-    case(28, 8, true, true, 1),
-    case(28, 8, true, true, 5),
-    case(28, 8, true, true, 10),
-    case(28, 8, true, true, 20),
-    case(28, 8, true, true, 50),
+    case(20, 10, true, true, 0),
+    // case(28, 20, true, true, 1),
+    // case(28, 20, true, true, 5),
+    // case(28, 20, true, true, 10),
+    // case(28, 20, true, true, 20),
+    // case(28, 20, true, true, 50),
 ];
 
 type ProverParam = <KZHK<E> as PolynomialCommitmentScheme<E>>::ProverParam;

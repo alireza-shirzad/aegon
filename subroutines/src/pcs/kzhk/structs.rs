@@ -5,6 +5,7 @@ use ark_serialize::{
     self, CanonicalDeserialize, CanonicalSerialize, Compress, Read, SerializationError, Valid,
     Validate, Write,
 };
+use ark_ff::One;
 use ark_std::{cfg_into_iter, cfg_iter, cfg_iter_mut, ops::Sub, Zero};
 use derivative::Derivative;
 use ndarray::{ArrayD, IxDyn};
@@ -530,6 +531,28 @@ impl<E: Pairing> Default for KZHKOpeningProof<E> {
     }
 }
 
+/// Batch-normalize a `Vec<Vec<G1>>` into `Vec<Vec<G1Affine>>` with one
+/// Montgomery batch inversion across every entry, instead of one
+/// inversion per entry. Preserves row shape.
+fn batch_normalize_rows<E: Pairing>(
+    proj_rows: Vec<Vec<E::G1>>,
+) -> Vec<Vec<E::G1Affine>> {
+    let row_lens: Vec<usize> = proj_rows.iter().map(|r| r.len()).collect();
+    let total: usize = row_lens.iter().sum();
+    if total == 0 {
+        return row_lens.into_iter().map(|_| Vec::new()).collect();
+    }
+    let flat: Vec<E::G1> = proj_rows.into_iter().flatten().collect();
+    let flat_aff = <E::G1 as CurveGroup>::normalize_batch(&flat);
+    let mut out: Vec<Vec<E::G1Affine>> = Vec::with_capacity(row_lens.len());
+    let mut idx = 0;
+    for len in row_lens {
+        out.push(flat_aff[idx..idx + len].to_vec());
+        idx += len;
+    }
+    out
+}
+
 impl<E: Pairing> core::ops::Mul<E::ScalarField> for KZHKOpeningProof<E> {
     type Output = Self;
 
@@ -540,13 +563,13 @@ impl<E: Pairing> core::ops::Mul<E::ScalarField> for KZHKOpeningProof<E> {
         if self == Self::default() {
             return self;
         }
-        let out_d = cfg_into_iter!(self.d)
-            .map(|row| {
-                cfg_into_iter!(row)
-                    .map(|x| (x * rhs).into_affine())
-                    .collect()
-            })
+        if rhs.is_one() {
+            return self;
+        }
+        let proj_rows: Vec<Vec<E::G1>> = cfg_into_iter!(self.d)
+            .map(|row| row.into_iter().map(|x| x * rhs).collect())
             .collect();
+        let out_d = batch_normalize_rows::<E>(proj_rows);
         let mut f_out = self.f;
         mul_poly_by_cnst_in_place(&mut f_out, rhs);
         KZHKOpeningProof {
@@ -566,16 +589,13 @@ impl<'a, E: Pairing> core::ops::Mul<E::ScalarField> for &'a KZHKOpeningProof<E> 
         if rhs.is_zero() {
             return KZHKOpeningProof::default();
         }
-        let out_d = self
-            .d
-            .iter()
-            .map(|row| {
-                row.iter()
-                    .cloned()
-                    .map(|x| (x * rhs).into_affine())
-                    .collect()
-            })
+        if rhs.is_one() {
+            return self.clone();
+        }
+        let proj_rows: Vec<Vec<E::G1>> = cfg_iter!(self.d)
+            .map(|row| row.iter().map(|x| *x * rhs).collect())
             .collect();
+        let out_d = batch_normalize_rows::<E>(proj_rows);
         let mut f_out = self.f.clone();
         mul_poly_by_cnst_in_place(&mut f_out, rhs);
         KZHKOpeningProof {
@@ -595,11 +615,13 @@ impl<E: Pairing> core::ops::MulAssign<E::ScalarField> for KZHKOpeningProof<E> {
             self.f = DenseOrSparseMLE::zero();
             return;
         }
-        for row in self.d.iter_mut() {
-            for x in row.iter_mut() {
-                *x = (*x * rhs).into_affine();
-            }
+        if rhs.is_one() {
+            return;
         }
+        let proj_rows: Vec<Vec<E::G1>> = cfg_iter!(self.d)
+            .map(|row| row.iter().map(|x| *x * rhs).collect())
+            .collect();
+        self.d = batch_normalize_rows::<E>(proj_rows);
         mul_poly_by_cnst_in_place(&mut self.f, rhs);
     }
 }
@@ -619,19 +641,18 @@ impl<E: Pairing> Add for KZHKOpeningProof<E> {
             rhs.d.len(),
             "Auxiliary information must have the same length"
         );
-        let out_d = self
-            .d
-            .iter()
-            .zip(rhs.d.iter())
+        let zipped: Vec<(Vec<E::G1Affine>, Vec<E::G1Affine>)> =
+            self.d.iter().cloned().zip(rhs.d.iter().cloned()).collect();
+        let proj_rows: Vec<Vec<E::G1>> = cfg_into_iter!(zipped)
             .map(|(ra, rb)| {
                 assert_eq!(ra.len(), rb.len(), "column count mismatch in a row");
-                ra.iter()
-                    .cloned()
-                    .zip(rb.iter().cloned())
-                    .map(|(x, y)| (x + y).into_affine())
+                ra.into_iter()
+                    .zip(rb.into_iter())
+                    .map(|(x, y)| x + y)
                     .collect()
             })
             .collect();
+        let out_d = batch_normalize_rows::<E>(proj_rows);
         if self.f == DenseOrSparseMLE::zero() {
             return KZHKOpeningProof {
                 d: out_d,
@@ -694,19 +715,22 @@ impl<E: Pairing> Sub for KZHKOpeningProof<E> {
             rhs.d.len(),
             "Auxiliary information must have the same length"
         );
-        let out_d = self
-            .d
-            .iter()
-            .zip(rhs.d.iter())
+        let zipped: Vec<(Vec<E::G1Affine>, Vec<E::G1Affine>)> =
+            self.d.iter().cloned().zip(rhs.d.iter().cloned()).collect();
+        let proj_rows: Vec<Vec<E::G1>> = cfg_into_iter!(zipped)
             .map(|(ra, rb)| {
                 assert_eq!(ra.len(), rb.len(), "column count mismatch in a row");
-                ra.iter()
-                    .cloned()
-                    .zip(rb.iter().cloned())
-                    .map(|(x, y)| (x - y).into_affine())
+                ra.into_iter()
+                    .zip(rb.into_iter())
+                    .map(|(x, y)| {
+                        let yp: E::G1 = y.into();
+                        let xp: E::G1 = x.into();
+                        xp - yp
+                    })
                     .collect()
             })
             .collect();
+        let out_d = batch_normalize_rows::<E>(proj_rows);
         let f_out = self.f - rhs.f;
         KZHKOpeningProof {
             d: out_d,

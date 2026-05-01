@@ -39,7 +39,7 @@ use std::collections::BTreeMap;
 use crate::{
     pcs::{
         kzhk::{
-            msm::{msm, NAIVE_THRESHOLD},
+            msm::{msm, naive_msm, NAIVE_THRESHOLD},
             srs::{KZHKProverParam, KZHKUniversalParams, KZHKVerifierParam},
             structs::{AuxRow, KZHKState, KZHKCommitment, KZHKConfig, KZHKOpeningProof},
         },
@@ -275,11 +275,11 @@ where
         point: &Self::Point,
         value: &E::ScalarField,
         proof: &Self::Proof,
-        _transcript: &mut IOPTranscript<E::ScalarField>,
+        transcript: &mut IOPTranscript<E::ScalarField>,
     ) -> Result<bool, PCSError> {
         let result = match (proof.get_r_hide(), proof.get_y_r(), proof.get_rho_prime()) {
             (Some(_), Some(_), Some(_)) => {
-                Self::verify_zk(verifier_param, commitment, point, value, None, proof)
+                Self::verify_zk(verifier_param, commitment, point, value, None, proof, transcript)
             },
             _ => Self::verify_non_zk(verifier_param, commitment, point, value, None, proof),
         };
@@ -415,37 +415,27 @@ impl<E: Pairing> KZHK<E> {
         polynomial: &DenseOrSparseMLE<E::ScalarField>,
         point: &[E::ScalarField],
         state: &KZHKState<E>,
-        _transcript: &mut IOPTranscript<E::ScalarField>,
+        transcript: &mut IOPTranscript<E::ScalarField>,
     ) -> Result<(KZHKOpeningProof<E>, E::ScalarField), PCSError> {
         let prover_param: &KZHKProverParam<E> = prover_param.borrow();
-        // The zk path
         let (non_zk_opening, non_zk_value) =
             Self::open_non_zk(prover_param, commitment, polynomial, point, state)?;
-        // Sampling the sparse polynomial r(X)
         let r_poly: SparseMultilinearExtension<E::ScalarField> = rand_sparse_mle(
             polynomial.num_vars(),
             prover_param.get_hiding_sparsity().unwrap(),
             &mut test_rng(),
         );
         let r_poly_wrapped = DenseOrSparseMLE::Sparse(r_poly.clone());
-        // Commit to the sparse masking polynomial r(X). The opening of r
-        // itself is plain (non-zk): r is the mask, it doesn't need to
-        // be re-masked.
-        //
-        // `update_state_sparse` now uses sparsity-aware aux storage
-        // (`AuxRow::Sparse`), so building r's aux costs O((k-1)·c)
-        // instead of O(sum(dj_size)). With c ≈ k·N^{1/k} non-zeros
-        // (~91 at n=28, k=8) the call is microseconds, and the generic
-        // `open_non_zk` reads the same precomputed slices the rest of
-        // the codebase uses.
         let (r_hide, mut r_state) = Self::commit(prover_param, &r_poly_wrapped)?;
         let rho = *r_state.get_tau();
         Self::update_state(prover_param, &r_poly_wrapped, &r_hide, &mut r_state)?;
         let (r_opening, y_r) =
             Self::open_non_zk(prover_param, &r_hide, &r_poly_wrapped, point, &r_state)?;
-        // Sigma-protocol challenge (currently fixed to 1; a transcript-derived
-        // Fiat-Shamir challenge would replace this in a production setting).
-        let alpha = E::ScalarField::one();
+        // Fiat-Shamir: derive alpha from the prover's first-round messages.
+        // Verifier replays the same appends in the same order — see
+        // `verify_zk`. Once both sides commit to (C, point, y, R_hide)
+        // before the challenge, alpha is binding for the sigma protocol.
+        let alpha = Self::derive_alpha(transcript, commitment, point, &non_zk_value, &r_hide)?;
         // rho_prime = alpha*tau + rho derandomizes the hiding offset so that
         // `alpha*C_hide + R_hide - rho_prime * h` equals the non-hiding
         // commitment to `alpha*f + r`.
@@ -454,8 +444,26 @@ impl<E: Pairing> KZHK<E> {
         output_opening.set_r_hide(r_hide);
         output_opening.set_y_r(y_r);
         output_opening.set_rho_prime(rho_prime);
-        let result = Ok((output_opening, non_zk_value));
-        result
+        Ok((output_opening, non_zk_value))
+    }
+
+    /// Fiat-Shamir derivation of the sigma-protocol challenge `alpha`.
+    /// Both prover and verifier call this with the same inputs in the
+    /// same order, so they agree on `alpha` without communication.
+    fn derive_alpha(
+        transcript: &mut IOPTranscript<E::ScalarField>,
+        commitment: &KZHKCommitment<E>,
+        point: &[E::ScalarField],
+        value: &E::ScalarField,
+        r_hide: &KZHKCommitment<E>,
+    ) -> Result<E::ScalarField, PCSError> {
+        transcript.append_serializable_element(b"C", &commitment.get_commitment())?;
+        for p in point {
+            transcript.append_serializable_element(b"point", p)?;
+        }
+        transcript.append_serializable_element(b"y", value)?;
+        transcript.append_serializable_element(b"R_hide", &r_hide.get_commitment())?;
+        Ok(transcript.get_and_append_challenge(b"alpha")?)
     }
 
     /// Batched opening by plain sum (no random linear combination).
@@ -518,10 +526,12 @@ impl<E: Pairing> KZHK<E> {
         value: &E::ScalarField,
         _state: Option<&KZHKState<E>>,
         proof: &KZHKOpeningProof<E>,
+        transcript: &mut IOPTranscript<E::ScalarField>,
     ) -> Result<bool, PCSError> {
-        let alpha = E::ScalarField::one();
+        let r_hide = proof.get_r_hide().as_ref().unwrap();
+        let alpha = Self::derive_alpha(transcript, commitment, point, value, r_hide)?;
         let c_lin = (commitment.get_commitment().into_group() * alpha
-            + proof.get_r_hide().unwrap().get_commitment().into_group()
+            + r_hide.get_commitment().into_group()
             - verifier_param.get_h() * proof.get_rho_prime().unwrap())
         .into_affine();
         let lin_commitment = KZHKCommitment::new(c_lin, commitment.get_num_vars());
@@ -775,8 +785,24 @@ impl<E: Pairing> KZHK<E> {
     }
 
     /// Sparse counterpart of [`Self::update_state_dense`]: exploits the
-    /// sparse coefficient map so that each per-chunk MSM sees only the
+    /// sparse coefficient map so each per-cell MSM only sees the
     /// non-zero entries falling in its Boolean window.
+    ///
+    /// Strategy (post-flattening). The aux table is a 2-D structure
+    /// indexed by `(level j, prefix b_1...b_j)`. The two loops are
+    /// independent — every cell's MSM is computed from `polynomial`'s
+    /// non-zeros and `H_{j+1}`, with no data dependency between cells.
+    /// We exploit that by collecting **all** non-empty cells across
+    /// **all** levels into one flat `Vec<(j, prefix, bases, scalars)>`
+    /// and running a single `cfg_into_iter!` over it.
+    ///
+    /// Why this beats nested parallelism: with k=20 we have ~`(k-1)·c`
+    /// independent MSMs (mostly size-1 at sparse levels). Nested rayon
+    /// (par over levels × par over cells) creates hundreds of small
+    /// tasks competing for the global pool; profiling showed per-level
+    /// wall time was ~10 ms even when actual work was µs because the
+    /// scheduler was overwhelmed. One flat par_iter with N tasks of
+    /// uniform shape gives rayon a clean work-stealing problem.
     #[tracing::instrument(level = "debug", skip_all, name = "KZH::CompAux_Sparse")]
     fn update_state_sparse(
         prover_param: impl Borrow<KZHKProverParam<E>>,
@@ -789,7 +815,7 @@ impl<E: Pairing> KZHK<E> {
         let k = dimensions.len();
         debug_assert!(k >= 2, "need at least 2 blocks to build d_i's");
 
-        // Build prefix sums of dimensions up to each block (exclusive of the last)
+        // Prefix sums: dj_size = 2^(d_1 + ... + d_j) at level j.
         let prefix_vars_vec: Vec<usize> = {
             let mut prefix_vars: usize = 0;
             dimensions
@@ -802,180 +828,111 @@ impl<E: Pairing> KZHK<E> {
                 .collect()
         };
 
-        // Compute the Boolean aux table d_bool. For each level
-        // `j = 0..k-1` we must produce `d_j[i] = <f(b_1..b_j=i, X_{j+1..k}), H_{j+1}>`
-        // for every Boolean prefix `i ∈ [0, 2^{prefix_var})` (Figure 14).
-        //
-        // We pick the row representation per level based on sparsity:
-        //
-        //   • Sparse path (`AuxRow::Sparse`) when `nnz · SPARSE_DENOM <
-        //     dj_size`, i.e. when at most ~`1/SPARSE_DENOM` of buckets
-        //     could possibly be non-empty. We bucket non-zeros into a
-        //     `BTreeMap<prefix, (bases, scalars)>` (only allocates
-        //     entries for non-empty prefixes), run an MSM per non-empty
-        //     prefix, and `normalize_batch` over only the non-zero
-        //     projectives. The output is a `BTreeMap<prefix, G1Affine>`
-        //     of size at most `nnz`. No `O(dj_size)` allocation, scan,
-        //     or batch-inversion anywhere on the critical path.
-        //
-        //   • Dense path (`AuxRow::Dense`) otherwise — original
-        //     `Vec<(Vec, Vec)>`-of-length-`dj_size` bucketing. Faster
-        //     than the sparse path when `nnz ≈ dj_size` because the
-        //     dense bucket lookup is array indexing (no hashing or tree
-        //     descent).
-        //
-        // Threshold: 4 means "sparse path when at most 25% of buckets
-        // could be non-empty". Picked as a conservative cross-over to
-        // keep the sparse path's per-entry constant factors (BTreeMap
-        // ops, ~tens of ns/entry on bn254) from regressing
-        // dense-leaning inputs. Refine if profiling argues otherwise.
+        // Per-level metadata: (dj_size, go_sparse). When
+        // `nnz · SPARSE_DENOM < dj_size`, the level's row is stored as
+        // `AuxRow::Sparse` (BTreeMap keyed by prefix); otherwise as
+        // `AuxRow::Dense` (Vec<G1Affine> of length dj_size, with empty
+        // cells filled with the affine zero).
         const SPARSE_DENOM: usize = 4;
         let nnz = polynomial.evaluations.len();
-
-        let d_bool: Vec<AuxRow<E>> = (0..k - 1)
+        let level_meta: Vec<(usize, bool)> = (0..k - 1)
             .map(|j| {
-                let prefix_var = prefix_vars_vec[j];
-                let dj_size = 1usize << prefix_var;
-                let rem_vars = polynomial.num_vars() - prefix_var;
-                let mask = if rem_vars == 0 { 0 } else { (1usize << rem_vars) - 1 };
-
-                let h_slice = prover_param.get_h_tensors()[j + 1]
-                    .as_slice_memory_order()
-                    .expect("H_t must be contiguous (standard layout)");
-
-                // Choose representation. `nnz.saturating_mul` guards
-                // against overflow at very high `nnz`; for our use
-                // case `nnz ≤ 2^num_vars` so it's a non-issue, but the
-                // guard makes the threshold check obviously safe.
+                let dj_size = 1usize << prefix_vars_vec[j];
                 let go_sparse = nnz.saturating_mul(SPARSE_DENOM) < dj_size;
+                (dj_size, go_sparse)
+            })
+            .collect();
 
+        // Step 1: bucket all non-zeros across all k-1 levels.
+        // Sequential pass (cheap: ~µs per level for r at k=20). Each
+        // level's buckets become `Vec<(prefix, bases, scalars)>`,
+        // ordered by prefix so the resulting Sparse rows have a
+        // canonical iteration order.
+        let mut level_buckets: Vec<Vec<(usize, Vec<E::G1Affine>, Vec<E::ScalarField>)>> =
+            Vec::with_capacity(k - 1);
+        for j in 0..k - 1 {
+            let prefix_var = prefix_vars_vec[j];
+            let rem_vars = polynomial.num_vars() - prefix_var;
+            let mask = if rem_vars == 0 { 0 } else { (1usize << rem_vars) - 1 };
+            let h_slice = prover_param.get_h_tensors()[j + 1]
+                .as_slice_memory_order()
+                .expect("H_t must be contiguous (standard layout)");
+
+            let mut buckets: BTreeMap<usize, (Vec<E::G1Affine>, Vec<E::ScalarField>)> =
+                BTreeMap::new();
+            for (&global_idx, &value) in polynomial.evaluations.iter() {
+                let prefix = if rem_vars == 0 { 0 } else { global_idx >> rem_vars };
+                let local_idx = global_idx & mask;
+                let entry = buckets.entry(prefix).or_default();
+                entry.0.push(h_slice[local_idx]);
+                entry.1.push(value);
+            }
+            level_buckets.push(
+                buckets
+                    .into_iter()
+                    .map(|(p, (b, s))| (p, b, s))
+                    .collect(),
+            );
+        }
+
+        // Step 2: flatten to one work list across all levels.
+        // Items: `(level_j, prefix, bases, scalars)`. The MSM at each
+        // item produces aux[level_j][prefix].
+        let mut flat: Vec<(usize, usize, Vec<E::G1Affine>, Vec<E::ScalarField>)> =
+            Vec::new();
+        for (j, buckets) in level_buckets.into_iter().enumerate() {
+            for (prefix, bases, scalars) in buckets {
+                flat.push((j, prefix, bases, scalars));
+            }
+        }
+
+        // Step 3: one parallel MSM sweep across all (level, prefix)
+        // pairs. No nesting — rayon's work-stealing schedules the
+        // ~(k-1)·c independent MSMs across cores cleanly.
+        //
+        // We use `naive_msm` unconditionally inside this map: most
+        // cells are size 1 (a single scalar-mul) at sparse levels;
+        // even the larger cells at shallow levels stay below the
+        // Pippenger break-even (size ~4). Avoiding `msm()` here also
+        // avoids `pool::install`, which is a synchronization point we
+        // don't want firing under outer rayon.
+        let projectives: Vec<E::G1> = cfg_iter!(flat)
+            .map(|(_j, _prefix, bases, scalars)| naive_msm::<E::G1>(bases, scalars))
+            .collect();
+
+        // Step 4: one batch normalization over every non-empty cell
+        // across every level.
+        let affines = <E::G1 as CurveGroup>::normalize_batch(&projectives);
+
+        // Step 5: rebuild per-level rows from the flat results.
+        let mut sparse_entries: Vec<BTreeMap<usize, E::G1Affine>> =
+            (0..k - 1).map(|_| BTreeMap::new()).collect();
+        for ((j, prefix, _, _), aff) in flat.iter().zip(affines.iter()) {
+            sparse_entries[*j].insert(*prefix, *aff);
+        }
+
+        let d_bool: Vec<AuxRow<E>> = sparse_entries
+            .into_iter()
+            .enumerate()
+            .map(|(j, entries)| {
+                let (dj_size, go_sparse) = level_meta[j];
                 if go_sparse {
-                    Self::aux_row_sparse(polynomial, h_slice, dj_size, rem_vars, mask)
+                    AuxRow::Sparse {
+                        len: dj_size,
+                        entries,
+                    }
                 } else {
-                    Self::aux_row_dense(polynomial, h_slice, dj_size, rem_vars, mask)
+                    let mut dense = vec![E::G1Affine::zero(); dj_size];
+                    for (prefix, aff) in entries {
+                        dense[prefix] = aff;
+                    }
+                    AuxRow::Dense(dense)
                 }
             })
             .collect();
 
         state.set_d_bool(d_bool);
         Ok(())
-    }
-
-    /// Sparse-row builder for one level of `update_state_sparse`.
-    ///
-    /// Walks the polynomial's `nnz` non-zero entries, bucketing them by
-    /// prefix into a `BTreeMap<prefix, (bases, scalars)>` so that no
-    /// memory is touched for empty prefixes. Runs one MSM per non-empty
-    /// prefix, then `normalize_batch`-es over only the non-zero
-    /// projective points. Total work per level: `O(nnz · log nnz)` for
-    /// the bucketing, `O((k-1)·nnz)` group ops for the MSMs, and
-    /// `O(non_empty_buckets)` field ops for `normalize_batch` — no
-    /// `O(dj_size)` term anywhere.
-    fn aux_row_sparse(
-        polynomial: &SparseMultilinearExtension<E::ScalarField>,
-        h_slice: &[E::G1Affine],
-        dj_size: usize,
-        rem_vars: usize,
-        mask: usize,
-    ) -> AuxRow<E> {
-        // Bucket non-zeros by prefix. BTreeMap so entries stay ordered
-        // (cheap range queries downstream and deterministic iteration).
-        let mut buckets: BTreeMap<usize, (Vec<E::G1Affine>, Vec<E::ScalarField>)> =
-            BTreeMap::new();
-        for (&global_idx, &value) in polynomial.evaluations.iter() {
-            let prefix = if rem_vars == 0 { 0 } else { global_idx >> rem_vars };
-            let local_idx = global_idx & mask;
-            let entry = buckets.entry(prefix).or_default();
-            entry.0.push(h_slice[local_idx]);
-            entry.1.push(value);
-        }
-
-        // Run per-bucket MSMs. Pull keys + scalars out into parallel
-        // Vecs so we can run the MSMs in a rayon-friendly shape; recombine
-        // after `normalize_batch`.
-        let prefixes: Vec<usize> = buckets.keys().copied().collect();
-        let bucket_data: Vec<(Vec<E::G1Affine>, Vec<E::ScalarField>)> =
-            buckets.into_values().collect();
-
-        // Same parallel-outer-safety check as the dense path: only spawn
-        // an outer rayon iter if every per-bucket MSM is below the
-        // naive-MSM threshold (so no nested arkworks Pippenger pool).
-        let max_bucket = bucket_data
-            .iter()
-            .map(|(_, s)| s.len())
-            .max()
-            .unwrap_or(0);
-        let parallel_outer_safe = max_bucket <= NAIVE_THRESHOLD;
-
-        let projective: Vec<E::G1> = if parallel_outer_safe {
-            cfg_into_iter!(bucket_data)
-                .map(|(bases, scalars)| msm::<E::G1>(&bases, &scalars))
-                .collect()
-        } else {
-            bucket_data
-                .into_iter()
-                .map(|(bases, scalars)| msm::<E::G1>(&bases, &scalars))
-                .collect()
-        };
-
-        let affine = <E::G1 as CurveGroup>::normalize_batch(&projective);
-        let entries: BTreeMap<usize, E::G1Affine> =
-            prefixes.into_iter().zip(affine.into_iter()).collect();
-
-        AuxRow::Sparse {
-            len: dj_size,
-            entries,
-        }
-    }
-
-    /// Dense-row builder for one level of `update_state_sparse` — used
-    /// when `nnz ≥ dj_size / SPARSE_DENOM`. Same logic as the previous
-    /// monolithic implementation: allocate `dj_size` buckets, walk
-    /// non-zeros, MSM, batch-normalize.
-    fn aux_row_dense(
-        polynomial: &SparseMultilinearExtension<E::ScalarField>,
-        h_slice: &[E::G1Affine],
-        dj_size: usize,
-        rem_vars: usize,
-        mask: usize,
-    ) -> AuxRow<E> {
-        let mut buckets: Vec<(Vec<E::G1Affine>, Vec<E::ScalarField>)> =
-            (0..dj_size).map(|_| (Vec::new(), Vec::new())).collect();
-        for (&global_idx, &value) in polynomial.evaluations.iter() {
-            let prefix = if rem_vars == 0 { 0 } else { global_idx >> rem_vars };
-            let local_idx = global_idx & mask;
-            let (bases, scalars) = &mut buckets[prefix];
-            bases.push(h_slice[local_idx]);
-            scalars.push(value);
-        }
-
-        let max_bucket = buckets.iter().map(|(_, s)| s.len()).max().unwrap_or(0);
-        let parallel_outer_safe = max_bucket <= NAIVE_THRESHOLD;
-
-        let projective: Vec<E::G1> = if parallel_outer_safe {
-            cfg_into_iter!(buckets)
-                .map(|(bases, scalars)| {
-                    if scalars.is_empty() {
-                        E::G1::zero()
-                    } else {
-                        msm::<E::G1>(&bases, &scalars)
-                    }
-                })
-                .collect()
-        } else {
-            buckets
-                .into_iter()
-                .map(|(bases, scalars)| {
-                    if scalars.is_empty() {
-                        E::G1::zero()
-                    } else {
-                        msm::<E::G1>(&bases, &scalars)
-                    }
-                })
-                .collect()
-        };
-
-        AuxRow::Dense(<E::G1 as CurveGroup>::normalize_batch(&projective))
     }
 
     /// Dense non-Boolean opening path of Figure 14: at each level `j`,
