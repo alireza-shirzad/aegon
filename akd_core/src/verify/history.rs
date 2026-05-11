@@ -188,10 +188,32 @@ fn verify_with_history_params(
 }
 
 /// Verifies a key history proof, given the corresponding sequence of hashes.
-/// Returns a vector of whether the validity of a hash could be verified.
-/// When false, the value <=> hash validity at the position could not be
-/// verified because the value has been removed ("tombstoned") from the storage layer.
+///
+/// **Not implemented in the AKD-on-Aegon backend.** Per-label version
+/// histories are a SEEMless concept that has no analogue in Aegon's
+/// polynomial-commitment model — Aegon stores the latest value for
+/// each slot and proves consistency between two specific epochs (see
+/// `akd::Directory::consistency_proof`). The signature is retained for
+/// source-level compatibility with the original AKD; the body always
+/// panics.
 pub fn key_history_verify<TC: Configuration>(
+    _vrf_public_key: &[u8],
+    _root_hash: Digest,
+    _current_epoch: u64,
+    _akd_label: AkdLabel,
+    _proof: HistoryProof,
+    _verification_params: HistoryVerificationParams,
+) -> Result<Vec<VerifyResult>, VerificationError> {
+    unimplemented!(
+        "AKD-on-Aegon: key_history is a SEEMless-only concept; use Directory::consistency_proof \
+         + akd::aegon_facade::verify_consistency instead"
+    )
+}
+
+/// Legacy SEEMless body kept compiled (but unreachable) so the rest of
+/// the module continues to type-check. Calling it panics.
+#[allow(dead_code)]
+fn _legacy_key_history_verify<TC: Configuration>(
     vrf_public_key: &[u8],
     root_hash: Digest,
     current_epoch: u64,

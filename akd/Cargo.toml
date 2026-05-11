@@ -55,12 +55,22 @@ tracing_instrument = ["tracing/attributes"]
 ## Required dependencies ##
 akd_core = { version = "0.12.0-pre.12", path = "../akd_core", default-features = false, features = [
     "vrf",
+    "parallel",
 ] }
+ark-bn254 = { workspace = true }
+ark-ec = { workspace = true }
+ark-ff = { workspace = true }
+ark-poly = { workspace = true }
+ark-serialize = { workspace = true }
+ark-std = { workspace = true }
+rand_chacha = { workspace = true }
 async-recursion = "1"
 async-trait = "0.1"
 dashmap = "5"
 hex = "0.4"
 log = { version = "0.4", features = ["kv_unstable"] }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
 tokio = { version = "1", features = ["sync", "time", "rt"] }
 
 ## Optional dependencies ##

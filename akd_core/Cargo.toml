@@ -26,6 +26,15 @@ vrf = ["ed25519-dalek", "curve25519-dalek"]
 serde_serialization = ["dep:serde", "dep:serde_bytes", "ed25519-dalek/serde"]
 # Parallelize VRF calculations during publish
 parallel_vrf = ["tokio"]
+# Parallel execution inside the absorbed crypto (KZH-k MSM, etc.)
+parallel = [
+    "rayon",
+    "ark-std/parallel",
+    "ark-ff/parallel",
+    "ark-poly/parallel",
+    "ark-ec/parallel",
+    "ndarray/rayon",
+]
 
 bench = ["parallel_vrf", "experimental", "vrf", "tokio/rt-multi-thread"]
 public_tests = ["dep:paste"]
@@ -44,6 +53,23 @@ ed25519-dalek = { version = "2", features = [
 ], optional = true }
 hex = "0.4"
 zeroize = "1"
+
+## Aegon-crypto dependencies (absorbed from arithmetic / subroutines / transcript) ##
+ark-bn254 = { workspace = true }
+ark-ec = { workspace = true }
+ark-ff = { workspace = true }
+ark-poly = { workspace = true }
+ark-serialize = { workspace = true }
+ark-std = { workspace = true }
+derivative = { workspace = true }
+displaydoc = { workspace = true }
+merlin = { version = "3", default-features = false }
+ndarray = { workspace = true, features = ["serde"] }
+num-bigint = { workspace = true }
+num-traits = { workspace = true }
+rand_chacha = { workspace = true }
+rayon = { workspace = true, optional = true }
+tracing = { workspace = true }
 
 ## Optional dependencies ##
 blake3 = { version = "1", optional = true, default-features = false }

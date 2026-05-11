@@ -205,6 +205,7 @@
 extern crate alloc;
 
 #[cfg(all(feature = "protobuf", not(feature = "nostd")))]
+pub mod aegon_crypto;
 pub mod proto;
 
 pub mod ecvrf;

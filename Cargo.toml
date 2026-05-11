@@ -1,6 +1,6 @@
 [workspace]
 
-members = ["akd", "akd_core", "examples", "xtask", "subroutines", "arithmetic", "transcript", "util"]
+members = ["akd", "akd_core", "examples", "xtask"]
 resolver = "2"
 
 

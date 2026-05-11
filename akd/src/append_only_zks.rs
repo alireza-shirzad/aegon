@@ -13,15 +13,15 @@ use crate::log::{debug, info};
 use crate::storage::manager::StorageManager;
 use crate::storage::types::StorageType;
 use crate::tree_node::{
-    new_interior_node, new_leaf_node, new_root_node, node_to_azks_value, node_to_label,
-    NodeHashingMode, NodeKey, TreeNode, TreeNodeType,
+    new_interior_node, new_leaf_node, node_to_azks_value, node_to_label, NodeHashingMode, NodeKey,
+    TreeNode, TreeNodeType,
 };
 use crate::Configuration;
 use crate::{
     errors::{AkdError, DirectoryError, ParallelismError, TreeNodeError},
     storage::{Database, Storable},
     AppendOnlyProof, AzksElement, AzksValue, Digest, Direction, MembershipProof, NodeLabel,
-    NonMembershipProof, PrefixOrdering, SiblingProof, SingleAppendOnlyProof, SizeOf, ARITY,
+    NonMembershipProof, PrefixOrdering, SiblingProof, SizeOf,
 };
 
 use async_recursion::async_recursion;
@@ -317,64 +317,29 @@ impl Storable for Azks {
 unsafe impl Sync for Azks {}
 
 impl Azks {
-    /// Creates a new azks
+    /// Creates a new azks.
+    ///
+    /// **Not implemented in the AKD-on-Aegon backend.** The signature is
+    /// preserved for source-level compatibility; calling this method
+    /// panics. The Aegon backend has no Merkle AZKS — see
+    /// [`crate::Directory::new`] for the real entry point.
     pub async fn new<TC: Configuration, S: Database>(
-        storage: &StorageManager<S>,
+        _storage: &StorageManager<S>,
     ) -> Result<Self, AkdError> {
-        let root_node = new_root_node::<TC>();
-        root_node.write_to_storage(storage, true).await?;
-
-        let azks = Azks {
-            latest_epoch: 0,
-            num_nodes: 1,
-        };
-
-        Ok(azks)
+        unimplemented!("AKD-on-Aegon: Azks is a SEEMless-only data structure; use Directory::new")
     }
 
     /// Insert a batch of new leaves.
     pub async fn batch_insert_nodes<TC: Configuration, S: Database + 'static>(
         &mut self,
-        storage: &StorageManager<S>,
-        nodes: Vec<AzksElement>,
-        insert_mode: InsertMode,
-        parallelism_config: AzksParallelismConfig,
+        _storage: &StorageManager<S>,
+        _nodes: Vec<AzksElement>,
+        _insert_mode: InsertMode,
+        _parallelism_config: AzksParallelismConfig,
     ) -> Result<(), AkdError> {
-        let azks_element_set = AzksElementSet::from(nodes);
-
-        // preload the nodes that we will visit during the insertion
-        let (fallible_load_count, time_s) =
-            tic_toc(self.preload_nodes(storage, &azks_element_set, parallelism_config)).await;
-        let load_count = fallible_load_count?;
-        if let Some(time) = time_s {
-            info!("Preload of nodes for insert ({load_count} objects loaded), took {time} s",);
-        } else {
-            info!("Preload of nodes for insert ({load_count} objects loaded) completed.",);
-        }
-
-        // increment the current epoch
-        self.increment_epoch();
-
-        if !azks_element_set.is_empty() {
-            // call recursive batch insert on the root
-            let (root_node, is_new, num_inserted) = Self::recursive_batch_insert_nodes::<TC, _>(
-                storage,
-                Some(NodeLabel::root()),
-                azks_element_set,
-                self.latest_epoch,
-                insert_mode,
-                parallelism_config.insertion.get_parallel_levels(),
-            )
-            .await?;
-            root_node.write_to_storage(storage, is_new).await?;
-
-            // update the number of nodes
-            self.num_nodes += num_inserted;
-
-            info!("Batch insert completed ({num_inserted} new nodes)");
-        }
-
-        Ok(())
+        unimplemented!(
+            "AKD-on-Aegon: Azks::batch_insert_nodes is SEEMless-only; updates flow through Directory::publish"
+        )
     }
 
     /// Inserts a batch of leaves recursively from a given node label. Note: it
@@ -802,13 +767,12 @@ impl Azks {
     #[cfg_attr(feature = "tracing_instrument", tracing::instrument(skip_all))]
     pub async fn get_membership_proof<TC: Configuration, S: Database>(
         &self,
-        storage: &StorageManager<S>,
-        label: NodeLabel,
+        _storage: &StorageManager<S>,
+        _label: NodeLabel,
     ) -> Result<MembershipProof, AkdError> {
-        let (_, proof) = self
-            .get_lcp_node_label_with_membership_proof::<TC, _>(storage, label)
-            .await?;
-        Ok(proof)
+        unimplemented!(
+            "AKD-on-Aegon: Merkle membership proofs do not exist; lookups go through Directory::lookup"
+        )
     }
 
     /// In a compressed trie, the proof consists of the longest prefix
@@ -817,55 +781,12 @@ impl Azks {
     #[cfg_attr(feature = "tracing_instrument", tracing::instrument(skip_all))]
     pub async fn get_non_membership_proof<TC: Configuration, S: Database>(
         &self,
-        storage: &StorageManager<S>,
-        label: NodeLabel,
+        _storage: &StorageManager<S>,
+        _label: NodeLabel,
     ) -> Result<NonMembershipProof, AkdError> {
-        let (lcp_node_label, longest_prefix_membership_proof) = self
-            .get_lcp_node_label_with_membership_proof::<TC, _>(storage, label)
-            .await?;
-        let lcp_node: TreeNode =
-            TreeNode::get_from_storage(storage, &NodeKey(lcp_node_label), self.get_latest_epoch())
-                .await?;
-        let longest_prefix = lcp_node.label;
-
-        let empty_azks_element = AzksElement {
-            label: TC::empty_label(),
-            value: TC::empty_node_hash(),
-        };
-
-        let mut longest_prefix_children = [empty_azks_element; ARITY];
-        for (i, dir) in [Direction::Left, Direction::Right].iter().enumerate() {
-            match lcp_node
-                .get_child_node(storage, *dir, self.latest_epoch)
-                .await?
-            {
-                None => {
-                    longest_prefix_children[i] = empty_azks_element;
-                }
-                Some(child) => {
-                    let unwrapped_child: TreeNode = TreeNode::get_from_storage(
-                        storage,
-                        &NodeKey(child.label),
-                        self.get_latest_epoch(),
-                    )
-                    .await?;
-                    longest_prefix_children[i] = AzksElement {
-                        label: unwrapped_child.label,
-                        value: node_to_azks_value::<TC>(
-                            &Some(unwrapped_child),
-                            NodeHashingMode::WithLeafEpoch,
-                        ),
-                    };
-                }
-            }
-        }
-
-        Ok(NonMembershipProof {
-            label,
-            longest_prefix,
-            longest_prefix_children,
-            longest_prefix_membership_proof,
-        })
+        unimplemented!(
+            "AKD-on-Aegon: Merkle non-membership proofs do not exist in the polynomial-commitment model"
+        )
     }
 
     /// An append-only proof for going from `start_epoch` to `end_epoch` consists of roots of subtrees
@@ -880,63 +801,14 @@ impl Azks {
     #[cfg_attr(feature = "tracing_instrument", tracing::instrument(skip_all))]
     pub async fn get_append_only_proof<TC: Configuration, S: Database + 'static>(
         &self,
-        storage: &StorageManager<S>,
-        start_epoch: u64,
-        end_epoch: u64,
-        parallelism_config: AzksParallelismConfig,
+        _storage: &StorageManager<S>,
+        _start_epoch: u64,
+        _end_epoch: u64,
+        _parallelism_config: AzksParallelismConfig,
     ) -> Result<AppendOnlyProof, AkdError> {
-        let latest_epoch = self.get_latest_epoch();
-        if latest_epoch < end_epoch || end_epoch <= start_epoch {
-            return Err(AkdError::Directory(DirectoryError::InvalidEpoch(format!(
-                "Start epoch must be less than end epoch, and end epoch must be at most the latest epoch. \
-                Start epoch: {start_epoch}, end epoch: {end_epoch}, latest_epoch: {latest_epoch}."
-            ))));
-        }
-
-        let mut proofs = Vec::<SingleAppendOnlyProof>::new();
-        let mut epochs = Vec::<u64>::new();
-        // Suppose the epochs start_epoch and end_epoch exist in the set.
-        // This function should return the proof that nothing was removed/changed from the tree
-        // between these epochs.
-        let (fallible_load_count, time_s) = tic_toc(self.preload_audit_nodes::<_>(
-            storage,
-            latest_epoch,
-            start_epoch,
-            end_epoch,
-            parallelism_config,
-        ))
-        .await;
-        let load_count = fallible_load_count?;
-        if let Some(time) = time_s {
-            info!("Preload of nodes for audit ({load_count} objects loaded), took {time} s",);
-        } else {
-            info!("Preload of nodes for audit ({load_count} objects loaded) completed.");
-        }
-        storage.log_metrics().await;
-
-        let node =
-            TreeNode::get_from_storage(storage, &NodeKey(NodeLabel::root()), latest_epoch).await?;
-
-        for ep in start_epoch..end_epoch {
-            let (unchanged, leaves) = Self::get_append_only_proof_helper::<TC, _>(
-                latest_epoch,
-                storage,
-                node.clone(),
-                ep,
-                ep + 1,
-                0,
-                parallelism_config.insertion.get_parallel_levels(),
-            )
-            .await?;
-            info!("Generated audit proof for {} -> {}", ep, ep + 1);
-            proofs.push(SingleAppendOnlyProof {
-                inserted: leaves,
-                unchanged_nodes: unchanged,
-            });
-            epochs.push(ep);
-        }
-
-        Ok(AppendOnlyProof { proofs, epochs })
+        unimplemented!(
+            "AKD-on-Aegon: legacy AppendOnlyProof shape is SEEMless-only; use Directory::aegon_invariance_proofs"
+        )
     }
 
     async fn preload_audit_nodes<S: Database + 'static>(
@@ -1180,10 +1052,11 @@ impl Azks {
     #[cfg_attr(feature = "tracing_instrument", tracing::instrument(skip_all))]
     pub async fn get_root_hash<TC: Configuration, S: Database>(
         &self,
-        storage: &StorageManager<S>,
+        _storage: &StorageManager<S>,
     ) -> Result<Digest, AkdError> {
-        self.get_root_hash_safe::<TC, _>(storage, self.get_latest_epoch())
-            .await
+        unimplemented!(
+            "AKD-on-Aegon: there is no Merkle root hash; use Directory::get_epoch_hash for the Aegon commitment digest"
+        )
     }
 
     /// Gets the root hash of the tree at the latest epoch if the passed epoch

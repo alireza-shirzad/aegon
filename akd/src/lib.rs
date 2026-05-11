@@ -534,6 +534,8 @@ extern crate rand;
 // implementer will simply need to import the necessary inner types which are
 // a dependency of ths [`Storage`] trait anyways
 
+pub mod aegon;
+pub mod aegon_facade;
 pub mod append_only_zks;
 pub mod auditor;
 pub mod client;
