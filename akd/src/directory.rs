@@ -31,8 +31,8 @@ use crate::{
 };
 
 use crate::aegon::{
-    presets, Aegon, AegonConfig, ConsistencyProof, EpochCommitment, InvarianceProof, Sha256Hash,
-    VerifierContext,
+    optimal_kzh_k, Sha256Hash, ShardedAegon, ShardedAegonConfig, ShardedConsistencyProof,
+    ShardedEpochCommitment, ShardedInvarianceProof, ShardedLookupProof, ShardedVerifierContext,
 };
 use akd_core::configuration::Configuration;
 use akd_core::verify::history::HistoryParams;
@@ -55,20 +55,29 @@ use tokio::sync::{Mutex, RwLock};
 pub type DirectoryE = Bn254;
 /// PCS backend used by the Aegon engine. KZH-k with `k=2` (classical KZH).
 pub type DirectoryPcs = KZHK<DirectoryE>;
-/// Concrete Aegon engine instantiated for this Directory.
-pub type DirectoryAegon = Aegon<DirectoryE, DirectoryPcs, Sha256Hash>;
+/// Concrete sharded Aegon engine instantiated for this Directory.
+pub type DirectoryAegon = ShardedAegon<DirectoryE, DirectoryPcs, Sha256Hash>;
 
 // Default Aegon parameters. Hardcoded for v1; later we may thread them
 // through `Directory::new` once we decide on the configuration story.
 //
-// `LOG_CAPACITY = 10` gives 1024 dictionary slots, plenty for tests
-// without blowing setup time. `KZH_K = 2` is the classical-KZH split.
-const DEFAULT_LOG_CAPACITY: usize = 10;
-const DEFAULT_KZH_K: usize = 2;
+// Per-shard log_capacity = 8 (256 slots/shard) × 4 shards = 1024 total
+// slots, plenty for tests without blowing setup time. `k` is chosen
+// via `optimal_kzh_k` so the aux precomputation cost is minimized for
+// whatever `shard_log_capacity` is in use; at the production setting
+// of `shard_log_capacity = 29` this picks `k = 10`.
+const DEFAULT_SHARD_LOG_CAPACITY: usize = 8;
+const DEFAULT_LOG_N_SHARDS: usize = 2;
 const DEFAULT_SETUP_SEED: u64 = 0xA56_0_AE60_0;
 
-fn default_aegon_config() -> AegonConfig<DirectoryE, DirectoryPcs> {
-    presets::kzh::<DirectoryE>(DEFAULT_LOG_CAPACITY, DEFAULT_KZH_K, /*private=*/ false)
+fn default_aegon_config() -> ShardedAegonConfig<DirectoryE, DirectoryPcs> {
+    ShardedAegonConfig::<DirectoryE, DirectoryPcs>::builder()
+        .shard_log_capacity(DEFAULT_SHARD_LOG_CAPACITY)
+        .log_n_shards(DEFAULT_LOG_N_SHARDS)
+        .private(false)
+        .kzh_k(optimal_kzh_k(DEFAULT_SHARD_LOG_CAPACITY))
+        .build()
+        .expect("default ShardedAegonConfig must build")
 }
 
 // ---------- Directory struct ------------------------------------------
@@ -88,13 +97,14 @@ pub struct Directory<TC, S: Database, V> {
     /// values, so to return `AkdValue` from a lookup we keep the raw
     /// bytes here keyed by label.
     label_values: Arc<RwLock<HashMap<AkdLabel, AkdValue>>>,
-    /// Per-epoch invariance proofs returned by `crate::aegon::publish`.
-    /// Indexed by `epoch - 1` (since epoch 0 has no transition).
-    invariance_proofs: Arc<RwLock<Vec<InvarianceProof<DirectoryE, DirectoryPcs>>>>,
-    /// Snapshot of the polynomial commitments at every published epoch,
-    /// including the empty epoch 0. Used to serve consistency proofs
-    /// and epoch-by-epoch audits.
-    epoch_commits: Arc<RwLock<Vec<EpochCommitment<DirectoryE, DirectoryPcs>>>>,
+    /// Per-epoch sharded invariance proofs returned by
+    /// `ShardedAegon::publish`. Indexed by `epoch - 1` (epoch 0 has no
+    /// transition).
+    invariance_proofs: Arc<RwLock<Vec<ShardedInvarianceProof<DirectoryE, DirectoryPcs>>>>,
+    /// Snapshot of the sharded epoch commitments at every published
+    /// epoch, including the empty epoch 0. Used to serve consistency
+    /// proofs and epoch-by-epoch audits.
+    epoch_commits: Arc<RwLock<Vec<ShardedEpochCommitment<DirectoryE, DirectoryPcs>>>>,
     tc: PhantomData<TC>,
 }
 
@@ -134,9 +144,9 @@ where
         vrf: V,
         parallelism_config: AzksParallelismConfig,
     ) -> Result<Self, AkdError> {
-        info!("Initialising AKD directory backed by Aegon");
+        info!("Initialising AKD directory backed by ShardedAegon");
         let mut rng = ChaCha20Rng::seed_from_u64(DEFAULT_SETUP_SEED);
-        let aegon = Aegon::<DirectoryE, DirectoryPcs, Sha256Hash>::setup(
+        let aegon = ShardedAegon::<DirectoryE, DirectoryPcs, Sha256Hash>::setup(
             &mut rng,
             &default_aegon_config(),
         )
@@ -349,41 +359,41 @@ where
     // Aegon-native methods (Category 3 additions to the public API)
     // ===================================================================
 
-    /// Build an Aegon consistency proof showing the user's slot was
-    /// unchanged between epoch `s0` and the current epoch.
+    /// Build a sharded Aegon consistency proof showing the user's slot
+    /// was unchanged between epoch `s0` and the current epoch.
     pub async fn consistency_proof(
         &self,
         akd_label: &AkdLabel,
         s0: u64,
-    ) -> Result<ConsistencyProof<DirectoryE, DirectoryPcs>, AkdError> {
+    ) -> Result<ShardedConsistencyProof<DirectoryE, DirectoryPcs>, AkdError> {
         let aegon = self.aegon.lock().await;
         aegon
             .consistency_proof(&akd_label.0, s0)
             .map_err(|e| AkdError::Directory(DirectoryError::Publish(format!("aegon consistency: {e}"))))
     }
 
-    /// Returns the Aegon `EpochCommitment` for a past (or current) epoch.
+    /// Returns the sharded `EpochCommitment` for a past (or current) epoch.
     pub async fn epoch_commitment(
         &self,
         epoch: u64,
-    ) -> Option<EpochCommitment<DirectoryE, DirectoryPcs>> {
+    ) -> Option<ShardedEpochCommitment<DirectoryE, DirectoryPcs>> {
         self.aegon.lock().await.epoch_commitment(epoch)
     }
 
-    /// Returns the Aegon `VerifierContext` used by the
+    /// Returns the sharded `VerifierContext` used by the
     /// [`crate::aegon_facade`] verify functions.
-    pub async fn verifier_context(&self) -> VerifierContext<DirectoryE, DirectoryPcs> {
-        self.aegon.lock().await.verifier_context()
+    pub async fn verifier_context(&self) -> ShardedVerifierContext<DirectoryE, DirectoryPcs> {
+        self.aegon.lock().await.sharded_verifier_context()
     }
 
-    /// Returns the slice of per-transition invariance proofs for the
-    /// epoch range `[start_ep, end_ep)`. The auditor walks these via
-    /// [`crate::aegon_facade::verify_invariance`].
+    /// Returns the slice of per-transition sharded invariance proofs
+    /// for the epoch range `[start_ep, end_ep)`. The auditor walks
+    /// these via [`crate::aegon_facade::verify_invariance`].
     pub async fn aegon_invariance_proofs(
         &self,
         start_ep: u64,
         end_ep: u64,
-    ) -> Result<Vec<InvarianceProof<DirectoryE, DirectoryPcs>>, AkdError> {
+    ) -> Result<Vec<ShardedInvarianceProof<DirectoryE, DirectoryPcs>>, AkdError> {
         let proofs = self.invariance_proofs.read().await;
         if end_ep as usize > proofs.len() + 1 || start_ep > end_ep {
             return Err(AkdError::Directory(DirectoryError::Publish(format!(
@@ -488,18 +498,19 @@ pub(crate) fn get_marker_version(version: u64) -> u64 {
 
 // ---------- payload encoding ------------------------------------------
 
-/// Wire-format envelope embedded in `LookupProof.commitment_nonce`. Carries
-/// everything an Aegon-aware verifier needs that the AKD `LookupProof`
-/// shape cannot otherwise hold.
+/// Wire-format envelope embedded in `LookupProof.commitment_nonce`.
+/// Carries the sharded epoch commitment and the sharded Aegon lookup
+/// proof so an Aegon-aware verifier has everything it needs without
+/// leaning on AKD's legacy Merkle fields.
 #[derive(CanonicalSerialize, CanonicalDeserialize)]
 struct LookupPayload {
-    commitment: EpochCommitment<DirectoryE, DirectoryPcs>,
-    proof: crate::aegon::LookupProof<DirectoryE, DirectoryPcs>,
+    commitment: ShardedEpochCommitment<DirectoryE, DirectoryPcs>,
+    proof: ShardedLookupProof<DirectoryE, DirectoryPcs>,
 }
 
 fn encode_lookup_payload(
-    commitment: &EpochCommitment<DirectoryE, DirectoryPcs>,
-    proof: &crate::aegon::LookupProof<DirectoryE, DirectoryPcs>,
+    commitment: &ShardedEpochCommitment<DirectoryE, DirectoryPcs>,
+    proof: &ShardedLookupProof<DirectoryE, DirectoryPcs>,
 ) -> Vec<u8> {
     let payload = LookupPayload {
         commitment: commitment.clone(),
@@ -516,8 +527,8 @@ pub(crate) fn decode_lookup_payload(
     bytes: &[u8],
 ) -> Result<
     (
-        EpochCommitment<DirectoryE, DirectoryPcs>,
-        crate::aegon::LookupProof<DirectoryE, DirectoryPcs>,
+        ShardedEpochCommitment<DirectoryE, DirectoryPcs>,
+        ShardedLookupProof<DirectoryE, DirectoryPcs>,
     ),
     AkdError,
 > {
@@ -529,32 +540,13 @@ pub(crate) fn decode_lookup_payload(
     Ok((payload.commitment, payload.proof))
 }
 
-/// Build a `Digest` (32-byte hash) from an Aegon `EpochCommitment`. We
-/// hash the canonical serialization of all four commitments so the
-/// resulting digest changes iff any commitment changes.
-fn digest_of_commitment(commit: &EpochCommitment<DirectoryE, DirectoryPcs>) -> Digest {
-    use sha2::Digest as _;
-    let mut bytes = Vec::new();
-    commit
-        .index_commitment
-        .serialize_compressed(&mut bytes)
-        .expect("commitment serialization is infallible");
-    commit
-        .value_commitment
-        .serialize_compressed(&mut bytes)
-        .expect("commitment serialization is infallible");
-    commit
-        .rand_index_commitment
-        .serialize_compressed(&mut bytes)
-        .expect("commitment serialization is infallible");
-    commit
-        .rand_value_commitment
-        .serialize_compressed(&mut bytes)
-        .expect("commitment serialization is infallible");
-    let h = sha2::Sha256::digest(&bytes);
-    let mut out = [0u8; 32];
-    out.copy_from_slice(&h);
-    out
+/// Build a `Digest` (32-byte hash) from a sharded `EpochCommitment`.
+/// The Merkle root over the per-shard commitments already commits to
+/// every shard's full state, so it doubles as the epoch digest.
+fn digest_of_commitment(
+    commit: &ShardedEpochCommitment<DirectoryE, DirectoryPcs>,
+) -> Digest {
+    commit.merkle_root
 }
 
 fn empty_node_label() -> NodeLabel {

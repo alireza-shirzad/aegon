@@ -104,7 +104,39 @@ where
     // epoch number; epoch 0 is the empty initial state.
     epoch_history: BTreeMap<u64, EpochSnapshot<E, P>>,
 
+    // Set by publish_phase_1, consumed by publish_phase_2. None when
+    // no publish is in flight. The two-phase split exists so that a
+    // sharded coordinator can gather all 32 shards' new data commits
+    // before deriving the shared Fiat-Shamir scalar; the single-shard
+    // publish() wrapper sets and consumes this in one call.
+    pending: Option<PendingPublish<E, P>>,
+
     _phantom: PhantomData<H>,
+}
+
+/// State carried by an [`Aegon`] across the two halves of a sharded
+/// publish. The first half (`publish_phase_1`) commits to the new data
+/// polynomials and stashes everything needed to (a) update the rand
+/// polynomials with the externally-derived chain scalars and (b) build
+/// the invariance proof. The second half (`publish_phase_2`) consumes
+/// the stash.
+struct PendingPublish<E: Pairing, P: AegonPcs<E>> {
+    prev_index_poly: SparseMultilinearExtension<E::ScalarField>,
+    prev_value_poly: SparseMultilinearExtension<E::ScalarField>,
+    prev_index_com: P::Commitment,
+    prev_index_state: P::State,
+    prev_value_com: P::Commitment,
+    prev_value_state: P::State,
+    prev_rand_index_poly: SparseMultilinearExtension<E::ScalarField>,
+    prev_rand_index_com: P::Commitment,
+    prev_rand_index_state: P::State,
+    prev_rand_value_poly: SparseMultilinearExtension<E::ScalarField>,
+    prev_rand_value_com: P::Commitment,
+    prev_rand_value_state: P::State,
+    new_index_com: P::Commitment,
+    new_index_state: P::State,
+    new_value_com: P::Commitment,
+    new_value_state: P::State,
 }
 
 impl<E, P, H> Aegon<E, P, H>
@@ -216,6 +248,7 @@ where
             r_value: E::ScalarField::zero(),
             label_table: HashMap::new(),
             epoch_history,
+            pending: None,
             _phantom: PhantomData,
         })
     }
@@ -225,6 +258,9 @@ where
     }
     pub fn log_capacity(&self) -> usize {
         self.log_capacity
+    }
+    pub fn dims(&self) -> &[usize] {
+        &self.dims
     }
     pub fn epoch(&self) -> u64 {
         self.epoch
@@ -267,10 +303,48 @@ where
     /// Apply a batch of `(label, value)` updates and produce a new epoch.
     /// Returns the new commitment and the auditor-facing invariance proof
     /// for the transition that was just performed.
+    ///
+    /// Convenience wrapper around [`Self::publish_phase_1`] +
+    /// [`Self::publish_phase_2`] for the single-shard case: derives the
+    /// Fiat-Shamir chain scalars from `(prev_r, new_data_commit)`
+    /// internally. In a sharded deployment the coordinator instead
+    /// calls phase 1 on every shard, derives `r` from all sub-commits,
+    /// then broadcasts `r` to each shard's phase 2.
     pub fn publish(
         &mut self,
         updates: &[(Label, Value)],
     ) -> Result<(EpochCommitment<E, P>, InvarianceProof<E, P>), AegonError> {
+        let prev_r_index = self.r_index;
+        let prev_r_value = self.r_value;
+        let (new_index_com, new_value_com) = self.publish_phase_1(updates)?;
+        let new_r_index = derive_chain_scalar::<E::ScalarField, P::Commitment>(
+            b"aegon.fs.r_index",
+            prev_r_index,
+            &new_index_com,
+        );
+        let new_r_value = derive_chain_scalar::<E::ScalarField, P::Commitment>(
+            b"aegon.fs.r_value",
+            prev_r_value,
+            &new_value_com,
+        );
+        self.publish_phase_2(new_r_index, new_r_value)
+    }
+
+    /// First half of a sharded publish: apply data updates, commit the
+    /// new `index` and `value` polynomials, and stash the prev-state
+    /// snapshot needed by phase 2. Returns the two new data commitments
+    /// so the coordinator can build the Fiat-Shamir chain scalars.
+    ///
+    /// Self-driven open addressing: assigns a slot to each new label
+    /// using `H_bits` over the local `log_capacity`. The coordinator-
+    /// driven counterpart is [`Self::publish_phase_1_at_slots`].
+    ///
+    /// Calling phase 1 twice without an intervening phase 2 is an error
+    /// (an outstanding pending publish would be overwritten).
+    pub fn publish_phase_1(
+        &mut self,
+        updates: &[(Label, Value)],
+    ) -> Result<(P::Commitment, P::Commitment), AegonError> {
         let mut seen: HashMap<&[u8], ()> = HashMap::with_capacity(updates.len());
         for (label, _) in updates {
             if seen.insert(label.as_slice(), ()).is_some() {
@@ -278,9 +352,53 @@ where
             }
         }
 
-        // Snapshot what we need from the *previous* epoch before mutating
-        // anything; the invariance proof is over the (prev → next)
-        // transition.
+        // Decide slots for every label first (without mutating polynomials).
+        // For collision-free assignment within a single batch, track which
+        // slots have already been claimed by earlier entries.
+        let mut claimed: std::collections::HashSet<usize> =
+            std::collections::HashSet::with_capacity(updates.len());
+        let mut batch: Vec<(Vec<bool>, E::ScalarField, E::ScalarField)> =
+            Vec::with_capacity(updates.len());
+        for (label, value) in updates {
+            let (slot_bits, h_label_write) = match self.label_table.get(label) {
+                // Existing label — slot is fixed, no need to re-write h_label.
+                Some((slot, _ctr0)) => (slot.clone(), E::ScalarField::zero()),
+                None => {
+                    let (slot_bits, ctr0) = self.find_free_slot(label, &claimed)?;
+                    self.label_table
+                        .insert(label.clone(), (slot_bits.clone(), ctr0));
+                    (slot_bits, H::h_f(label))
+                },
+            };
+            let usize_idx = bool_index_to_usize(&slot_bits, &self.dims);
+            claimed.insert(usize_idx);
+            let h_value = H::h_f(value);
+            batch.push((slot_bits, h_label_write, h_value));
+        }
+
+        self.publish_phase_1_at_slots(&batch)
+    }
+
+    /// Coordinator-driven phase 1: caller supplies pre-decided
+    /// `(slot_bits, h_label, h_value)` triples and the shard skips its
+    /// own open addressing entirely. `h_label` should be `H::h_f(label)`
+    /// the first time a slot is claimed (writes the label hash into
+    /// `index_poly`), or `F::zero()` for an existing label being value-
+    /// updated (the slot already holds the right `H_f(label)`). The
+    /// `ShardedAegon` coordinator drives open addressing across all
+    /// shards and feeds the decisions in via this method.
+    pub fn publish_phase_1_at_slots(
+        &mut self,
+        batch: &[(Vec<bool>, E::ScalarField, E::ScalarField)],
+    ) -> Result<(P::Commitment, P::Commitment), AegonError> {
+        if self.pending.is_some() {
+            return Err(AegonError::Config(
+                "publish_phase_1 called while an earlier publish is still pending; call publish_phase_2 first".into(),
+            ));
+        }
+
+        // Snapshot prev epoch state — the invariance proof is over
+        // (prev → next), so we capture before mutating.
         let prev_index_poly = self.index_poly.clone();
         let prev_value_poly = self.value_poly.clone();
         let prev_index_com = self.index_commitment.clone();
@@ -293,47 +411,81 @@ where
         let prev_rand_value_poly = self.rand_value_poly.clone();
         let prev_rand_value_com = self.rand_value_commitment.clone();
         let prev_rand_value_state = self.rand_value_state.clone();
-        let prev_r_index = self.r_index;
-        let prev_r_value = self.r_value;
 
-        // 1. Apply data updates to index_poly / value_poly.
-        for (label, value) in updates {
-            let (bool_index, _ctr0) = match self.label_table.get(label) {
-                Some(entry) => entry.clone(),
-                None => {
-                    let assigned = self.assign_index(label)?;
-                    self.label_table.insert(label.clone(), assigned.clone());
-                    assigned
-                },
-            };
-            let value_field = H::h_f(value);
-            let usize_index = bool_index_to_usize(&bool_index, &self.dims);
-            self.set_value(usize_index, value_field);
+        // Apply writes.
+        for (slot_bits, h_label, h_value) in batch {
+            let usize_idx = bool_index_to_usize(slot_bits, &self.dims);
+            if !h_label.is_zero() {
+                self.index_poly.evaluations.insert(usize_idx, *h_label);
+            }
+            self.set_value(usize_idx, *h_value);
         }
 
-        // 2. Recommit the data polynomials.
+        // Recommit data polynomials.
         let (new_index_com, new_index_state) =
             commit_with_aux::<E, P>(&self.prover_param, &self.index_poly)?;
         let (new_value_com, new_value_state) =
             commit_with_aux::<E, P>(&self.prover_param, &self.value_poly)?;
 
-        // 3. Derive Fiat-Shamir chain scalars from prev_r and the *new*
-        //    data commitments. Both server and auditor compute these
-        //    identically.
-        let new_r_index = derive_chain_scalar::<E::ScalarField, P::Commitment>(
-            b"aegon.fs.r_index",
-            prev_r_index,
-            &new_index_com,
-        );
-        let new_r_value = derive_chain_scalar::<E::ScalarField, P::Commitment>(
-            b"aegon.fs.r_value",
-            prev_r_value,
-            &new_value_com,
-        );
+        self.pending = Some(PendingPublish {
+            prev_index_poly,
+            prev_value_poly,
+            prev_index_com,
+            prev_index_state,
+            prev_value_com,
+            prev_value_state,
+            prev_rand_index_poly,
+            prev_rand_index_com,
+            prev_rand_index_state,
+            prev_rand_value_poly,
+            prev_rand_value_com,
+            prev_rand_value_state,
+            new_index_com: new_index_com.clone(),
+            new_index_state,
+            new_value_com: new_value_com.clone(),
+            new_value_state,
+        });
 
-        // 4. Update rand polynomials: rand_{n+1} = rand_n + r_n · ∆.
-        //    Computed pointwise on the sparse evaluation tables. ∆ is
-        //    non-zero only where (prev, next) differ.
+        Ok((new_index_com, new_value_com))
+    }
+
+    /// Second half of a sharded publish: consumes the pending state
+    /// stashed by [`Self::publish_phase_1`], applies the externally-
+    /// derived chain scalars to update the rand polynomials, commits
+    /// them, builds the invariance proof, and finalizes the new epoch.
+    pub fn publish_phase_2(
+        &mut self,
+        new_r_index: E::ScalarField,
+        new_r_value: E::ScalarField,
+    ) -> Result<(EpochCommitment<E, P>, InvarianceProof<E, P>), AegonError> {
+        let pending = self.pending.take().ok_or_else(|| {
+            AegonError::Config(
+                "publish_phase_2 called without a pending publish; call publish_phase_1 first"
+                    .into(),
+            )
+        })?;
+        let PendingPublish {
+            prev_index_poly,
+            prev_value_poly,
+            prev_index_com,
+            prev_index_state,
+            prev_value_com,
+            prev_value_state,
+            prev_rand_index_poly,
+            prev_rand_index_com,
+            prev_rand_index_state,
+            prev_rand_value_poly,
+            prev_rand_value_com,
+            prev_rand_value_state,
+            new_index_com,
+            new_index_state,
+            new_value_com,
+            new_value_state,
+        } = pending;
+
+        // Update rand polynomials: rand_{n+1} = rand_n + r_n · ∆.
+        // Computed pointwise on the sparse evaluation tables. ∆ is
+        // non-zero only where (prev, next) differ.
         update_rand(
             &mut self.rand_index_poly,
             &prev_index_poly,
@@ -347,15 +499,15 @@ where
             new_r_value,
         );
 
-        // 5. Recommit the rand polynomials.
+        // Recommit the rand polynomials.
         let (new_rand_index_com, new_rand_index_state) =
             commit_with_aux::<E, P>(&self.prover_param, &self.rand_index_poly)?;
         let (new_rand_value_com, new_rand_value_state) =
             commit_with_aux::<E, P>(&self.prover_param, &self.rand_value_poly)?;
 
-        // 6. Build the invariance proof for this transition before we
-        //    overwrite the live state with the new commitments — the
-        //    helper needs both prev and next side by side.
+        // Build the invariance proof for this transition before we
+        // overwrite the live state with the new commitments — the
+        // helper needs both prev and next side by side.
         let invariance = build_invariance_proof::<E, P>(
             &self.prover_param,
             self.log_capacity,
@@ -387,7 +539,7 @@ where
             &new_rand_value_state,
         )?;
 
-        // 7. Commit the new epoch to live state and history.
+        // Commit the new epoch to live state and history.
         self.index_commitment = new_index_com.clone();
         self.index_state = new_index_state;
         self.value_commitment = new_value_com.clone();
@@ -417,7 +569,16 @@ where
         Ok((self.current_commitment(), invariance))
     }
 
-    fn assign_index(&mut self, label: &[u8]) -> Result<(Vec<bool>, u64), AegonError> {
+    /// Find the first free slot for `label` via local-only open addressing.
+    /// Pure read (no mutation). `extra_claimed` is a set of `usize`-indices
+    /// already claimed within the same in-flight batch — the caller is
+    /// responsible for tracking these because `index_poly` is only
+    /// mutated after the whole batch has been planned.
+    fn find_free_slot(
+        &self,
+        label: &[u8],
+        extra_claimed: &std::collections::HashSet<usize>,
+    ) -> Result<(Vec<bool>, u64), AegonError> {
         let capacity = 1usize << self.log_capacity;
         for ctr in 0..(capacity as u64) {
             let bool_index = H::h_bits(ctr, label, self.log_capacity);
@@ -427,14 +588,101 @@ where
                 .evaluations
                 .get(&usize_index)
                 .map(|v| !v.is_zero())
-                .unwrap_or(false);
+                .unwrap_or(false)
+                || extra_claimed.contains(&usize_index);
             if !occupied {
-                let h_label = H::h_f(label);
-                self.index_poly.evaluations.insert(usize_index, h_label);
                 return Ok((bool_index, ctr));
             }
         }
         Err(AegonError::DictionaryFull { capacity })
+    }
+
+    /// Whether `slot_bits` in the *current* index polynomial holds a
+    /// non-zero entry. The sharded coordinator queries this while
+    /// walking a probe trail across shards.
+    pub fn is_index_slot_occupied(&self, slot_bits: &[bool]) -> bool {
+        let idx = bool_index_to_usize(slot_bits, &self.dims);
+        self.index_poly
+            .evaluations
+            .get(&idx)
+            .map(|v| !v.is_zero())
+            .unwrap_or(false)
+    }
+
+    /// Open the current `index_poly` commitment at `slot_bits`.
+    pub fn open_index_at_slot(
+        &self,
+        slot_bits: &[bool],
+    ) -> Result<(E::ScalarField, P::Proof), AegonError> {
+        open_at_point::<E, P>(
+            &self.prover_param,
+            &self.index_poly,
+            &self.index_commitment,
+            &self.index_state,
+            slot_bits,
+            &self.dims,
+            b"aegon.index.open",
+        )
+    }
+
+    /// Open the current `value_poly` commitment at `slot_bits`.
+    pub fn open_value_at_slot(
+        &self,
+        slot_bits: &[bool],
+    ) -> Result<(E::ScalarField, P::Proof), AegonError> {
+        open_at_point::<E, P>(
+            &self.prover_param,
+            &self.value_poly,
+            &self.value_commitment,
+            &self.value_state,
+            slot_bits,
+            &self.dims,
+            b"aegon.value.open",
+        )
+    }
+
+    /// Open `rand_index_poly` at `slot_bits` for some retained `epoch`.
+    /// Used by sharded consistency proofs to open both `s0` and the
+    /// current epoch at the same probe point.
+    pub fn open_rand_index_at_slot_in_epoch(
+        &self,
+        slot_bits: &[bool],
+        epoch: u64,
+    ) -> Result<(E::ScalarField, P::Proof), AegonError> {
+        let snap = self
+            .epoch_history
+            .get(&epoch)
+            .ok_or(AegonError::InvalidEpoch(epoch))?;
+        open_at_point::<E, P>(
+            &self.prover_param,
+            &snap.rand_index_poly,
+            &snap.rand_index_commitment,
+            &snap.rand_index_state,
+            slot_bits,
+            &self.dims,
+            b"aegon.rand_index.open",
+        )
+    }
+
+    /// Open `rand_value_poly` at `slot_bits` for some retained `epoch`.
+    pub fn open_rand_value_at_slot_in_epoch(
+        &self,
+        slot_bits: &[bool],
+        epoch: u64,
+    ) -> Result<(E::ScalarField, P::Proof), AegonError> {
+        let snap = self
+            .epoch_history
+            .get(&epoch)
+            .ok_or(AegonError::InvalidEpoch(epoch))?;
+        open_at_point::<E, P>(
+            &self.prover_param,
+            &snap.rand_value_poly,
+            &snap.rand_value_commitment,
+            &snap.rand_value_state,
+            slot_bits,
+            &self.dims,
+            b"aegon.rand_value.open",
+        )
     }
 
     fn set_value(&mut self, usize_index: usize, value: E::ScalarField) {
@@ -566,6 +814,42 @@ where
 }
 
 // ---------- helpers --------------------------------------------------
+
+/// One-shot "open this poly at `slot_bits`" used by the slot-driven
+/// API. Returns the evaluation alongside the proof. Used by the
+/// sharded coordinator (which has already computed `slot_bits`) and
+/// shared with the legacy label-driven lookup path internally.
+fn open_at_point<E, P>(
+    pp: &P::ProverParam,
+    poly: &SparseMultilinearExtension<E::ScalarField>,
+    com: &P::Commitment,
+    state: &P::State,
+    slot_bits: &[bool],
+    dims: &[usize],
+    transcript_label: &'static [u8],
+) -> Result<(E::ScalarField, P::Proof), AegonError>
+where
+    E: Pairing,
+    P: AegonPcs<E>,
+{
+    let point = bool_index_to_point::<E::ScalarField>(slot_bits);
+    let usize_idx = bool_index_to_usize(slot_bits, dims);
+    let evaluation = poly
+        .evaluations
+        .get(&usize_idx)
+        .copied()
+        .unwrap_or_else(<E::ScalarField as Zero>::zero);
+    let mut tr = IOPTranscript::<E::ScalarField>::new(transcript_label);
+    let (proof, _) = P::open(
+        pp,
+        com,
+        &DenseOrSparseMLE::Sparse(poly.clone()),
+        &point,
+        state,
+        &mut tr,
+    )?;
+    Ok((evaluation, proof))
+}
 
 /// `commit` followed by `update_state`. KZH-k splits commitment from
 /// per-row aux precomputation; PCSs that don't need aux state can

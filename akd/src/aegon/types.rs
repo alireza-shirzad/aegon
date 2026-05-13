@@ -47,7 +47,7 @@ where
 /// per-user consistency / per-epoch invariance machinery (paper §5.2,
 /// §6.1). All four are needed by the auditor; users fetch the rand
 /// commitments to verify their slot did not change between two epochs.
-#[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
+#[derive(Debug, CanonicalSerialize, CanonicalDeserialize)]
 pub struct EpochCommitment<E: Pairing, P: AegonPcs<E>> {
     pub epoch: u64,
     pub index_commitment: P::Commitment,
@@ -55,6 +55,19 @@ pub struct EpochCommitment<E: Pairing, P: AegonPcs<E>> {
     pub rand_index_commitment: P::Commitment,
     pub rand_value_commitment: P::Commitment,
     pub _e: PhantomData<E>,
+}
+
+impl<E: Pairing, P: AegonPcs<E>> Clone for EpochCommitment<E, P> {
+    fn clone(&self) -> Self {
+        Self {
+            epoch: self.epoch,
+            index_commitment: self.index_commitment.clone(),
+            value_commitment: self.value_commitment.clone(),
+            rand_index_commitment: self.rand_index_commitment.clone(),
+            rand_value_commitment: self.rand_value_commitment.clone(),
+            _e: PhantomData,
+        }
+    }
 }
 
 /// Lookup proof returned by `Aegon::lookup` (paper §5.1, Fig. 2). See
@@ -88,7 +101,7 @@ impl<E: Pairing, P: AegonPcs<E>> LookupProof<E, P> {
 /// (paper Remark 2). Generic over the PCS — does not require commitment
 /// homomorphism. For homomorphic PCSs a faster check on commitments is
 /// possible as a future optimization.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
 pub struct ChainWitness<E: Pairing, P: AegonPcs<E>> {
     pub prev_poly_eval: E::ScalarField,
     pub next_poly_eval: E::ScalarField,
@@ -104,7 +117,7 @@ pub struct ChainWitness<E: Pairing, P: AegonPcs<E>> {
 /// `n` to epoch `n+1` correctly updated both rand polynomials with the
 /// Fiat-Shamir scalars derived from the new commitments. Auditors verify
 /// this in `audit::verify_invariance`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
 pub struct InvarianceProof<E: Pairing, P: AegonPcs<E>> {
     pub index_chain: ChainWitness<E, P>,
     pub value_chain: ChainWitness<E, P>,
@@ -134,7 +147,7 @@ impl<F: Zero> Default for AuditState<F> {
 /// A pair of openings of the same polynomial at the same point in two
 /// different epochs. The verifier checks both openings and then the
 /// equality `eval_s0 == eval_s1`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
 pub struct RandPair<E: Pairing, P: AegonPcs<E>> {
     pub eval_s0: E::ScalarField,
     pub proof_s0: P::Proof,
@@ -154,7 +167,7 @@ pub struct RandPair<E: Pairing, P: AegonPcs<E>> {
 ///   establishes that the slot still belongs to the same label.
 /// * Value half: a single opening pair of `rand_value` at the user's
 ///   slot `x_ctr0`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
 pub struct ConsistencyProof<E: Pairing, P: AegonPcs<E>> {
     pub ctr0: u64,
     pub index_witnesses: Vec<RandPair<E, P>>,

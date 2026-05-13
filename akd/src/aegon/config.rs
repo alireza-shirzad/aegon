@@ -91,11 +91,26 @@ impl<E: Pairing, P: AegonPcs<E>> AegonConfig<E, P> {
 /// Verifier-side bundle: everything a client or auditor needs to call
 /// the verification functions. Issued by the server via
 /// `Aegon::verifier_context()`.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct VerifierContext<E: Pairing, P: AegonPcs<E>> {
     pub log_capacity: usize,
     pub verifier_param: P::VerifierParam,
     pub _e: PhantomData<E>,
+}
+
+// Manual Clone — the `#[derive]` would impose `P: Clone` rather than
+// the actually-required `P::VerifierParam: Clone`.
+impl<E: Pairing, P: AegonPcs<E>> Clone for VerifierContext<E, P>
+where
+    P::VerifierParam: Clone,
+{
+    fn clone(&self) -> Self {
+        Self {
+            log_capacity: self.log_capacity,
+            verifier_param: self.verifier_param.clone(),
+            _e: PhantomData,
+        }
+    }
 }
 
 impl<E: Pairing, P: AegonPcs<E>> VerifierContext<E, P> {

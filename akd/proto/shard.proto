@@ -1,0 +1,87 @@
+syntax = "proto3";
+
+package aegon.shard.v1;
+
+// One shard's gRPC surface. Mirrors the in-process methods on
+// `Aegon<E, P, H>` that the `ShardedAegon` coordinator calls during
+// publish/lookup/consistency_proof. All payloads are
+// arkworks-canonical-serialized bytes; the proto schema is
+// transport, not type — see `aegon::shard_grpc::wire` on the Rust
+// side for the encodings.
+service ShardService {
+  // Phase 1 of a sharded publish: apply pre-decided (slot, h_label,
+  // h_value) writes, recommit data polynomials, stash pending state.
+  // Returns the new (index_commitment, value_commitment) bytes.
+  rpc PublishPhase1AtSlots(PublishPhase1Request)
+      returns (PublishPhase1Response);
+
+  // Phase 2: apply the shared FS scalars from the coordinator,
+  // recommit rand polynomials, finalize the epoch. Returns the
+  // shard's new EpochCommitment + InvarianceProof.
+  rpc PublishPhase2(PublishPhase2Request) returns (PublishPhase2Response);
+
+  // Open-addressing helper: is the given slot already occupied in
+  // the current index polynomial?
+  rpc IsIndexSlotOccupied(SlotRequest) returns (SlotOccupiedResponse);
+
+  // PCS openings: open one of the four polynomials at a slot.
+  // The "in_epoch" variants take an epoch number to access the
+  // server-retained snapshot at that past epoch (for consistency
+  // proofs).
+  rpc OpenIndexAtSlot(SlotRequest) returns (OpenResponse);
+  rpc OpenValueAtSlot(SlotRequest) returns (OpenResponse);
+  rpc OpenRandIndexAtSlotInEpoch(SlotEpochRequest) returns (OpenResponse);
+  rpc OpenRandValueAtSlotInEpoch(SlotEpochRequest) returns (OpenResponse);
+
+  // Initial commitment — used by the coordinator at setup time to
+  // build the epoch-0 Merkle root.
+  rpc CurrentCommitment(Empty) returns (CommitmentResponse);
+}
+
+message PublishPhase1Request {
+  // Canonical-serialized Vec<(Vec<bool>, F, F)>.
+  bytes batch_bytes = 1;
+}
+
+message PublishPhase1Response {
+  bytes index_commitment = 1;
+  bytes value_commitment = 2;
+}
+
+message PublishPhase2Request {
+  // Canonical-serialized scalar field elements.
+  bytes r_index = 1;
+  bytes r_value = 2;
+}
+
+message PublishPhase2Response {
+  // Canonical-serialized EpochCommitment<E, P>.
+  bytes epoch_commitment = 1;
+  // Canonical-serialized InvarianceProof<E, P>.
+  bytes invariance_proof = 2;
+}
+
+message SlotRequest {
+  // Canonical-serialized Vec<bool>.
+  bytes slot_bits = 1;
+}
+
+message SlotEpochRequest {
+  bytes slot_bits = 1;
+  uint64 epoch = 2;
+}
+
+message SlotOccupiedResponse {
+  bool occupied = 1;
+}
+
+message OpenResponse {
+  bytes evaluation = 1; // canonical-serialized F
+  bytes proof = 2;      // canonical-serialized P::Proof
+}
+
+message CommitmentResponse {
+  bytes epoch_commitment = 1;
+}
+
+message Empty {}

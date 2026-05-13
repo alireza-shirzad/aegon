@@ -93,7 +93,7 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-fn verify_chain<E, P>(
+pub(super) fn verify_chain<E, P>(
     vk: &P::VerifierParam,
     log_capacity: usize,
     fs_label: &'static [u8],

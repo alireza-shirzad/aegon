@@ -20,6 +20,8 @@ pub(crate) mod fs;
 pub mod hash;
 pub mod presets;
 pub mod server;
+pub mod shard_grpc;
+pub mod sharded;
 pub mod types;
 pub mod verify;
 
@@ -28,7 +30,15 @@ pub use config::{AegonConfig, VerifierContext};
 pub use consistency::verify_consistency;
 pub use error::AegonError;
 pub use hash::{HashSuite, Sha256Hash};
+pub use presets::optimal_kzh_k;
 pub use server::Aegon;
+pub use sharded::{
+    probe_at, rederive_sharded_fs_scalars, verify_merkle_path, verify_sharded_consistency,
+    verify_sharded_invariance, verify_sharded_lookup, EpochDigest, ShardTransport,
+    ShardedAegon, ShardedAegonConfig, ShardedAegonConfigBuilder, ShardedConsistencyProof,
+    ShardedEpochCommitment, ShardedInvarianceProof, ShardedLookupProof, ShardedProbe,
+    ShardedRandPair, ShardedVerifierContext, SrsSource,
+};
 pub use types::{
     AegonPcs, AuditState, ChainWitness, ConsistencyProof, EpochCommitment, InvarianceProof, Label,
     LookupProof, RandPair, Value,

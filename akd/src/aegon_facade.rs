@@ -25,18 +25,18 @@ use crate::{AkdLabel, LookupProof};
 
 use crate::aegon::AegonError;
 use crate::aegon::Sha256Hash;
-use crate::aegon::verify_consistency as aegon_verify_consistency;
-use crate::aegon::verify_invariance as aegon_verify_invariance;
-use crate::aegon::verify_lookup as aegon_verify_lookup;
+use crate::aegon::verify_sharded_consistency as aegon_verify_consistency;
+use crate::aegon::verify_sharded_invariance as aegon_verify_invariance;
+use crate::aegon::verify_sharded_lookup as aegon_verify_lookup;
 
-/// Aegon `EpochCommitment` specialised to AKD's BN254+KZHK backend.
-pub type EpochCommitment = crate::aegon::EpochCommitment<DirectoryE, DirectoryPcs>;
-/// Aegon `InvarianceProof` specialised to AKD's BN254+KZHK backend.
-pub type InvarianceProof = crate::aegon::InvarianceProof<DirectoryE, DirectoryPcs>;
-/// Aegon `ConsistencyProof` specialised to AKD's BN254+KZHK backend.
-pub type ConsistencyProof = crate::aegon::ConsistencyProof<DirectoryE, DirectoryPcs>;
-/// Aegon `VerifierContext` specialised to AKD's BN254+KZHK backend.
-pub type VerifierContext = crate::aegon::VerifierContext<DirectoryE, DirectoryPcs>;
+/// Sharded epoch commitment specialised to AKD's BN254+KZHK backend.
+pub type EpochCommitment = crate::aegon::ShardedEpochCommitment<DirectoryE, DirectoryPcs>;
+/// Sharded invariance proof specialised to AKD's BN254+KZHK backend.
+pub type InvarianceProof = crate::aegon::ShardedInvarianceProof<DirectoryE, DirectoryPcs>;
+/// Sharded consistency proof specialised to AKD's BN254+KZHK backend.
+pub type ConsistencyProof = crate::aegon::ShardedConsistencyProof<DirectoryE, DirectoryPcs>;
+/// Sharded verifier context specialised to AKD's BN254+KZHK backend.
+pub type VerifierContext = crate::aegon::ShardedVerifierContext<DirectoryE, DirectoryPcs>;
 /// Aegon `AuditState` over BN254's scalar field.
 pub type AuditState = crate::aegon::AuditState<<DirectoryE as ark_ec::pairing::Pairing>::ScalarField>;
 
@@ -75,13 +75,15 @@ pub fn verify_lookup_aegon(
     commitment: &EpochCommitment,
     label: &crate::aegon::Label,
     value: &crate::aegon::Value,
-    proof: &crate::aegon::LookupProof<DirectoryE, DirectoryPcs>,
+    proof: &crate::aegon::ShardedLookupProof<DirectoryE, DirectoryPcs>,
 ) -> Result<bool, AkdError> {
-    aegon_verify_lookup::<DirectoryE, DirectoryPcs, Sha256Hash>(ctx, commitment, label, value, proof)
-        .map_err(map_aegon_err)
+    aegon_verify_lookup::<DirectoryE, DirectoryPcs, Sha256Hash>(
+        ctx, commitment, label, value, proof,
+    )
+    .map_err(map_aegon_err)
 }
 
-/// Verify a single-transition Aegon invariance proof. Callers walk
+/// Verify a single-transition sharded invariance proof. Callers walk
 /// the per-transition chain returned by
 /// [`crate::Directory::aegon_invariance_proofs`] and call this for
 /// each step, threading a single `AuditState`.
@@ -97,7 +99,10 @@ pub fn verify_invariance(
 }
 
 /// Verify a per-user consistency proof showing the user's slot did
-/// not change between two epochs `s0 < s1`.
+/// not change between two epochs `s0 < s1`. `expected_ctr0` should
+/// come from a fresh lookup against the *current* epoch (see
+/// [`decode_ctr0`]); pinning it client-side stops a server from
+/// substituting a different trail length on the consistency proof.
 pub fn verify_consistency(
     ctx: &VerifierContext,
     s0: &EpochCommitment,
@@ -118,7 +123,7 @@ pub fn verify_consistency(
     .map_err(map_aegon_err)
 }
 
-/// Extract the `ctr0` (open-addressing slot counter) from an AKD
+/// Extract the `ctr0` (open-addressing trail length) from an AKD
 /// [`LookupProof`]. Needed by callers that want to feed it as
 /// `expected_ctr0` into [`verify_consistency`].
 pub fn decode_ctr0(proof: &LookupProof) -> Result<u64, AkdError> {

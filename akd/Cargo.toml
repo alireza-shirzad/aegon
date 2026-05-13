@@ -68,10 +68,14 @@ async-recursion = "1"
 async-trait = "0.1"
 dashmap = "5"
 hex = "0.4"
+clap = { version = "4", features = ["derive"] }
 log = { version = "0.4", features = ["kv_unstable"] }
+prost = "0.13"
+rayon = { workspace = true }
 sha2 = { workspace = true }
 thiserror = { workspace = true }
-tokio = { version = "1", features = ["sync", "time", "rt"] }
+tokio = { version = "1", features = ["sync", "time", "rt", "rt-multi-thread", "net", "macros"] }
+tonic = { version = "0.12", features = ["tls", "tls-roots"] }
 
 ## Optional dependencies ##
 colored = { version = "2", optional = true }
@@ -112,3 +116,6 @@ required-features = ["bench"]
 name = "directory"
 harness = false
 required-features = ["bench"]
+
+[build-dependencies]
+tonic-build = "0.12"
