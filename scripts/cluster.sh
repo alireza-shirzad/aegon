@@ -247,13 +247,20 @@ cmd_deploy() {
       sudo chmod +x $REMOTE_BIN_DIR/aegon_shard_server"
     log "[$name] starting shard server"
     # nohup + & + < /dev/null + 2>&1 so SSH session closes cleanly.
-    remote "$name" "pkill -f aegon_shard_server >/dev/null 2>&1; sleep 1; \
+    # Kill any previous shard by PID file rather than `pkill -f` — the SSH
+    # command's own argv contains "aegon_shard_server", and pkill -f would
+    # match its own parent bash and terminate the SSH session (exit 255).
+    remote "$name" "if [ -f /tmp/aegon-shard.pid ]; then \
+        kill \$(cat /tmp/aegon-shard.pid) 2>/dev/null || true; \
+        sleep 1; \
+      fi; \
       nohup $REMOTE_BIN_DIR/aegon_shard_server \
         --bind 0.0.0.0:$SHARD_PORT \
         --shard-log-capacity $SHARD_LOG_CAPACITY \
         --kzh-k $KZH_K \
         --srs-path $REMOTE_SRS_PATH \
-        > /tmp/aegon-shard.log 2>&1 < /dev/null &"
+        > /tmp/aegon-shard.log 2>&1 < /dev/null & \
+      echo \$! > /tmp/aegon-shard.pid"
   done
 
   # ---- push to coordinator ----
