@@ -189,22 +189,34 @@ cmd_deploy() {
   require_project
   require_power_of_two "$N_SHARDS"
 
-  # On macOS hosts the remote-bound binaries must be cross-compiled to
-  # x86_64-unknown-linux-gnu; we use `cross` (Docker-based) so the host
-  # doesn't need a Linux toolchain. `aegon_srs_gen` runs locally on the
-  # operator's machine, so it's always built for the native target.
+  # On macOS hosts the remote-bound binaries must be x86_64-unknown-linux-gnu.
+  # We run cargo inside a Linux Docker container (no cross-compile needed —
+  # the build host inside the container is itself x86_64 Linux), which avoids
+  # the `cross` × `rustup` toolchain-install incompatibility on recent
+  # versions. `aegon_srs_gen` is always built for the native host because it
+  # runs on the operator's machine, not on the VMs.
   local local_bin_dir="$REPO_ROOT/target/release"
   local remote_bin_dir="$local_bin_dir"
   if [[ "$(uname -s)" == "Darwin" ]]; then
-    command -v cross >/dev/null  || die "macOS host needs 'cross' (cargo install cross) — see scripts/README.md"
-    command -v docker >/dev/null || die "macOS host needs Docker (cross uses it under the hood)"
+    command -v docker >/dev/null || die "macOS host needs Docker (we build the Linux binaries inside a container)"
     docker info >/dev/null 2>&1  || die "Docker daemon unreachable — start Docker Desktop and retry"
 
-    log "macOS host: building aegon_srs_gen natively, cross-compiling shard/coordinator binaries"
+    log "macOS host: building aegon_srs_gen natively for the operator's laptop"
     (cd "$REPO_ROOT" && cargo build --release -p akd --bin aegon_srs_gen) >/dev/null
-    (cd "$REPO_ROOT" && cross build --release -p akd \
-      --target x86_64-unknown-linux-gnu \
-      --bin aegon_shard_server --bin aegon_coordinator_smoke) >/dev/null
+
+    log "building shard + coordinator binaries inside Docker (first run pulls rust image — ~5 min on Apple Silicon)"
+    # --platform linux/amd64 forces x86_64 even on Apple Silicon (target VMs
+    # are x86_64). --target keeps the in-container build artefacts separate
+    # from the host's target/release/ so the native aegon_srs_gen binary
+    # isn't clobbered. apt-get installs protoc for the tonic build.
+    docker run --rm --platform linux/amd64 \
+      -v "$REPO_ROOT:/workspace" -w /workspace \
+      rust:slim-bookworm \
+      bash -c "set -e; \
+        apt-get update >/dev/null && \
+        apt-get install -y --no-install-recommends protobuf-compiler ca-certificates >/dev/null && \
+        cargo build --release -p akd --target x86_64-unknown-linux-gnu \
+          --bin aegon_shard_server --bin aegon_coordinator_smoke"
     remote_bin_dir="$REPO_ROOT/target/x86_64-unknown-linux-gnu/release"
   else
     log "building release binaries"

@@ -16,17 +16,15 @@ the smoke test, and tears it all down on request.
   to them must be `x86_64-unknown-linux-gnu`.
   - **Linux x86_64 hosts**: nothing extra — `cargo` already targets
     the right triple.
-  - **macOS hosts (Intel or Apple Silicon)**: install
-    [`cross`](https://github.com/cross-rs/cross) and have Docker
-    running. The deploy step auto-detects macOS and switches to
-    `cross` for the two remote-bound binaries.
-    ```bash
-    cargo install cross
-    # plus: Docker Desktop running
-    ```
-    `aegon_srs_gen` is still built natively (it runs on your laptop,
-    not on the VMs). `Cross.toml` at the repo root tells the cross
-    container to install `protoc` for the tonic build.
+  - **macOS hosts (Intel or Apple Silicon)**: install Docker
+    Desktop and have it running before `deploy`. The deploy step
+    auto-detects macOS and builds the two server binaries inside a
+    `rust:slim-bookworm` container (with `--platform linux/amd64`,
+    so Apple Silicon runs the build under x86_64 emulation).
+    `aegon_srs_gen` is still built natively (it runs on your
+    laptop, not on the VMs). First-time Docker build is ~5 min on
+    Apple Silicon — subsequent builds reuse the `target/` cache and
+    finish in well under a minute.
 
 ## Quick start
 
