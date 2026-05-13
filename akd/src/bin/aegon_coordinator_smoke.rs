@@ -22,8 +22,8 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 use akd::aegon::{
-    verify_sharded_lookup, Sha256Hash, ShardTransport, ShardedAegon, ShardedAegonConfig,
-    SrsSource,
+    verify_sharded_lookup, DbSource, Sha256Hash, ShardTransport, ShardedAegon,
+    ShardedAegonConfig, SrsSource,
 };
 use akd_core::aegon_crypto::pcs::kzhk::KZHK;
 use ark_bn254::Bn254;
@@ -75,6 +75,14 @@ struct Args {
     /// `user-{i}` / `v-{i}` pair.
     #[arg(long, default_value = "64")]
     n_users: u32,
+
+    /// Optional Redis URL where the coordinator stores raw
+    /// `(label, value)` bytes. With this set, `lookup` returns the
+    /// value from Redis alongside the proof; without it, the smoke
+    /// test falls back to the pre-known values it just published
+    /// (single-process style). URL form: `redis://host[:port][/db]`.
+    #[arg(long)]
+    db_url: Option<String>,
 }
 
 fn main() -> ExitCode {
@@ -103,6 +111,9 @@ fn main() -> ExitCode {
         });
     if let Some(path) = &args.srs_path {
         builder = builder.srs(SrsSource::Path(path.clone()));
+    }
+    if let Some(url) = &args.db_url {
+        builder = builder.db(DbSource::Redis(url.clone()));
     }
     let cfg = match builder.build() {
         Ok(c) => c,
@@ -152,12 +163,16 @@ fn main() -> ExitCode {
         publish_ms as f64 / updates.len() as f64
     );
 
-    // Lookup + verify every user.
+    // Lookup + verify every user. When --db-url is set, the value
+    // comes back from the DB tier and we also check it matches what
+    // we published; without it, lookup returns an empty value and we
+    // fall back to the pre-known one (single-process style).
     let ctx = server.sharded_verifier_context();
+    let using_db = args.db_url.is_some();
     let t0 = Instant::now();
     let mut failures = 0usize;
     for (label, value) in &updates {
-        let proof = match server.lookup(label) {
+        let (db_value, proof) = match server.lookup(label) {
             Ok(p) => p,
             Err(e) => {
                 eprintln!("error: lookup {label:?} failed: {e}");
@@ -165,8 +180,16 @@ fn main() -> ExitCode {
                 continue;
             },
         };
+        if using_db && &db_value != value {
+            eprintln!(
+                "error: DB returned wrong value for {label:?}: got {db_value:?}, expected {value:?}"
+            );
+            failures += 1;
+            continue;
+        }
+        let verify_value = if using_db { &db_value } else { value };
         match verify_sharded_lookup::<Bn254, Pcs, Sha256Hash>(
-            &ctx, &commit, label, value, &proof,
+            &ctx, &commit, label, verify_value, &proof,
         ) {
             Ok(true) => {},
             Ok(false) => {

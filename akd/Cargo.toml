@@ -72,6 +72,7 @@ clap = { version = "4", features = ["derive"] }
 log = { version = "0.4", features = ["kv_unstable"] }
 prost = "0.13"
 rayon = { workspace = true }
+redis = { version = "0.27", default-features = false }
 sha2 = { workspace = true }
 thiserror = { workspace = true }
 tokio = { version = "1", features = ["sync", "time", "rt", "rt-multi-thread", "net", "macros"] }

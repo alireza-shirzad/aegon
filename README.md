@@ -78,12 +78,18 @@ For the integration through the legacy AKD `Directory` API (with
 
 ## Cluster deployment (N machines + 1 coordinator)
 
-The system splits cleanly along three roles:
+The system splits cleanly along four roles:
 
 1. **Setup machine** — runs once, produces the SRS file.
 2. **Shard machines** (×N) — each runs `aegon_shard_server` over gRPC.
 3. **Coordinator machine** — runs the calling application, holds a
    `ShardedAegon` configured with `ShardTransport::Remote { endpoints }`.
+4. **DB machine** — runs Redis. The coordinator writes the raw
+   `(label, value)` bytes here on publish and reads them back on
+   lookup so it can return the value alongside the proof. The
+   polynomial commitments only bind hashes of `(label, value)`; the
+   DB is a side-channel for retrieval, and the verifier re-hashes
+   the bytes itself.
 
 ### Automated: one script
 
@@ -93,9 +99,9 @@ the whole flow:
 ```bash
 export PROJECT=your-gcp-project-id
 
-./scripts/cluster.sh up      # VPC + 4 shards + 1 coordinator
-./scripts/cluster.sh deploy  # build, generate SRS, ship, start servers
-./scripts/cluster.sh smoke   # publish + lookup + verify against the cluster
+./scripts/cluster.sh up      # VPC + 4 shards + 1 coordinator + 1 db
+./scripts/cluster.sh deploy  # build, generate SRS, ship, start servers, install redis
+./scripts/cluster.sh smoke   # publish + lookup + verify (queries redis)
 ./scripts/cluster.sh down    # delete everything
 ```
 
@@ -207,7 +213,9 @@ WantedBy=multi-user.target
 ### Step 3: Wire the coordinator up
 
 ```rust
-use akd::aegon::{ShardedAegon, ShardedAegonConfig, ShardTransport, SrsSource, Sha256Hash};
+use akd::aegon::{
+    DbSource, Sha256Hash, ShardTransport, ShardedAegon, ShardedAegonConfig, SrsSource,
+};
 use ark_bn254::Bn254;
 use akd_core::aegon_crypto::pcs::kzhk::KZHK;
 use ark_std::rand::SeedableRng;
@@ -226,6 +234,10 @@ let cfg = ShardedAegonConfig::<Bn254, KZHK<Bn254>>::builder()
     // VerifierContext; the prover_param is large and lives on the
     // shard machines.
     .srs(SrsSource::Path("/etc/aegon/shard.srs".into()))
+    // Coordinator-side label→value KV store. Omit (or pass
+    // DbSource::None) for single-process tests; for cluster
+    // deployments, point at the Redis VM.
+    .db(DbSource::Redis("redis://aegon-db.internal:6379".into()))
     .build()?;
 
 let mut rng = ChaCha20Rng::seed_from_u64(0);
@@ -249,13 +261,20 @@ cargo build --release -p akd --bin aegon_coordinator_smoke
   --shard-log-capacity 29 --kzh-k 10 \
   --srs-path /etc/aegon/shard.srs \
   --endpoints http://aegon-shard-0:50051,http://aegon-shard-1:50051,...,http://aegon-shard-31:50051 \
+  --db-url redis://aegon-db.internal:6379 \
   --n-users 1024
 ```
 
 The binary brings up a `ShardedAegon` against the live cluster,
 publishes `--n-users` deterministic users, looks each one up, and
-verifies the proof. It prints setup/publish/lookup wall-clock
+verifies the proof. When `--db-url` is passed, every lookup
+additionally cross-checks that the value Redis returns matches what
+was published. The binary prints setup/publish/lookup wall-clock
 timings plus a pass/fail summary. Exit code 0 = healthy cluster.
+
+`--db-url` is optional: omitting it falls back to the single-process
+mode where the smoke client trusts the values it just published and
+the coordinator's `lookup` returns an empty value vector.
 
 ### TLS
 
@@ -308,11 +327,11 @@ max_backoff = 2s`. Override via `GrpcShardClientConfig::with_retry`.
 ## Architecture summary
 
 ```
-                  ┌─────────────────┐
-                  │  Coordinator    │
-                  │ (your app +     │
-                  │  ShardedAegon)  │
-                  └────────┬────────┘
+                  ┌─────────────────┐         ┌──────────┐
+                  │  Coordinator    │ ──TCP─▶ │  Redis   │
+                  │ (your app +     │         │ (label → │
+                  │  ShardedAegon)  │ ◀──TCP─ │  value)  │
+                  └────────┬────────┘         └──────────┘
                            │ gRPC × N (publish / lookup / consistency / audit)
         ┌──────────────────┼──────────────────┐
         │                  │                  │
@@ -326,8 +345,16 @@ max_backoff = 2s`. Override via `GrpcShardClientConfig::with_retry`.
 
 - Each shard owns four polynomials (`index`, `value`, `rand_index`,
   `rand_value`) and the matching commitments + KZH-k auxiliary state.
+  The polynomials are over `H_F(label)` / `H_F(value)`; the raw bytes
+  never touch a shard machine.
 - The coordinator owns the routing table (label → cross-shard probe
-  trail), the FS chain scalars, and the running Merkle root.
+  trail), the FS chain scalars, the running Merkle root, and the
+  Redis client. On publish it writes `(label, value)` to Redis; on
+  lookup it reads the value back so it can return it to the caller
+  alongside the proof.
+- The verifier never trusts what Redis returns — it re-hashes the
+  bytes and checks the proof binds to that hash. Redis is a
+  retrieval side-channel, not part of the soundness argument.
 - Open addressing trails are derived from `H(ctr, label) → (shard_id,
   slot)`, deterministic from the public hash + config. Sub-millisecond
   lookups in the common case (`ctr0 = 0`, one shard, one PCS opening +

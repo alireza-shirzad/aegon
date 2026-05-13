@@ -25,6 +25,9 @@ pub enum AegonError {
 
     #[error("proof verification failed: {0}")]
     Verification(&'static str),
+
+    #[error("database error: {0}")]
+    Database(String),
 }
 
 impl From<akd_core::aegon_crypto::transcript::TranscriptError> for AegonError {

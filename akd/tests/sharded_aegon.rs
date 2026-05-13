@@ -38,7 +38,8 @@ fn assert_lookup_verifies(
     expected_value: &[u8],
     commit: &ShardedEpochCommitment<Bn254, Pcs>,
 ) {
-    let proof: ShardedLookupProof<Bn254, Pcs> = server.lookup(&label.to_vec()).expect("lookup");
+    let (_db_value, proof): (Vec<u8>, ShardedLookupProof<Bn254, Pcs>) =
+        server.lookup(&label.to_vec()).expect("lookup");
     let ctx: ShardedVerifierContext<Bn254, Pcs> = server.sharded_verifier_context();
     let ok = verify_sharded_lookup::<Bn254, Pcs, Sha256Hash>(
         &ctx,
@@ -105,7 +106,7 @@ fn srs_path_round_trip() {
     let (commit, _audit) = server.publish(&updates).expect("publish");
     let ctx = server.sharded_verifier_context();
     for (label, value) in &updates {
-        let proof = server.lookup(label).expect("lookup");
+        let (_db_value, proof) = server.lookup(label).expect("lookup");
         let ok = verify_sharded_lookup::<Bn254, Pcs, Sha256Hash>(
             &ctx, &commit, label, value, &proof,
         )
@@ -328,7 +329,7 @@ fn cross_shard_open_addressing_handles_collisions() {
     // At least one label should require ctr0 > 0 (i.e., the trail had
     // to advance past its first probe).
     let any_multi_probe = updates.iter().any(|(label, _)| {
-        let p = server.lookup(label).unwrap();
+        let (_, p) = server.lookup(label).unwrap();
         p.ctr0 > 0
     });
     assert!(
@@ -402,7 +403,7 @@ fn bench_production_shard_scale() {
     let ctx = server.sharded_verifier_context();
     let (label, value) = &updates[0];
     let t0 = std::time::Instant::now();
-    let proof = server.lookup(label).expect("lookup");
+    let (_db_value, proof) = server.lookup(label).expect("lookup");
     let lookup_ms = t0.elapsed().as_millis();
     let t0 = std::time::Instant::now();
     let ok = verify_sharded_lookup::<Bn254, Pcs, Sha256Hash>(
@@ -450,7 +451,7 @@ fn bench_setup_and_publish() {
     let ctx = server.sharded_verifier_context();
     let t0 = std::time::Instant::now();
     for (label, value) in &updates {
-        let proof = server.lookup(label).expect("lookup");
+        let (_db_value, proof) = server.lookup(label).expect("lookup");
         let ok = akd::aegon::verify_sharded_lookup::<Bn254, Pcs, Sha256Hash>(
             &ctx, &commit, label, value, &proof,
         )

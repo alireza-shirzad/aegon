@@ -96,7 +96,7 @@ fn audit_one_transition(
 }
 
 fn user_lookup(server: &Sharded, ctx: &ShardedCtx, user: &UserRecord, commit: &Commit) {
-    let proof = server.lookup(&user.label).expect("lookup");
+    let (_db_value, proof) = server.lookup(&user.label).expect("lookup");
     let ok = verify_sharded_lookup::<Bn254, Pcs, Sha256Hash>(
         ctx,
         commit,
@@ -124,7 +124,7 @@ fn user_consistency(
     // Pin ctr0 from a fresh lookup — this is the security-critical
     // step that prevents a server from substituting a different trail
     // length on the consistency proof.
-    let lookup = server.lookup(&user.label).expect("lookup-for-ctr0");
+    let (_db_value, lookup) = server.lookup(&user.label).expect("lookup-for-ctr0");
     let expected_ctr0 = lookup.ctr0;
     let proof = server.consistency_proof(&user.label, s0.epoch).expect("consistency_proof");
     let result = verify_sharded_consistency::<Bn254, Pcs, Sha256Hash>(

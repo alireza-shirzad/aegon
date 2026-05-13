@@ -223,7 +223,12 @@ where
         let _guard = self.cache_lock.read().await;
 
         let aegon = self.aegon.lock().await;
-        let proof = aegon
+        // The Sharded layer returns (value_from_db, proof). The
+        // Directory keeps its own `label_values` map (below) for
+        // single-process tests, so the DB-side value is discarded
+        // here. With `DbSource::None`, the DB-side value is the
+        // empty vector anyway.
+        let (_db_value, proof) = aegon
             .lookup(&akd_label.0)
             .map_err(|e| AkdError::Directory(DirectoryError::Publish(format!("aegon lookup: {e}"))))?;
         let commitment = aegon.current_commitment();

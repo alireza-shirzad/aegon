@@ -2,10 +2,10 @@
 # cluster.sh — spin up / tear down / smoke-test an Aegon cluster on GCE.
 #
 # Subcommands:
-#   up        Provision VPC + firewall + shard machines + coordinator
+#   up        Provision VPC + firewall + shard machines + coordinator + db
 #   deploy    Build binaries locally, scp them + the SRS to every machine,
-#             and start the shard servers
-#   smoke     Run aegon_coordinator_smoke against the live cluster
+#             start the shard servers, install Redis on the db machine
+#   smoke     Run aegon_coordinator_smoke against the live cluster (uses Redis)
 #   logs N    Tail the shard log on aegon-shard-N
 #   down      Delete every instance + the VPC this script created
 #
@@ -39,9 +39,12 @@ COORD_MACHINE_TYPE="${COORD_MACHINE_TYPE:-e2-small}"
 NETWORK="aegon-vpc"
 FIREWALL_GRPC="aegon-grpc"
 FIREWALL_SSH="aegon-ssh"
+FIREWALL_REDIS="aegon-redis"
 SHARD_TAG="aegon-shard"
 COORD_TAG="aegon-coordinator"
+DB_TAG="aegon-db"
 SHARD_PORT=50051
+REDIS_PORT=6379
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LOCAL_SRS="/tmp/aegon-cluster.srs"
@@ -88,9 +91,15 @@ scp_to() {
 
 shard_name() { echo "${SHARD_TAG}-$1"; }
 coord_name() { echo "${COORD_TAG}"; }
+db_name()    { echo "${DB_TAG}"; }
 
 shard_internal_ip() {
   gcloud compute instances describe "$(shard_name "$1")" --zone="$ZONE" \
+    --format='value(networkInterfaces[0].networkIP)'
+}
+
+db_internal_ip() {
+  gcloud compute instances describe "$(db_name)" --zone="$ZONE" \
     --format='value(networkInterfaces[0].networkIP)'
 }
 
@@ -131,19 +140,46 @@ cmd_up() {
       --target-tags="$SHARD_TAG" >/dev/null
   fi
 
+  # ---- firewall: coordinator -> redis on the DB machine ----
+  if gcloud compute firewall-rules describe "$FIREWALL_REDIS" >/dev/null 2>&1; then
+    log "firewall $FIREWALL_REDIS exists"
+  else
+    log "creating firewall $FIREWALL_REDIS (coordinator -> db:$REDIS_PORT)"
+    gcloud compute firewall-rules create "$FIREWALL_REDIS" \
+      --network="$NETWORK" \
+      --allow="tcp:$REDIS_PORT" \
+      --source-tags="$COORD_TAG" \
+      --target-tags="$DB_TAG" >/dev/null
+  fi
+
   # ---- firewall: SSH via IAP tunnel only ----
   # The instances have no external IP (some projects enforce
   # constraints/compute.vmExternalIpAccess). We rely on IAP tunneling
-  # for SSH, which connects through 35.235.240.0/20 — that's Google's
+  # for SSH, which connects through 35.235.240.0/20 — Google's
   # published IAP source range, the only addresses that need port 22.
+  #
+  # Reconcile (rather than create-if-missing) so a pre-existing rule
+  # with a wrong source range — e.g. a stale 0.0.0.0/0 from an older
+  # version of this script — gets fixed on the next `up`, not left
+  # for the university security scanner to flag.
+  local ssh_want="35.235.240.0/20"
   if gcloud compute firewall-rules describe "$FIREWALL_SSH" >/dev/null 2>&1; then
-    log "firewall $FIREWALL_SSH exists"
+    local ssh_have
+    ssh_have="$(gcloud compute firewall-rules describe "$FIREWALL_SSH" \
+      --format='value(sourceRanges.list())' 2>/dev/null)"
+    if [[ "$ssh_have" != "$ssh_want" ]]; then
+      log "firewall $FIREWALL_SSH has source range '$ssh_have'; updating to IAP-only ($ssh_want)"
+      gcloud compute firewall-rules update "$FIREWALL_SSH" \
+        --source-ranges="$ssh_want" >/dev/null
+    else
+      log "firewall $FIREWALL_SSH already IAP-only"
+    fi
   else
     log "creating firewall $FIREWALL_SSH (IAP -> instances:22)"
     gcloud compute firewall-rules create "$FIREWALL_SSH" \
       --network="$NETWORK" \
       --allow="tcp:22" \
-      --source-ranges="35.235.240.0/20" >/dev/null
+      --source-ranges="$ssh_want" >/dev/null
   fi
 
   # ---- shard machines ----
@@ -176,6 +212,22 @@ cmd_up() {
       --network="$NETWORK" \
       --no-address \
       --tags="$COORD_TAG" \
+      --image-family="ubuntu-2204-lts" --image-project="ubuntu-os-cloud" \
+      --boot-disk-size=20GB >/dev/null
+  fi
+
+  # ---- database (Redis) ----
+  local dname; dname="$(db_name)"
+  if gcloud compute instances describe "$dname" --zone="$ZONE" >/dev/null 2>&1; then
+    log "$dname exists, skipping"
+  else
+    log "creating $dname ($COORD_MACHINE_TYPE) — runs Redis on :$REDIS_PORT"
+    gcloud compute instances create "$dname" \
+      --zone="$ZONE" \
+      --machine-type="$COORD_MACHINE_TYPE" \
+      --network="$NETWORK" \
+      --no-address \
+      --tags="$DB_TAG" \
       --image-family="ubuntu-2204-lts" --image-project="ubuntu-os-cloud" \
       --boot-disk-size=20GB >/dev/null
   fi
@@ -272,6 +324,25 @@ cmd_deploy() {
     sudo mv /tmp/aegon_coordinator_smoke $REMOTE_BIN_DIR/ && \
     sudo chmod +x $REMOTE_BIN_DIR/aegon_coordinator_smoke"
 
+  # ---- DB tier (Redis) ----
+  # Idempotent: apt-install Redis if missing, rewrite the bind config
+  # to listen on the VM's internal IP (VPC firewall is the access
+  # control), and (re)start the service. FLUSHALL between sessions
+  # so stale (label, value) pairs from prior runs don't shadow new
+  # ones with identical labels.
+  local dname; dname="$(db_name)"
+  log "[$dname] installing + (re)starting redis on :$REDIS_PORT"
+  remote "$dname" "set -e; \
+    if ! dpkg -s redis-server >/dev/null 2>&1; then \
+      sudo apt-get update -qq && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq redis-server; \
+    fi; \
+    sudo sed -i 's/^bind .*/bind 0.0.0.0/' /etc/redis/redis.conf; \
+    sudo sed -i 's/^protected-mode .*/protected-mode no/' /etc/redis/redis.conf; \
+    sudo systemctl restart redis-server; \
+    sleep 1; \
+    redis-cli -h 127.0.0.1 -p $REDIS_PORT FLUSHALL >/dev/null; \
+    redis-cli -h 127.0.0.1 -p $REDIS_PORT PING"
+
   log "deploy complete. waiting 5s for shards to bind..."
   sleep 5
   log "ready. run: ./scripts/cluster.sh smoke"
@@ -283,7 +354,9 @@ cmd_smoke() {
 
   local cname; cname="$(coord_name)"
   local csv; csv="$(shard_endpoints_csv)"
+  local db_ip; db_ip="$(db_internal_ip)"
   log "endpoints: $csv"
+  log "db: redis://$db_ip:$REDIS_PORT"
   log "[$cname] running coordinator smoke client"
   remote "$cname" \
     "$REMOTE_BIN_DIR/aegon_coordinator_smoke \
@@ -291,6 +364,7 @@ cmd_smoke() {
        --kzh-k $KZH_K \
        --srs-path $REMOTE_SRS_PATH \
        --endpoints $csv \
+       --db-url redis://$db_ip:$REDIS_PORT \
        --n-users 256" \
     stream
 }
@@ -319,8 +393,13 @@ cmd_down() {
     log "deleting $cname"
     gcloud compute instances delete "$cname" --zone="$ZONE" --quiet >/dev/null
   fi
+  local dname; dname="$(db_name)"
+  if gcloud compute instances describe "$dname" --zone="$ZONE" >/dev/null 2>&1; then
+    log "deleting $dname"
+    gcloud compute instances delete "$dname" --zone="$ZONE" --quiet >/dev/null
+  fi
 
-  for fw in "$FIREWALL_GRPC" "$FIREWALL_SSH"; do
+  for fw in "$FIREWALL_GRPC" "$FIREWALL_REDIS" "$FIREWALL_SSH"; do
     if gcloud compute firewall-rules describe "$fw" >/dev/null 2>&1; then
       log "deleting firewall $fw"
       gcloud compute firewall-rules delete "$fw" --quiet >/dev/null
@@ -338,9 +417,10 @@ usage() {
   cat <<EOF
 usage: $0 <subcommand>
 
-  up        Provision VPC, firewall, $N_SHARDS shards + coordinator
-  deploy    Build binaries, generate SRS, push to every node, start shards
-  smoke     Run aegon_coordinator_smoke against the live cluster
+  up        Provision VPC, firewall, $N_SHARDS shards + coordinator + db
+  deploy    Build binaries, generate SRS, push to every node, start shards,
+            install Redis on aegon-db
+  smoke     Run aegon_coordinator_smoke against the live cluster (uses Redis)
   logs N    Tail the shard log on aegon-shard-N
   down      Delete every instance + the VPC
 

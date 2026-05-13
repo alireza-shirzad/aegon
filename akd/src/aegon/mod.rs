@@ -15,6 +15,7 @@
 pub mod audit;
 pub mod config;
 pub mod consistency;
+pub mod db;
 pub mod error;
 pub(crate) mod fs;
 pub mod hash;
@@ -28,6 +29,7 @@ pub mod verify;
 pub use audit::verify_invariance;
 pub use config::{AegonConfig, VerifierContext};
 pub use consistency::verify_consistency;
+pub use db::DbSource;
 pub use error::AegonError;
 pub use hash::{HashSuite, Sha256Hash};
 pub use presets::optimal_kzh_k;

@@ -33,6 +33,7 @@ use sha2::{Digest, Sha256};
 
 use super::audit::verify_chain;
 use super::config::{AegonConfig, VerifierContext};
+use super::db::{Db, DbSource, RedisDb};
 use super::error::AegonError;
 use super::hash::{bool_index_to_point, HashSuite, Sha256Hash};
 use super::server::Aegon;
@@ -111,6 +112,9 @@ pub struct ShardedAegonConfig<E: Pairing, P: AegonPcs<E>> {
     pub shards: ShardTransport,
     /// Where the SRS comes from (test-mode generation, on-disk file).
     pub srs: SrsSource,
+    /// Coordinator-side label→value store. Defaults to
+    /// [`DbSource::None`] (no DB; lookup returns an empty value).
+    pub db: DbSource,
     pub _e: PhantomData<E>,
 }
 
@@ -221,6 +225,7 @@ pub struct ShardedAegonConfigBuilder<E: Pairing, P: AegonPcs<E>> {
     pcs_config: Option<P::Config>,
     shards: ShardTransport,
     srs: SrsSource,
+    db: DbSource,
     _e: PhantomData<E>,
 }
 
@@ -239,6 +244,7 @@ impl<E: Pairing, P: AegonPcs<E>> ShardedAegonConfigBuilder<E, P> {
             pcs_config: None,
             shards: ShardTransport::default(),
             srs: SrsSource::default(),
+            db: DbSource::default(),
             _e: PhantomData,
         }
     }
@@ -289,6 +295,14 @@ impl<E: Pairing, P: AegonPcs<E>> ShardedAegonConfigBuilder<E, P> {
         self
     }
 
+    /// Coordinator-side label→value KV store. Defaults to
+    /// [`DbSource::None`] — set to [`DbSource::Redis`] in cluster
+    /// deployments so `lookup` can return the raw value bytes.
+    pub fn db(mut self, v: DbSource) -> Self {
+        self.db = v;
+        self
+    }
+
     pub fn build(self) -> Result<ShardedAegonConfig<E, P>, AegonError> {
         let shard_log_capacity = self.shard_log_capacity.ok_or_else(|| {
             AegonError::Config("ShardedAegonConfig: shard_log_capacity is required".into())
@@ -323,6 +337,7 @@ impl<E: Pairing, P: AegonPcs<E>> ShardedAegonConfigBuilder<E, P> {
             pcs_config,
             shards: self.shards,
             srs: self.srs,
+            db: self.db,
             _e: PhantomData,
         })
     }
@@ -505,6 +520,11 @@ where
     // shard log_capacity; the coordinator caches it for fast lookup and
     // value-update batches.
     routing: HashMap<Label, LabelRouting>,
+
+    // Coordinator-side label→value store. `None` when the config asked
+    // for `DbSource::None`: `lookup` then returns an empty value and
+    // the caller is expected to know the value out-of-band.
+    db: Option<Box<dyn Db>>,
 }
 
 impl<E, P, H> ShardedAegon<E, P, H>
@@ -630,6 +650,13 @@ where
             per_shard: initial_per_shard,
         };
 
+        // Coordinator-side KV store. Connect eagerly so a misconfigured
+        // URL fails at setup, not on the first publish.
+        let db: Option<Box<dyn Db>> = match &config.db {
+            DbSource::None => None,
+            DbSource::Redis(url) => Some(Box::new(RedisDb::connect(url)?)),
+        };
+
         Ok(Self {
             shards,
             shard_dims,
@@ -641,6 +668,7 @@ where
             r_value: E::ScalarField::zero(),
             epoch_commits: vec![initial_commit],
             routing: HashMap::new(),
+            db,
         })
     }
 
@@ -797,6 +825,15 @@ where
         };
         self.epoch_commits.push(sharded_commit.clone());
 
+        // 6. Mirror the raw label→value bytes into the coordinator's
+        //    KV store, so `lookup` can return the value alongside the
+        //    proof. The polynomial commitment already binds H_F(value)
+        //    at the right slot, so the DB is just a side-channel for
+        //    retrieval — the verifier re-hashes the bytes itself.
+        if let Some(db) = &self.db {
+            db.put_batch(updates)?;
+        }
+
         Ok((
             sharded_commit,
             ShardedInvarianceProof {
@@ -836,8 +873,20 @@ where
         })
     }
 
-    /// Produce a sharded lookup proof for `label`.
-    pub fn lookup(&self, label: &Label) -> Result<ShardedLookupProof<E, P>, AegonError> {
+    /// Produce a sharded lookup proof for `label`, plus the raw value
+    /// bytes from the coordinator's KV store (if one is configured).
+    ///
+    /// When the config is built with [`DbSource::None`] (the in-process
+    /// tests' default), the returned value vector is empty and the
+    /// caller must hand the verifier the value it already knows
+    /// out-of-band. With [`DbSource::Redis`], the coordinator fetches
+    /// the value from Redis here and returns it alongside the proof —
+    /// the verifier still re-hashes it, the DB is just a retrieval
+    /// side-channel.
+    pub fn lookup(
+        &self,
+        label: &Label,
+    ) -> Result<(Value, ShardedLookupProof<E, P>), AegonError> {
         let routing = self
             .routing
             .get(label)
@@ -862,12 +911,24 @@ where
         let (value_evaluation, value_proof) =
             self.shards[*final_shard as usize].open_value_at_slot(final_slot)?;
 
-        Ok(ShardedLookupProof {
-            ctr0: routing.ctr0(),
-            probes,
-            value_evaluation,
-            value_proof,
-        })
+        let value: Value = match &self.db {
+            Some(db) => db.get(label)?.ok_or_else(|| {
+                AegonError::Database(format!(
+                    "label {label:?} routed but missing from KV store"
+                ))
+            })?,
+            None => Vec::new(),
+        };
+
+        Ok((
+            value,
+            ShardedLookupProof {
+                ctr0: routing.ctr0(),
+                probes,
+                value_evaluation,
+                value_proof,
+            },
+        ))
     }
 
     /// Produce a consistency proof for `label` from epoch `s0` to the

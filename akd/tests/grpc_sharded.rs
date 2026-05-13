@@ -144,7 +144,7 @@ async fn grpc_sharded_publish_lookup_verify_roundtrip() {
     for (label, value) in &updates {
         let coord_clone = coordinator.clone();
         let label_c = label.clone();
-        let proof = tokio::task::spawn_blocking(move || {
+        let (_db_value, proof) = tokio::task::spawn_blocking(move || {
             coord_clone.blocking_lock().lookup(&label_c).expect("lookup")
         })
         .await

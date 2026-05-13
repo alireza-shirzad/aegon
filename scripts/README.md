@@ -31,13 +31,15 @@ the smoke test, and tears it all down on request.
 ```bash
 export PROJECT=your-gcp-project-id
 
-# Provision VPC + 4 shard machines + 1 coordinator.
+# Provision VPC + 4 shard machines + 1 coordinator + 1 db (Redis).
 ./scripts/cluster.sh up
 
-# Build binaries locally, generate SRS, ship everything, start servers.
+# Build binaries locally, generate SRS, ship everything, start servers,
+# install Redis on the db machine.
 ./scripts/cluster.sh deploy
 
-# Run the coordinator smoke client against the live cluster.
+# Run the coordinator smoke client against the live cluster (queries Redis
+# alongside the proof to verify the DB tier).
 ./scripts/cluster.sh smoke
 
 # Watch shard 0's log.
@@ -90,11 +92,12 @@ kzh_k:                6     7       8       9       10      11     12
 
 ## Cost estimate
 
-For the default 4-shard cluster (`n2-standard-4` × 4 + `e2-small`):
-roughly **$0.82/hr**. A typical validation session of 2–3 hours
-costs under $3. A 32-shard production-scale cluster
-(`n2-standard-16` × 32 + `e2-small`): roughly **$25/hr**, so don't
-forget to `./scripts/cluster.sh down` when you're done.
+For the default 4-shard cluster (`n2-standard-4` × 4 + `e2-small` ×
+2 for the coordinator + db): roughly **$0.84/hr**. A typical
+validation session of 2–3 hours costs under $3. A 32-shard
+production-scale cluster (`n2-standard-16` × 32 + `e2-small` × 2):
+roughly **$25/hr**, so don't forget to `./scripts/cluster.sh down`
+when you're done.
 
 ## Caveats
 
@@ -113,3 +116,10 @@ forget to `./scripts/cluster.sh down` when you're done.
 - The script doesn't yet wire up TLS. Coordinator ↔ shard traffic is
   plaintext HTTP/2 inside the VPC. Adequate for inside a trusted
   network; not adequate for anything else.
+- The Redis instance on `aegon-db` runs without `requirepass` and
+  listens on `0.0.0.0` — the only thing stopping arbitrary access is
+  the `aegon-redis` firewall rule, which allows source-tag
+  `aegon-coordinator` only. Anyone else inside the project's VPC who
+  carries that tag (or who gets added to the rule) can read and
+  write the KV store. Fine for benchmarks; if you put real labels →
+  values in there, lock it down or add `requirepass`.
