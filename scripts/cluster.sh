@@ -66,19 +66,24 @@ require_power_of_two() {
 
 # Run a remote command on an instance. Quiet by default; pass a third arg to
 # preserve the SSH stream (useful for interactive logs).
+#
+# --tunnel-through-iap routes SSH via Identity-Aware Proxy because the
+# instances have no external IP. This requires the operator to have
+# roles/iap.tunnelResourceAccessor on the project (project owners/editors
+# already do).
 remote() {
   local instance="$1"
   local cmd="$2"
   if [[ "${3:-}" == "stream" ]]; then
-    gcloud compute ssh "$instance" --zone="$ZONE" --command="$cmd"
+    gcloud compute ssh "$instance" --zone="$ZONE" --tunnel-through-iap --command="$cmd"
   else
-    gcloud compute ssh "$instance" --zone="$ZONE" --quiet --command="$cmd"
+    gcloud compute ssh "$instance" --zone="$ZONE" --tunnel-through-iap --quiet --command="$cmd"
   fi
 }
 
 scp_to() {
   local instance="$1"; shift
-  gcloud compute scp --zone="$ZONE" --quiet "$@" "$instance:/tmp/"
+  gcloud compute scp --zone="$ZONE" --tunnel-through-iap --quiet "$@" "$instance:/tmp/"
 }
 
 shard_name() { echo "${SHARD_TAG}-$1"; }
@@ -126,16 +131,19 @@ cmd_up() {
       --target-tags="$SHARD_TAG" >/dev/null
   fi
 
-  # ---- firewall: SSH from anywhere (so the deploy step can scp from local) ----
-  # If you want to lock this down to your own IP, edit `--source-ranges`.
+  # ---- firewall: SSH via IAP tunnel only ----
+  # The instances have no external IP (some projects enforce
+  # constraints/compute.vmExternalIpAccess). We rely on IAP tunneling
+  # for SSH, which connects through 35.235.240.0/20 — that's Google's
+  # published IAP source range, the only addresses that need port 22.
   if gcloud compute firewall-rules describe "$FIREWALL_SSH" >/dev/null 2>&1; then
     log "firewall $FIREWALL_SSH exists"
   else
-    log "creating firewall $FIREWALL_SSH (any -> instances:22)"
+    log "creating firewall $FIREWALL_SSH (IAP -> instances:22)"
     gcloud compute firewall-rules create "$FIREWALL_SSH" \
       --network="$NETWORK" \
       --allow="tcp:22" \
-      --source-ranges="0.0.0.0/0" >/dev/null
+      --source-ranges="35.235.240.0/20" >/dev/null
   fi
 
   # ---- shard machines ----
@@ -150,6 +158,7 @@ cmd_up() {
       --zone="$ZONE" \
       --machine-type="$SHARD_MACHINE_TYPE" \
       --network="$NETWORK" \
+      --no-address \
       --tags="$SHARD_TAG" \
       --image-family="ubuntu-2204-lts" --image-project="ubuntu-os-cloud" \
       --boot-disk-size=50GB >/dev/null
@@ -165,6 +174,7 @@ cmd_up() {
       --zone="$ZONE" \
       --machine-type="$COORD_MACHINE_TYPE" \
       --network="$NETWORK" \
+      --no-address \
       --tags="$COORD_TAG" \
       --image-family="ubuntu-2204-lts" --image-project="ubuntu-os-cloud" \
       --boot-disk-size=20GB >/dev/null

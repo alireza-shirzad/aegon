@@ -100,9 +100,11 @@ forget to `./scripts/cluster.sh down` when you're done.
 
 ## Caveats
 
-- This is a **prototyping** script. It opens SSH to `0.0.0.0/0` for
-  convenience; lock that down (`--source-ranges`) before doing
-  anything with sensitive data.
+- This is a **prototyping** script. Instances are created without
+  external IPs; SSH/scp goes through IAP tunneling (firewall only
+  accepts Google's `35.235.240.0/20` IAP range). The operator running
+  this script needs `roles/iap.tunnelResourceAccessor` on the project
+  (project owners/editors already have it).
 - The SRS is generated locally via `aegon_srs_gen --seed 42`. The
   underlying call is `gen_srs_for_testing`, **not** a trusted setup.
   For real production, replace `aegon_srs_gen` with a binary that
