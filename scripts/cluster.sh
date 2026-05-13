@@ -45,6 +45,10 @@ COORD_TAG="aegon-coordinator"
 DB_TAG="aegon-db"
 SHARD_PORT=50051
 REDIS_PORT=6379
+ROUTER="aegon-router"
+NAT="aegon-nat"
+# Cloud NAT is a regional resource. ZONE like "us-central1-f" → REGION "us-central1".
+REGION="${ZONE%-*}"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LOCAL_SRS="/tmp/aegon-cluster.srs"
@@ -126,6 +130,30 @@ cmd_up() {
   else
     log "creating VPC $NETWORK"
     gcloud compute networks create "$NETWORK" --subnet-mode=auto >/dev/null
+  fi
+
+  # ---- Cloud NAT (outbound internet for VMs with --no-address) ----
+  # The DB machine needs apt to install redis-server. Shards and the
+  # coordinator only receive scp'd binaries, but get NAT for free
+  # because Cloud NAT applies subnet-wide. It's outbound only — no
+  # inbound exposure, unlike opening port 22 to the world.
+  if gcloud compute routers describe "$ROUTER" --region="$REGION" >/dev/null 2>&1; then
+    log "router $ROUTER exists"
+  else
+    log "creating cloud router $ROUTER ($REGION)"
+    gcloud compute routers create "$ROUTER" \
+      --network="$NETWORK" \
+      --region="$REGION" >/dev/null
+  fi
+  if gcloud compute routers nats describe "$NAT" --router="$ROUTER" --region="$REGION" >/dev/null 2>&1; then
+    log "cloud nat $NAT exists"
+  else
+    log "creating cloud nat $NAT (outbound-only internet)"
+    gcloud compute routers nats create "$NAT" \
+      --router="$ROUTER" \
+      --region="$REGION" \
+      --auto-allocate-nat-external-ips \
+      --nat-all-subnet-ip-ranges >/dev/null
   fi
 
   # ---- firewall: coordinator -> shards on gRPC port ----
@@ -405,6 +433,16 @@ cmd_down() {
       gcloud compute firewall-rules delete "$fw" --quiet >/dev/null
     fi
   done
+
+  # Cloud NAT must come down before its router; the router before its VPC.
+  if gcloud compute routers nats describe "$NAT" --router="$ROUTER" --region="$REGION" >/dev/null 2>&1; then
+    log "deleting cloud nat $NAT"
+    gcloud compute routers nats delete "$NAT" --router="$ROUTER" --region="$REGION" --quiet >/dev/null
+  fi
+  if gcloud compute routers describe "$ROUTER" --region="$REGION" >/dev/null 2>&1; then
+    log "deleting cloud router $ROUTER"
+    gcloud compute routers delete "$ROUTER" --region="$REGION" --quiet >/dev/null
+  fi
 
   if gcloud compute networks describe "$NETWORK" >/dev/null 2>&1; then
     log "deleting VPC $NETWORK"
