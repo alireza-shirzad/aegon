@@ -1,5 +1,5 @@
 //! Auditor's per-epoch invariance check (paper Fig. 4
-//! `Auditor.VerifyInvariance`).
+//! `Auditor.VerifyInvariance`), commitment-homomorphism path.
 //!
 //! Stateless across calls except for an `AuditState` carrying the chain
 //! Fiat-Shamir scalars `(r_index, r_value)` from one epoch transition to
@@ -9,37 +9,48 @@
 //! For each chain (index, value):
 //!   1. Recompute `r_n = O(prev_r, new_data_commitment)` to confirm the
 //!      server used the canonical Fiat-Shamir scalar.
-//!   2. Derive a random evaluation point `⃗r` from all four commitments
-//!      involved in the transition.
-//!   3. Verify the four PCS openings (prev/next of data and rand
-//!      polynomials, all at `⃗r`).
-//!   4. Check the homomorphic relation on the evaluations:
-//!         `next_rand_eval = prev_rand_eval + r_n · (next_poly_eval - prev_poly_eval)`.
+//!   2. Check the homomorphic relation **directly on commitments**:
+//!         `C(rand_{n+1}) ?= C(rand_n) + r_n · ( C(poly_{n+1}) − C(poly_n) )`.
 //!
-//! Step 4 enforces `rand_{n+1} = rand_n + r_n · (poly_{n+1} - poly_n)`
-//! everywhere on the hypercube, with overwhelming probability via
-//! Schwartz-Zippel.
+//! Soundness: by binding of the PCS, if the commitments satisfy the
+//! relation then the underlying polynomials do too — which is exactly
+//! `rand_{n+1} = rand_n + r_n · (poly_{n+1} − poly_n)`. No PCS openings,
+//! no Schwartz-Zippel evaluation point: just one group equation per
+//! chain. Requires the PCS commitment to be linearly homomorphic
+//! (`Add`, `Sub`, scalar `Mul`), which KZH-k satisfies — its commitment
+//! is a Pedersen MSM on the evaluation vector.
+//!
+//! The auditor's old "openings at a random point" path is gone; in
+//! exchange the auditor's per-epoch cost dropped from `O(N_shards × 8
+//! PCS verifies)` to `O(N_shards × 2 group equations)` and the wire
+//! format for `InvarianceProof` is now empty.
+
+use std::ops::{Add, Mul, Sub};
 
 use ark_ec::pairing::Pairing;
-use akd_core::aegon_crypto::transcript::IOPTranscript;
 
 use super::config::VerifierContext;
 use super::error::AegonError;
-use super::fs::{derive_chain_scalar, derive_eval_point};
-use super::types::{AegonPcs, AuditState, ChainWitness, EpochCommitment, InvarianceProof};
+use super::fs::derive_chain_scalar;
+use super::types::{AegonPcs, AuditState, EpochCommitment, InvarianceProof};
 
 /// Verify the invariance proof for a single epoch transition. Updates
 /// `audit_state` with the new chain scalars on success.
 pub fn verify_invariance<E, P>(
-    ctx: &VerifierContext<E, P>,
+    _ctx: &VerifierContext<E, P>,
     audit_state: &mut AuditState<E::ScalarField>,
     prev: &EpochCommitment<E, P>,
     next: &EpochCommitment<E, P>,
-    proof: &InvarianceProof<E, P>,
+    _proof: &InvarianceProof<E, P>,
 ) -> Result<bool, AegonError>
 where
     E: Pairing,
     P: AegonPcs<E>,
+    P::Commitment: Clone
+        + PartialEq
+        + Add<Output = P::Commitment>
+        + Sub<Output = P::Commitment>
+        + Mul<E::ScalarField, Output = P::Commitment>,
 {
     if next.epoch != prev.epoch + 1 {
         return Err(AegonError::Verification(
@@ -53,16 +64,12 @@ where
         &next.index_commitment,
     );
     let index_ok = verify_chain::<E, P>(
-        &ctx.verifier_param,
-        ctx.log_capacity,
-        b"aegon.invariance.index",
         new_r_index,
         &prev.index_commitment,
         &next.index_commitment,
         &prev.rand_index_commitment,
         &next.rand_index_commitment,
-        &proof.index_chain,
-    )?;
+    );
     if !index_ok {
         return Ok(false);
     }
@@ -73,16 +80,12 @@ where
         &next.value_commitment,
     );
     let value_ok = verify_chain::<E, P>(
-        &ctx.verifier_param,
-        ctx.log_capacity,
-        b"aegon.invariance.value",
         new_r_value,
         &prev.value_commitment,
         &next.value_commitment,
         &prev.rand_value_commitment,
         &next.rand_value_commitment,
-        &proof.value_chain,
-    )?;
+    );
     if !value_ok {
         return Ok(false);
     }
@@ -92,58 +95,30 @@ where
     Ok(true)
 }
 
-#[allow(clippy::too_many_arguments)]
+/// One chain's commitment-homomorphism check:
+///
+/// ```text
+///   C(rand_{n+1}) ?= C(rand_n) + r_n · ( C(poly_{n+1}) − C(poly_n) )
+/// ```
+///
+/// Three group operations and one equality, no openings.
 pub(super) fn verify_chain<E, P>(
-    vk: &P::VerifierParam,
-    log_capacity: usize,
-    fs_label: &'static [u8],
     r_n: E::ScalarField,
     prev_poly_com: &P::Commitment,
     next_poly_com: &P::Commitment,
     prev_rand_com: &P::Commitment,
     next_rand_com: &P::Commitment,
-    witness: &ChainWitness<E, P>,
-) -> Result<bool, AegonError>
+) -> bool
 where
     E: Pairing,
     P: AegonPcs<E>,
+    P::Commitment: Clone
+        + PartialEq
+        + Add<Output = P::Commitment>
+        + Sub<Output = P::Commitment>
+        + Mul<E::ScalarField, Output = P::Commitment>,
 {
-    let point = derive_eval_point::<E, P>(
-        fs_label,
-        log_capacity,
-        prev_poly_com,
-        next_poly_com,
-        prev_rand_com,
-        next_rand_com,
-    );
-
-    let verify_one = |com: &P::Commitment,
-                      eval: &E::ScalarField,
-                      proof: &P::Proof|
-     -> Result<bool, AegonError> {
-        let mut tr = IOPTranscript::<E::ScalarField>::new(fs_label);
-        Ok(P::verify(vk, com, &point, eval, proof, &mut tr)?)
-    };
-
-    if !verify_one(prev_poly_com, &witness.prev_poly_eval, &witness.prev_poly_proof)? {
-        return Ok(false);
-    }
-    if !verify_one(next_poly_com, &witness.next_poly_eval, &witness.next_poly_proof)? {
-        return Ok(false);
-    }
-    if !verify_one(prev_rand_com, &witness.prev_rand_eval, &witness.prev_rand_proof)? {
-        return Ok(false);
-    }
-    if !verify_one(next_rand_com, &witness.next_rand_eval, &witness.next_rand_proof)? {
-        return Ok(false);
-    }
-
-    // Homomorphic relation on evaluations:
-    //   next_rand_eval ?= prev_rand_eval + r_n · (next_poly_eval - prev_poly_eval)
-    let delta = witness.next_poly_eval - witness.prev_poly_eval;
-    let expected = witness.prev_rand_eval + r_n * delta;
-    if expected != witness.next_rand_eval {
-        return Ok(false);
-    }
-    Ok(true)
+    let delta_poly: P::Commitment = next_poly_com.clone() - prev_poly_com.clone();
+    let expected: P::Commitment = prev_rand_com.clone() + delta_poly * r_n;
+    &expected == next_rand_com
 }

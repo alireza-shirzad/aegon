@@ -25,17 +25,20 @@ use std::marker::PhantomData;
 use ark_ec::pairing::Pairing;
 use ark_ff::Zero;
 use ark_poly::SparseMultilinearExtension;
+use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::rand::Rng;
 use akd_core::aegon_crypto::pcs::PCSGlobalParam;
 use akd_core::aegon_crypto::poly::DenseOrSparseMLE;
 use akd_core::aegon_crypto::transcript::IOPTranscript;
 
 use super::config::{AegonConfig, VerifierContext};
+use super::db::{key_shard_state, DbSource, RedisDb};
 use super::error::AegonError;
 use super::fs::derive_chain_scalar;
 use super::hash::{bool_index_to_point, bool_index_to_usize, HashSuite, Sha256Hash};
+use super::sharded::ShardWrite;
 use super::types::{
-    AegonPcs, ChainWitness, EpochCommitment, InvarianceProof, Label, LookupProof, RandPair, Value,
+    AegonPcs, EpochCommitment, InvarianceProof, Label, LookupProof, RandPair, Value,
 };
 
 /// Snapshot of the polynomials needed for serving consistency proofs at
@@ -112,6 +115,43 @@ where
     pending: Option<PendingPublish<E, P>>,
 
     _phantom: PhantomData<H>,
+}
+
+/// Self-contained snapshot of an [`Aegon`]'s live state — everything
+/// needed to reconstruct the shard after a restart, given the same
+/// `(prover_param, verifier_param)` (which come from the SRS file).
+/// Used by the gRPC `ShardServer` to persist its state into Redis at
+/// the end of every publish, and on startup to restore.
+///
+/// What's intentionally **not** in the checkpoint:
+/// - `prover_param` / `verifier_param` — deterministic from the SRS;
+///   the shard server loads them from disk before applying any
+///   checkpoint.
+/// - `epoch_history` — needed only to serve consistency proofs for
+///   *past* epochs. Dropping it means a shard restart can serve
+///   lookups + audits at the current epoch but not pre-restart
+///   consistency proofs. Acceptable for benchmark deployments.
+/// - `pending` — never non-`None` at a checkpoint boundary; the
+///   shard server takes checkpoints after `publish_phase_2` finishes,
+///   which clears `pending`.
+#[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
+pub struct AegonCheckpoint<E: Pairing, P: AegonPcs<E>> {
+    pub epoch: u64,
+    pub index_poly_evals: Vec<(u64, E::ScalarField)>,
+    pub value_poly_evals: Vec<(u64, E::ScalarField)>,
+    pub rand_index_poly_evals: Vec<(u64, E::ScalarField)>,
+    pub rand_value_poly_evals: Vec<(u64, E::ScalarField)>,
+    pub index_commitment: P::Commitment,
+    pub index_state: P::State,
+    pub value_commitment: P::Commitment,
+    pub value_state: P::State,
+    pub rand_index_commitment: P::Commitment,
+    pub rand_index_state: P::State,
+    pub rand_value_commitment: P::Commitment,
+    pub rand_value_state: P::State,
+    pub r_index: E::ScalarField,
+    pub r_value: E::ScalarField,
+    pub label_table_entries: Vec<(Vec<u8>, Vec<bool>, u64)>,
 }
 
 /// State carried by an [`Aegon`] across the two halves of a sharded
@@ -256,6 +296,130 @@ where
     pub fn verifier_param(&self) -> P::VerifierParam {
         self.verifier_param.clone()
     }
+
+    /// Snapshot every field in `[AegonCheckpoint]` for durable storage.
+    /// Safe to call between epochs (i.e. with `self.pending == None`);
+    /// at checkpoint time we never serialize an in-flight publish.
+    pub fn capture_checkpoint(&self) -> AegonCheckpoint<E, P>
+    where
+        P::Commitment: Clone,
+        P::State: Clone,
+    {
+        let extract = |poly: &SparseMultilinearExtension<E::ScalarField>| -> Vec<(u64, E::ScalarField)> {
+            poly.evaluations
+                .iter()
+                .map(|(idx, v)| (*idx as u64, *v))
+                .collect()
+        };
+        AegonCheckpoint {
+            epoch: self.epoch,
+            index_poly_evals: extract(&self.index_poly),
+            value_poly_evals: extract(&self.value_poly),
+            rand_index_poly_evals: extract(&self.rand_index_poly),
+            rand_value_poly_evals: extract(&self.rand_value_poly),
+            index_commitment: self.index_commitment.clone(),
+            index_state: self.index_state.clone(),
+            value_commitment: self.value_commitment.clone(),
+            value_state: self.value_state.clone(),
+            rand_index_commitment: self.rand_index_commitment.clone(),
+            rand_index_state: self.rand_index_state.clone(),
+            rand_value_commitment: self.rand_value_commitment.clone(),
+            rand_value_state: self.rand_value_state.clone(),
+            r_index: self.r_index,
+            r_value: self.r_value,
+            label_table_entries: self
+                .label_table
+                .iter()
+                .map(|(k, (bits, ctr))| (k.clone(), bits.clone(), *ctr))
+                .collect(),
+        }
+    }
+
+    /// Rebuild an `Aegon` from a previously-captured checkpoint plus
+    /// the deterministic `(prover_param, verifier_param)` from the SRS.
+    /// `epoch_history` is left containing only the current-epoch
+    /// snapshot — pre-restart consistency proofs are not recoverable
+    /// from this minimal blob.
+    pub fn restore_from_checkpoint(
+        prover_param: P::ProverParam,
+        verifier_param: P::VerifierParam,
+        config: &AegonConfig<E, P>,
+        ckpt: AegonCheckpoint<E, P>,
+    ) -> Result<Self, AegonError>
+    where
+        P::Commitment: Clone,
+        P::State: Clone,
+    {
+        if prover_param.is_zk() != config.private {
+            return Err(AegonError::Config(format!(
+                "config.private = {} but PCS prover param is_zk() = {}",
+                config.private,
+                prover_param.is_zk(),
+            )));
+        }
+        let log_capacity = config.log_capacity;
+        let dims = P::block_dims(&prover_param, log_capacity);
+        let to_sparse =
+            |evals: Vec<(u64, E::ScalarField)>| -> SparseMultilinearExtension<E::ScalarField> {
+                let pairs: Vec<(usize, E::ScalarField)> =
+                    evals.into_iter().map(|(idx, v)| (idx as usize, v)).collect();
+                SparseMultilinearExtension::from_evaluations(log_capacity, &pairs)
+            };
+        let index_poly = to_sparse(ckpt.index_poly_evals);
+        let value_poly = to_sparse(ckpt.value_poly_evals);
+        let rand_index_poly = to_sparse(ckpt.rand_index_poly_evals);
+        let rand_value_poly = to_sparse(ckpt.rand_value_poly_evals);
+
+        // Single epoch-history entry for the current epoch. Past
+        // epochs' snapshots are unrecoverable from the checkpoint
+        // alone; the shard will return InvalidEpoch for those.
+        let mut epoch_history = BTreeMap::new();
+        epoch_history.insert(
+            ckpt.epoch,
+            EpochSnapshot {
+                index_commitment: ckpt.index_commitment.clone(),
+                value_commitment: ckpt.value_commitment.clone(),
+                rand_index_poly: rand_index_poly.clone(),
+                rand_index_commitment: ckpt.rand_index_commitment.clone(),
+                rand_index_state: ckpt.rand_index_state.clone(),
+                rand_value_poly: rand_value_poly.clone(),
+                rand_value_commitment: ckpt.rand_value_commitment.clone(),
+                rand_value_state: ckpt.rand_value_state.clone(),
+            },
+        );
+
+        let mut label_table: HashMap<Label, (Vec<bool>, u64)> =
+            HashMap::with_capacity(ckpt.label_table_entries.len());
+        for (label, bits, ctr) in ckpt.label_table_entries {
+            label_table.insert(label, (bits, ctr));
+        }
+
+        Ok(Self {
+            log_capacity,
+            dims,
+            prover_param,
+            verifier_param,
+            epoch: ckpt.epoch,
+            index_poly,
+            value_poly,
+            rand_index_poly,
+            rand_value_poly,
+            index_commitment: ckpt.index_commitment,
+            index_state: ckpt.index_state,
+            value_commitment: ckpt.value_commitment,
+            value_state: ckpt.value_state,
+            rand_index_commitment: ckpt.rand_index_commitment,
+            rand_index_state: ckpt.rand_index_state,
+            rand_value_commitment: ckpt.rand_value_commitment,
+            rand_value_state: ckpt.rand_value_state,
+            r_index: ckpt.r_index,
+            r_value: ckpt.r_value,
+            label_table,
+            epoch_history,
+            pending: None,
+            _phantom: PhantomData,
+        })
+    }
     pub fn log_capacity(&self) -> usize {
         self.log_capacity
     }
@@ -357,8 +521,7 @@ where
         // slots have already been claimed by earlier entries.
         let mut claimed: std::collections::HashSet<usize> =
             std::collections::HashSet::with_capacity(updates.len());
-        let mut batch: Vec<(Vec<bool>, E::ScalarField, E::ScalarField)> =
-            Vec::with_capacity(updates.len());
+        let mut batch: Vec<ShardWrite<E::ScalarField>> = Vec::with_capacity(updates.len());
         for (label, value) in updates {
             let (slot_bits, h_label_write) = match self.label_table.get(label) {
                 // Existing label — slot is fixed, no need to re-write h_label.
@@ -373,7 +536,11 @@ where
             let usize_idx = bool_index_to_usize(&slot_bits, &self.dims);
             claimed.insert(usize_idx);
             let h_value = H::h_f(value);
-            batch.push((slot_bits, h_label_write, h_value));
+            batch.push(ShardWrite {
+                slot_bits,
+                h_label_or_zero: h_label_write,
+                h_value,
+            });
         }
 
         self.publish_phase_1_at_slots(&batch)
@@ -389,7 +556,7 @@ where
     /// shards and feeds the decisions in via this method.
     pub fn publish_phase_1_at_slots(
         &mut self,
-        batch: &[(Vec<bool>, E::ScalarField, E::ScalarField)],
+        batch: &[ShardWrite<E::ScalarField>],
     ) -> Result<(P::Commitment, P::Commitment), AegonError> {
         if self.pending.is_some() {
             return Err(AegonError::Config(
@@ -413,10 +580,15 @@ where
         let prev_rand_value_state = self.rand_value_state.clone();
 
         // Apply writes.
-        for (slot_bits, h_label, h_value) in batch {
+        for ShardWrite {
+            slot_bits,
+            h_label_or_zero,
+            h_value,
+        } in batch
+        {
             let usize_idx = bool_index_to_usize(slot_bits, &self.dims);
-            if !h_label.is_zero() {
-                self.index_poly.evaluations.insert(usize_idx, *h_label);
+            if !h_label_or_zero.is_zero() {
+                self.index_poly.evaluations.insert(usize_idx, *h_label_or_zero);
             }
             self.set_value(usize_idx, *h_value);
         }
@@ -505,39 +677,31 @@ where
         let (new_rand_value_com, new_rand_value_state) =
             commit_with_aux::<E, P>(&self.prover_param, &self.rand_value_poly)?;
 
-        // Build the invariance proof for this transition before we
-        // overwrite the live state with the new commitments — the
-        // helper needs both prev and next side by side.
-        let invariance = build_invariance_proof::<E, P>(
-            &self.prover_param,
-            self.log_capacity,
-            // index chain
+        // The invariance proof carries no per-epoch data anymore: with
+        // the commitment-homomorphism audit path, every group element
+        // the auditor needs is already in the published `EpochCommitment`.
+        // See `audit::verify_invariance` for the verification side.
+        //
+        // The prev_*_poly / prev_*_state / prev_*_com bindings the
+        // destructure pulled out of `PendingPublish` were threaded into
+        // the old `build_invariance_proof` helper. With that helper
+        // gone, suppress the unused-binding warnings explicitly so the
+        // destructure pattern stays one place.
+        let invariance: InvarianceProof<E, P> = InvarianceProof::default();
+        let _ = (
             &prev_index_poly,
-            &self.index_poly,
-            &prev_rand_index_poly,
-            &self.rand_index_poly,
-            &prev_index_com,
-            &new_index_com,
-            &prev_rand_index_com,
-            &new_rand_index_com,
             &prev_index_state,
-            &new_index_state,
+            &prev_rand_index_poly,
             &prev_rand_index_state,
-            &new_rand_index_state,
-            // value chain
             &prev_value_poly,
-            &self.value_poly,
-            &prev_rand_value_poly,
-            &self.rand_value_poly,
-            &prev_value_com,
-            &new_value_com,
-            &prev_rand_value_com,
-            &new_rand_value_com,
             &prev_value_state,
-            &new_value_state,
+            &prev_rand_value_poly,
             &prev_rand_value_state,
-            &new_rand_value_state,
-        )?;
+            &prev_index_com,
+            &prev_rand_index_com,
+            &prev_value_com,
+            &prev_rand_value_com,
+        );
 
         // Commit the new epoch to live state and history.
         self.index_commitment = new_index_com.clone();
@@ -946,141 +1110,47 @@ where
     })
 }
 
-#[allow(clippy::too_many_arguments)]
-fn build_invariance_proof<E, P>(
-    pp: &P::ProverParam,
-    num_vars: usize,
-    // index chain
-    prev_index_poly: &SparseMultilinearExtension<E::ScalarField>,
-    next_index_poly: &SparseMultilinearExtension<E::ScalarField>,
-    prev_rand_index_poly: &SparseMultilinearExtension<E::ScalarField>,
-    next_rand_index_poly: &SparseMultilinearExtension<E::ScalarField>,
-    prev_index_com: &P::Commitment,
-    next_index_com: &P::Commitment,
-    prev_rand_index_com: &P::Commitment,
-    next_rand_index_com: &P::Commitment,
-    prev_index_state: &P::State,
-    next_index_state: &P::State,
-    prev_rand_index_state: &P::State,
-    next_rand_index_state: &P::State,
-    // value chain
-    prev_value_poly: &SparseMultilinearExtension<E::ScalarField>,
-    next_value_poly: &SparseMultilinearExtension<E::ScalarField>,
-    prev_rand_value_poly: &SparseMultilinearExtension<E::ScalarField>,
-    next_rand_value_poly: &SparseMultilinearExtension<E::ScalarField>,
-    prev_value_com: &P::Commitment,
-    next_value_com: &P::Commitment,
-    prev_rand_value_com: &P::Commitment,
-    next_rand_value_com: &P::Commitment,
-    prev_value_state: &P::State,
-    next_value_state: &P::State,
-    prev_rand_value_state: &P::State,
-    next_rand_value_state: &P::State,
-) -> Result<InvarianceProof<E, P>, AegonError>
+// `build_invariance_proof` + `build_chain_witness` used to live here.
+// Both became dead code when the auditor switched to a commitment-
+// homomorphism check: the prover no longer opens the four polynomials
+// at a Fiat-Shamir random point, because every group element the
+// auditor needs is already in the published `EpochCommitment`. See
+// `audit::verify_invariance` for the verifier side.
+
+/// Try to load a previously-persisted [`AegonCheckpoint`] for the
+/// given shard out of Redis. Returns `Ok(None)` for a fresh DB (no
+/// `aegon:shard:{shard_id}:state` key) or `DbSource::None`. Returns
+/// `Err` if the key is present but malformed.
+///
+/// Used by the `aegon_shard_server` binary on startup: if a checkpoint
+/// exists, the binary restores the shard's state from it instead of
+/// initializing fresh.
+pub fn load_aegon_checkpoint_from_db<E, P>(
+    db_source: &DbSource,
+    shard_id: u32,
+) -> Result<Option<AegonCheckpoint<E, P>>, AegonError>
 where
     E: Pairing,
     P: AegonPcs<E>,
+    AegonCheckpoint<E, P>: CanonicalDeserialize,
 {
-    let index_chain = build_chain_witness::<E, P>(
-        pp,
-        num_vars,
-        b"aegon.invariance.index",
-        prev_index_poly,
-        next_index_poly,
-        prev_rand_index_poly,
-        next_rand_index_poly,
-        prev_index_com,
-        next_index_com,
-        prev_rand_index_com,
-        next_rand_index_com,
-        prev_index_state,
-        next_index_state,
-        prev_rand_index_state,
-        next_rand_index_state,
-    )?;
-    let value_chain = build_chain_witness::<E, P>(
-        pp,
-        num_vars,
-        b"aegon.invariance.value",
-        prev_value_poly,
-        next_value_poly,
-        prev_rand_value_poly,
-        next_rand_value_poly,
-        prev_value_com,
-        next_value_com,
-        prev_rand_value_com,
-        next_rand_value_com,
-        prev_value_state,
-        next_value_state,
-        prev_rand_value_state,
-        next_rand_value_state,
-    )?;
-    Ok(InvarianceProof {
-        index_chain,
-        value_chain,
-    })
-}
-
-#[allow(clippy::too_many_arguments)]
-fn build_chain_witness<E, P>(
-    pp: &P::ProverParam,
-    num_vars: usize,
-    fs_label: &'static [u8],
-    prev_poly: &SparseMultilinearExtension<E::ScalarField>,
-    next_poly: &SparseMultilinearExtension<E::ScalarField>,
-    prev_rand: &SparseMultilinearExtension<E::ScalarField>,
-    next_rand: &SparseMultilinearExtension<E::ScalarField>,
-    prev_poly_com: &P::Commitment,
-    next_poly_com: &P::Commitment,
-    prev_rand_com: &P::Commitment,
-    next_rand_com: &P::Commitment,
-    prev_poly_state: &P::State,
-    next_poly_state: &P::State,
-    prev_rand_state: &P::State,
-    next_rand_state: &P::State,
-) -> Result<ChainWitness<E, P>, AegonError>
-where
-    E: Pairing,
-    P: AegonPcs<E>,
-{
-    let point = super::fs::derive_eval_point::<E, P>(
-        fs_label,
-        num_vars,
-        prev_poly_com,
-        next_poly_com,
-        prev_rand_com,
-        next_rand_com,
-    );
-
-    let open_at = |poly: &SparseMultilinearExtension<E::ScalarField>,
-                   com: &P::Commitment,
-                   state: &P::State|
-     -> Result<(E::ScalarField, P::Proof), AegonError> {
-        let mut tr = IOPTranscript::<E::ScalarField>::new(fs_label);
-        let (proof, eval) = P::open(
-            pp,
-            com,
-            &DenseOrSparseMLE::Sparse(poly.clone()),
-            &point,
-            state,
-            &mut tr,
-        )?;
-        Ok((eval, proof))
-    };
-
-    let (prev_poly_eval, prev_poly_proof) = open_at(prev_poly, prev_poly_com, prev_poly_state)?;
-    let (next_poly_eval, next_poly_proof) = open_at(next_poly, next_poly_com, next_poly_state)?;
-    let (prev_rand_eval, prev_rand_proof) = open_at(prev_rand, prev_rand_com, prev_rand_state)?;
-    let (next_rand_eval, next_rand_proof) = open_at(next_rand, next_rand_com, next_rand_state)?;
-
-    Ok(ChainWitness {
-        prev_poly_eval,
-        next_poly_eval,
-        prev_rand_eval,
-        next_rand_eval,
-        prev_poly_proof,
-        next_poly_proof,
-        prev_rand_proof,
-        next_rand_proof,
-    })
+    use super::db::Db;
+    match db_source {
+        DbSource::None => Ok(None),
+        DbSource::Redis(url) => {
+            let db = RedisDb::connect(url)?;
+            match db.get(&key_shard_state(shard_id))? {
+                Some(bytes) => {
+                    let ckpt = AegonCheckpoint::<E, P>::deserialize_compressed(&bytes[..])
+                        .map_err(|e| {
+                            AegonError::Database(format!(
+                                "deserialize shard {shard_id} checkpoint: {e}"
+                            ))
+                        })?;
+                    Ok(Some(ckpt))
+                },
+                None => Ok(None),
+            }
+        },
+    }
 }

@@ -174,6 +174,7 @@ where
     pub async fn publish(&self, updates: Vec<(AkdLabel, AkdValue)>) -> Result<EpochHash, AkdError> {
         let _guard = self.cache_lock.read().await;
 
+        // The set of updates must not contain duplicate labels
         let distinct_set: HashSet<AkdLabel> =
             updates.iter().map(|(label, _)| label.clone()).collect();
         if distinct_set.len() != updates.len() {

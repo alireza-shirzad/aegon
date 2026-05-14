@@ -168,15 +168,32 @@ cmd_up() {
       --target-tags="$SHARD_TAG" >/dev/null
   fi
 
-  # ---- firewall: coordinator -> redis on the DB machine ----
+  # ---- firewall: coordinator + shards -> redis on the DB machine ----
+  # Coordinator persists its global view (value/routing/slot/labels/
+  # coord:state/epoch_commit); each shard persists its polynomial
+  # checkpoint at `aegon:shard:{i}:state`. Both need port 6379.
+  #
+  # Reconcile rather than create-if-missing so a stale rule from an
+  # older version of this script (coordinator-only) gets the shard
+  # source-tag added on the next `up`.
+  local redis_want="$COORD_TAG,$SHARD_TAG"
   if gcloud compute firewall-rules describe "$FIREWALL_REDIS" >/dev/null 2>&1; then
-    log "firewall $FIREWALL_REDIS exists"
+    local redis_have
+    redis_have="$(gcloud compute firewall-rules describe "$FIREWALL_REDIS" \
+      --format='value(sourceTags.list())' 2>/dev/null)"
+    if [[ "$redis_have" != "$redis_want" ]]; then
+      log "firewall $FIREWALL_REDIS has source-tags '$redis_have'; updating to '$redis_want'"
+      gcloud compute firewall-rules update "$FIREWALL_REDIS" \
+        --source-tags="$redis_want" >/dev/null
+    else
+      log "firewall $FIREWALL_REDIS already correct"
+    fi
   else
-    log "creating firewall $FIREWALL_REDIS (coordinator -> db:$REDIS_PORT)"
+    log "creating firewall $FIREWALL_REDIS (coordinator + shards -> db:$REDIS_PORT)"
     gcloud compute firewall-rules create "$FIREWALL_REDIS" \
       --network="$NETWORK" \
       --allow="tcp:$REDIS_PORT" \
-      --source-tags="$COORD_TAG" \
+      --source-tags="$redis_want" \
       --target-tags="$DB_TAG" >/dev/null
   fi
 
@@ -316,48 +333,16 @@ cmd_deploy() {
     --shard-log-capacity "$SHARD_LOG_CAPACITY" --kzh-k "$KZH_K" \
     --seed 42 --out "$LOCAL_SRS"
 
-  # ---- push everything to every shard ----
-  for ((i = 0; i < N_SHARDS; i++)); do
-    local name; name="$(shard_name "$i")"
-    log "[$name] uploading SRS + binary"
-    scp_to "$name" "$LOCAL_SRS" "$remote_bin_dir/aegon_shard_server"
-    remote "$name" "sudo mkdir -p /etc/aegon $REMOTE_BIN_DIR && \
-      sudo mv /tmp/aegon-cluster.srs $REMOTE_SRS_PATH && \
-      sudo mv /tmp/aegon_shard_server $REMOTE_BIN_DIR/ && \
-      sudo chmod +x $REMOTE_BIN_DIR/aegon_shard_server"
-    log "[$name] starting shard server"
-    # nohup + & + < /dev/null + 2>&1 so SSH session closes cleanly.
-    # Kill any previous shard by PID file rather than `pkill -f` — the SSH
-    # command's own argv contains "aegon_shard_server", and pkill -f would
-    # match its own parent bash and terminate the SSH session (exit 255).
-    remote "$name" "if [ -f /tmp/aegon-shard.pid ]; then \
-        kill \$(cat /tmp/aegon-shard.pid) 2>/dev/null || true; \
-        sleep 1; \
-      fi; \
-      nohup $REMOTE_BIN_DIR/aegon_shard_server \
-        --bind 0.0.0.0:$SHARD_PORT \
-        --shard-log-capacity $SHARD_LOG_CAPACITY \
-        --kzh-k $KZH_K \
-        --srs-path $REMOTE_SRS_PATH \
-        > /tmp/aegon-shard.log 2>&1 < /dev/null & \
-      echo \$! > /tmp/aegon-shard.pid"
-  done
-
-  # ---- push to coordinator ----
-  local cname; cname="$(coord_name)"
-  log "[$cname] uploading SRS + smoke client"
-  scp_to "$cname" "$LOCAL_SRS" "$remote_bin_dir/aegon_coordinator_smoke"
-  remote "$cname" "sudo mkdir -p /etc/aegon $REMOTE_BIN_DIR && \
-    sudo mv /tmp/aegon-cluster.srs $REMOTE_SRS_PATH && \
-    sudo mv /tmp/aegon_coordinator_smoke $REMOTE_BIN_DIR/ && \
-    sudo chmod +x $REMOTE_BIN_DIR/aegon_coordinator_smoke"
-
   # ---- DB tier (Redis) ----
+  # Brought up BEFORE the shards because each shard server now PINGs
+  # Redis at startup (5s timeout) and exits if it can't reach it. The
+  # ordering also guarantees FLUSHALL runs before any shard has a
+  # chance to write a checkpoint, so each `deploy` cleanly starts
+  # from epoch 0 (the prior session's state, if any, is wiped).
+  #
   # Idempotent: apt-install Redis if missing, rewrite the bind config
   # to listen on the VM's internal IP (VPC firewall is the access
-  # control), and (re)start the service. FLUSHALL between sessions
-  # so stale (label, value) pairs from prior runs don't shadow new
-  # ones with identical labels.
+  # control), and (re)start the service.
   local dname; dname="$(db_name)"
   log "[$dname] installing + (re)starting redis on :$REDIS_PORT"
   remote "$dname" "set -e; \
@@ -370,6 +355,54 @@ cmd_deploy() {
     sleep 1; \
     redis-cli -h 127.0.0.1 -p $REDIS_PORT FLUSHALL >/dev/null; \
     redis-cli -h 127.0.0.1 -p $REDIS_PORT PING"
+
+  # Resolve the DB's internal IP once; passed to every shard so they
+  # can persist their polynomial checkpoints to `aegon:shard:{i}:state`
+  # and, on restart, recover from there instead of starting fresh.
+  local db_ip; db_ip="$(db_internal_ip)"
+  log "shards will checkpoint to redis://$db_ip:$REDIS_PORT"
+
+  # ---- push everything to every shard ----
+  for ((i = 0; i < N_SHARDS; i++)); do
+    local name; name="$(shard_name "$i")"
+    log "[$name] uploading SRS + binary"
+    scp_to "$name" "$LOCAL_SRS" "$remote_bin_dir/aegon_shard_server"
+    remote "$name" "sudo mkdir -p /etc/aegon $REMOTE_BIN_DIR && \
+      sudo mv /tmp/aegon-cluster.srs $REMOTE_SRS_PATH && \
+      sudo mv /tmp/aegon_shard_server $REMOTE_BIN_DIR/ && \
+      sudo chmod +x $REMOTE_BIN_DIR/aegon_shard_server"
+    log "[$name] starting shard server (shard_id=$i)"
+    # nohup + & + < /dev/null + 2>&1 so SSH session closes cleanly.
+    # Kill any previous shard by PID file rather than `pkill -f` — the SSH
+    # command's own argv contains "aegon_shard_server", and pkill -f would
+    # match its own parent bash and terminate the SSH session (exit 255).
+    #
+    # --shard-id matches `i` so the shard writes to / reads from the
+    # same `aegon:shard:{i}:state` key the coordinator addresses it by
+    # (endpoints[i] in the coordinator's shard list).
+    remote "$name" "if [ -f /tmp/aegon-shard.pid ]; then \
+        kill \$(cat /tmp/aegon-shard.pid) 2>/dev/null || true; \
+        sleep 1; \
+      fi; \
+      nohup $REMOTE_BIN_DIR/aegon_shard_server \
+        --bind 0.0.0.0:$SHARD_PORT \
+        --shard-log-capacity $SHARD_LOG_CAPACITY \
+        --kzh-k $KZH_K \
+        --srs-path $REMOTE_SRS_PATH \
+        --db-url redis://$db_ip:$REDIS_PORT \
+        --shard-id $i \
+        > /tmp/aegon-shard.log 2>&1 < /dev/null & \
+      echo \$! > /tmp/aegon-shard.pid"
+  done
+
+  # ---- push to coordinator ----
+  local cname; cname="$(coord_name)"
+  log "[$cname] uploading SRS + smoke client"
+  scp_to "$cname" "$LOCAL_SRS" "$remote_bin_dir/aegon_coordinator_smoke"
+  remote "$cname" "sudo mkdir -p /etc/aegon $REMOTE_BIN_DIR && \
+    sudo mv /tmp/aegon-cluster.srs $REMOTE_SRS_PATH && \
+    sudo mv /tmp/aegon_coordinator_smoke $REMOTE_BIN_DIR/ && \
+    sudo chmod +x $REMOTE_BIN_DIR/aegon_coordinator_smoke"
 
   log "deploy complete. waiting 5s for shards to bind..."
   sleep 5

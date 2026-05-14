@@ -39,7 +39,10 @@ service ShardService {
 }
 
 message PublishPhase1Request {
-  // Canonical-serialized Vec<(Vec<bool>, F, F)>.
+  // Canonical-serialized Vec<ShardWrite<F>>. Field order on the wire
+  // is { slot_bits, h_label_or_zero, h_value } — byte-identical to the
+  // legacy (Vec<bool>, F, F) tuple it replaced, so older audit logs
+  // round-trip unchanged.
   bytes batch_bytes = 1;
 }
 

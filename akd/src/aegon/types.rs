@@ -89,38 +89,47 @@ impl<E: Pairing, P: AegonPcs<E>> LookupProof<E, P> {
 
 // ---------- auditor-facing types --------------------------------------
 
-/// One half of the per-epoch invariance proof: attests that for a chain
-/// (index or value)
+/// Per-epoch invariance proof. With the homomorphism-on-commitments
+/// audit path, the proof itself carries **no data** — every commitment
+/// the auditor needs is already in [`EpochCommitment`], and the
+/// auditor verifies the recurrence
 ///
 /// ```text
-///   rand_{n+1} = rand_n + r_n · (poly_{n+1} - poly_n)
+///   C(rand_{n+1}) ?= C(rand_n) + r_n · (C(poly_{n+1}) − C(poly_n))
 /// ```
 ///
-/// holds, by opening all four polynomials at a Fiat-Shamir random point
-/// `⃗r` and letting the verifier check the relation on evaluations
-/// (paper Remark 2). Generic over the PCS — does not require commitment
-/// homomorphism. For homomorphic PCSs a faster check on commitments is
-/// possible as a future optimization.
-#[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
-pub struct ChainWitness<E: Pairing, P: AegonPcs<E>> {
-    pub prev_poly_eval: E::ScalarField,
-    pub next_poly_eval: E::ScalarField,
-    pub prev_rand_eval: E::ScalarField,
-    pub next_rand_eval: E::ScalarField,
-    pub prev_poly_proof: P::Proof,
-    pub next_poly_proof: P::Proof,
-    pub prev_rand_proof: P::Proof,
-    pub next_rand_proof: P::Proof,
+/// on the group elements directly, sound by the PCS's binding and its
+/// linear homomorphism on commitments (paper Remark 2, "commitment-side
+/// check" path). KZH-k's commitment is a Pedersen MSM on the polynomial's
+/// evaluation vector, so the homomorphism holds for both the plain and
+/// zk variants. The struct is retained — rather than dropped entirely —
+/// so the publish API and existing call sites can still thread an
+/// `InvarianceProof` through; treat it as a marker that "this epoch
+/// transition is auditable from the published `EpochCommitment` alone".
+#[derive(Debug, CanonicalSerialize, CanonicalDeserialize)]
+pub struct InvarianceProof<E: Pairing, P: AegonPcs<E>> {
+    pub _e: PhantomData<E>,
+    // `fn() -> P` instead of plain `P` so the marker stays `Send + Sync`
+    // regardless of whether the PCS itself is. The struct is empty in
+    // the wire format anyway; this just keeps the type parameters
+    // present for downstream API compatibility (`InvarianceProof<E, P>`
+    // is still the type appearing in publish / audit signatures).
+    pub _p: PhantomData<fn() -> P>,
 }
 
-/// Constant-size per-epoch proof that the server's transition from epoch
-/// `n` to epoch `n+1` correctly updated both rand polynomials with the
-/// Fiat-Shamir scalars derived from the new commitments. Auditors verify
-/// this in `audit::verify_invariance`.
-#[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
-pub struct InvarianceProof<E: Pairing, P: AegonPcs<E>> {
-    pub index_chain: ChainWitness<E, P>,
-    pub value_chain: ChainWitness<E, P>,
+impl<E: Pairing, P: AegonPcs<E>> Default for InvarianceProof<E, P> {
+    fn default() -> Self {
+        Self {
+            _e: PhantomData,
+            _p: PhantomData,
+        }
+    }
+}
+
+impl<E: Pairing, P: AegonPcs<E>> Clone for InvarianceProof<E, P> {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
 }
 
 /// The auditor's locally-tracked Fiat-Shamir state. Threaded across calls

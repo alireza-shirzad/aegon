@@ -23,7 +23,7 @@ use std::collections::{HashMap, HashSet};
 use std::marker::PhantomData;
 
 use ark_ec::pairing::Pairing;
-use ark_ff::Zero;
+use ark_ff::{Field, Zero};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::rand::Rng;
 use akd_core::aegon_crypto::pcs::PCSGlobalParam;
@@ -33,7 +33,10 @@ use sha2::{Digest, Sha256};
 
 use super::audit::verify_chain;
 use super::config::{AegonConfig, VerifierContext};
-use super::db::{Db, DbSource, RedisDb};
+use super::db::{
+    self, key_coord_state, key_epoch_commit, key_labels_set, key_routing, key_slot, key_value,
+    Db, DbOp, DbSource, RedisDb,
+};
 use super::error::AegonError;
 use super::hash::{bool_index_to_point, HashSuite, Sha256Hash};
 use super::server::Aegon;
@@ -359,6 +362,73 @@ impl<E: Pairing> ShardedAegonConfigBuilder<E, akd_core::aegon_crypto::pcs::kzhk:
 /// commitments and for the externally-visible "epoch hash".
 pub type EpochDigest = [u8; 32];
 
+/// One write into a shard's per-publish batch. The
+/// [`ShardedAegon::plan_phase_1_batches`] coordinator decides where
+/// every `(label, value)` update goes and turns it into one of these
+/// per shard; the shard then applies the batch in
+/// [`super::server::Aegon::publish_phase_1_at_slots`].
+///
+/// Field order is the wire-format order. CanonicalSerialize emits the
+/// fields in declaration order, so the on-wire bytes are identical to
+/// the legacy `(Vec<bool>, F, F)` tuple — older audit logs round-trip
+/// unchanged.
+#[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
+pub struct ShardWrite<F: Field> {
+    /// Slot inside *this* shard's polynomial — length equals
+    /// `shard_log_capacity`. The coordinator produces it from
+    /// `H_bits(ctr, label)`'s low bits and the shard reinterprets it
+    /// as the boolean coordinate of a point on the multilinear
+    /// hypercube. Identifies which evaluation cell in `index_poly` /
+    /// `value_poly` this write targets.
+    pub slot_bits: Vec<bool>,
+    /// What to put at this slot in the **index** polynomial.
+    ///
+    /// - `H_F(label)` when the label is brand-new in this epoch — the
+    ///   shard writes this hash as the slot's identity, which is what
+    ///   the lookup-side open-addressing trail checks against.
+    /// - **Zero** when the label already exists (the slot's identity
+    ///   was set in a prior epoch and must not change). Zero is the
+    ///   sentinel `Aegon::publish_phase_1_at_slots` interprets as
+    ///   "skip the identity write"; safe because `H_F(label)` is a
+    ///   hash output and never zero for any real label.
+    pub h_label_or_zero: F,
+    /// What to put at this slot in the **value** polynomial. Always
+    /// `H_F(value)` — the value polynomial is overwritten every
+    /// epoch the label appears, so there's no analogous "skip" mode.
+    pub h_value: F,
+}
+
+/// One shard's slice of a publish batch: the list of writes a single
+/// `ShardHandle::publish_phase_1_at_slots` call consumes.
+/// [`ShardedAegon::plan_phase_1_batches`] returns a `Vec<SubBatch<F>>`
+/// indexed by shard id.
+pub type SubBatch<F> = Vec<ShardWrite<F>>;
+
+/// Record of one **newly-placed** label in a publish — i.e., a label
+/// that was not in `self.routing` before this call. Returned by
+/// `plan_phase_1_batches` alongside the per-shard sub-batches so the
+/// post-publish Redis durability barrier can write fresh `aegon:slot:*`
+/// and `aegon:routing:*` keys without scanning the routing table.
+///
+/// (Existing labels — being value-updated — don't need fresh routing /
+/// slot writes since those keys were committed in a prior epoch.)
+#[derive(Clone, Debug)]
+pub(crate) struct NewPlacement {
+    pub(crate) label: Label,
+    pub(crate) shard_id: u32,
+    pub(crate) slot_idx: usize,
+}
+
+/// Coordinator state recovered from Redis on restart. Built by
+/// `ShardedAegon::try_recover_from_db` and consumed in `setup`.
+struct RecoveredState<E: Pairing, P: AegonPcs<E>> {
+    epoch: u64,
+    r_index: E::ScalarField,
+    r_value: E::ScalarField,
+    epoch_commits: Vec<ShardedEpochCommitment<E, P>>,
+    routing: HashMap<Label, LabelRouting>,
+}
+
 /// External epoch commitment exposed by [`ShardedAegon::current_commitment`].
 /// `merkle_root` is the root over `per_shard`; `per_shard[i]` is the
 /// `EpochCommitment` produced by shard `i` for this epoch.
@@ -469,9 +539,12 @@ impl<E: Pairing, P: AegonPcs<E>> ShardedVerifierContext<E, P> {
 /// probe along the open-addressing chain (one entry per `ctr` from 0 up
 /// to and including `ctr0`); the last entry is the label's permanent
 /// home.
-#[derive(Clone)]
-struct LabelRouting {
-    trail: Vec<(u32, Vec<bool>)>,
+///
+/// Derives `CanonicalSerialize` so the coordinator can persist its
+/// routing table to Redis and rebuild on restart.
+#[derive(Clone, CanonicalSerialize, CanonicalDeserialize)]
+pub(crate) struct LabelRouting {
+    pub(crate) trail: Vec<(u32, Vec<bool>)>,
 }
 
 impl LabelRouting {
@@ -657,19 +730,114 @@ where
             DbSource::Redis(url) => Some(Box::new(RedisDb::connect(url)?)),
         };
 
-        Ok(Self {
-            shards,
-            shard_dims,
-            shard_verifier_context,
-            shard_log_capacity_cached: shard_config.log_capacity,
-            log_n_shards: config.log_n_shards,
-            epoch: 0,
-            r_index: E::ScalarField::zero(),
-            r_value: E::ScalarField::zero(),
-            epoch_commits: vec![initial_commit],
-            routing: HashMap::new(),
-            db,
-        })
+        // Recovery path: if the connected DB already has coordinator
+        // state, this is a restart — replay the state into the live
+        // struct instead of starting fresh at epoch 0. Fresh DB or
+        // `DbSource::None` falls through to the empty-genesis path.
+        let recovered = match &db {
+            Some(db_inner) => Self::try_recover_from_db(&**db_inner)?,
+            None => None,
+        };
+
+        if let Some(rec) = recovered {
+            Ok(Self {
+                shards,
+                shard_dims,
+                shard_verifier_context,
+                shard_log_capacity_cached: shard_config.log_capacity,
+                log_n_shards: config.log_n_shards,
+                epoch: rec.epoch,
+                r_index: rec.r_index,
+                r_value: rec.r_value,
+                epoch_commits: rec.epoch_commits,
+                routing: rec.routing,
+                db,
+            })
+        } else {
+            Ok(Self {
+                shards,
+                shard_dims,
+                shard_verifier_context,
+                shard_log_capacity_cached: shard_config.log_capacity,
+                log_n_shards: config.log_n_shards,
+                epoch: 0,
+                r_index: E::ScalarField::zero(),
+                r_value: E::ScalarField::zero(),
+                epoch_commits: vec![initial_commit],
+                routing: HashMap::new(),
+                db,
+            })
+        }
+    }
+
+    /// Read the coordinator's durable state from Redis if any was
+    /// previously persisted. Returns `None` on a fresh DB (no
+    /// `aegon:coord:state` key), `Some(RecoveredState)` on a restart,
+    /// `Err` if a key exists but a downstream get/deserialize fails
+    /// — that means Redis is half-written or corrupt and the caller
+    /// should refuse to come up, not silently start over.
+    fn try_recover_from_db(
+        db: &dyn Db,
+    ) -> Result<Option<RecoveredState<E, P>>, AegonError> {
+        let Some(state_bytes) = db.get(key_coord_state())? else {
+            return Ok(None);
+        };
+
+        // 1. Parse coord:state → (epoch, r_index, r_value)
+        let mut cursor = &state_bytes[..];
+        let epoch: u64 = u64::deserialize_compressed(&mut cursor)
+            .map_err(|e| AegonError::Database(format!("deserialize epoch: {e}")))?;
+        let r_index: E::ScalarField =
+            E::ScalarField::deserialize_compressed(&mut cursor)
+                .map_err(|e| AegonError::Database(format!("deserialize r_index: {e}")))?;
+        let r_value: E::ScalarField =
+            E::ScalarField::deserialize_compressed(&mut cursor)
+                .map_err(|e| AegonError::Database(format!("deserialize r_value: {e}")))?;
+
+        // 2. Load every published epoch commitment in order.
+        let mut epoch_commits: Vec<ShardedEpochCommitment<E, P>> =
+            Vec::with_capacity(epoch as usize + 1);
+        for e in 0..=epoch {
+            let key = key_epoch_commit(e);
+            let bytes = db.get(&key)?.ok_or_else(|| {
+                AegonError::Database(format!(
+                    "epoch commitment for epoch {e} missing from Redis"
+                ))
+            })?;
+            let commit = ShardedEpochCommitment::<E, P>::deserialize_compressed(&bytes[..])
+                .map_err(|err| {
+                    AegonError::Database(format!(
+                        "deserialize ShardedEpochCommitment for epoch {e}: {err}"
+                    ))
+                })?;
+            epoch_commits.push(commit);
+        }
+
+        // 3. Rebuild the routing table: SMEMBERS aegon:labels, then
+        //    GET aegon:routing:{label} for each.
+        let labels = db.smembers(key_labels_set())?;
+        let mut routing: HashMap<Label, LabelRouting> = HashMap::with_capacity(labels.len());
+        for label in labels {
+            let bytes = db.get(&key_routing(&label))?.ok_or_else(|| {
+                AegonError::Database(format!(
+                    "routing entry missing for label {label:?} (present in aegon:labels)"
+                ))
+            })?;
+            let lr = LabelRouting::deserialize_compressed(&bytes[..]).map_err(|e| {
+                AegonError::Database(format!(
+                    "deserialize routing for {label:?}: {e}"
+                ))
+            })?;
+            routing.insert(label, lr);
+        }
+
+        Ok(Some(RecoveredState {
+            epoch,
+            r_index,
+            r_value,
+            epoch_commits,
+            routing,
+        }))
     }
 
     pub fn n_shards(&self) -> usize {
@@ -719,101 +887,188 @@ where
 
     /// Apply a batch of updates and produce a new epoch.
     ///
-    /// Coordinator flow:
-    ///   1. Walk a cross-shard open-addressing trail for every *new*
-    ///      label using `H_bits(ctr, label, log_capacity)` reinterpreted
-    ///      as `(shard_id || slot_bits)`. Existing labels reuse their
-    ///      cached trail and only get a value-only write at the final
-    ///      slot.
-    ///   2. Each shard runs `publish_phase_1_at_slots` with its sub-
-    ///      batch, returning `(index_com, value_com)`.
-    ///   3. Coordinator derives the *single* `(r_index, r_value)` for
-    ///      this epoch by FS-hashing prev_r with every shard's new
-    ///      commits in shard-id order.
-    ///   4. Each shard runs `publish_phase_2(r_index, r_value)`.
-    ///   5. Coordinator builds the new Merkle root and assembles the
-    ///      sharded invariance proof.
+    /// Six steps, each delegated to a private helper:
+    ///
+    ///   1. [`reject_duplicate_labels`](Self::reject_duplicate_labels) —
+    ///      no label may appear twice in the batch.
+    ///   2. [`plan_phase_1_batches`](Self::plan_phase_1_batches) —
+    ///      cross-shard open-addressing assigns a `(shard_id, slot)`
+    ///      to every new label; existing labels reuse their cached
+    ///      trail. Produces one write list per shard.
+    ///   3. [`run_phase_1`](Self::run_phase_1) — every shard applies
+    ///      its slice in parallel, returning new `(index, value)`
+    ///      commitments.
+    ///   4. [`derive_chain_scalars`](Self::derive_chain_scalars) — a
+    ///      single `(r_index, r_value)` pair is derived from prev-r +
+    ///      *all* shards' new commits, binding the FS challenge to
+    ///      every shard at once.
+    ///   5. [`run_phase_2`](Self::run_phase_2) — every shard updates
+    ///      its rand polynomials with the shared scalars and returns
+    ///      its `EpochCommitment`.
+    ///   6. [`finalize_epoch`](Self::finalize_epoch) + [`mirror_to_db`](Self::mirror_to_db)
+    ///      — coordinator advances `(r_index, r_value, epoch)`, builds
+    ///      the Merkle root, and mirrors raw `(label, value)` bytes
+    ///      into Redis for the lookup path.
     pub fn publish(
         &mut self,
         updates: &[(Label, Value)],
     ) -> Result<(ShardedEpochCommitment<E, P>, ShardedInvarianceProof<E, P>), AegonError> {
-        // Detect duplicates across the whole batch up-front.
+        // There must not be any duplicate labels in the batch
+        Self::reject_duplicate_labels(updates)?;
+
+        let (sub_batches, new_placements) = self.plan_phase_1_batches(updates)?;
+        let (new_index_commits, new_value_commits) = self.run_phase_1(&sub_batches)?;
+        let (new_r_index, new_r_value) =
+            self.derive_chain_scalars(&new_index_commits, &new_value_commits);
+        let (per_shard_commits, per_shard_invariance) =
+            self.run_phase_2(new_r_index, new_r_value)?;
+        let sharded_commit = self.finalize_epoch(per_shard_commits, new_r_index, new_r_value);
+        self.persist_publish_to_db(updates, &new_placements, &sharded_commit)?;
+        Ok((
+            sharded_commit,
+            ShardedInvarianceProof {
+                per_shard: per_shard_invariance,
+            },
+        ))
+    }
+
+    /// O(n) scan for `label` appearing twice. Errors out the whole
+    /// batch on the first collision so phase 1 never sees a malformed
+    /// input.
+    fn reject_duplicate_labels(updates: &[(Label, Value)]) -> Result<(), AegonError> {
         let mut seen: HashSet<&[u8]> = HashSet::with_capacity(updates.len());
         for (label, _) in updates {
             if !seen.insert(label.as_slice()) {
                 return Err(AegonError::DuplicateLabel(label.clone()));
             }
         }
+        Ok(())
+    }
 
+    /// Decide where every `(label, value)` write lands. Returns one
+    /// sub-batch per shard, each entry shaped
+    /// `(slot_bits, h_label_or_zero, h_value)`:
+    ///
+    /// - **New label**: open-addressing finds the first empty
+    ///   `(shard_id, slot)`; the trail is cached in `self.routing`,
+    ///   and the sub-batch entry carries `h_label = H_F(label)`.
+    /// - **Existing label**: reuse the cached trail and emit a value-
+    ///   only update — `h_label = 0` is the sentinel meaning "don't
+    ///   change the slot's identity field".
+    ///
+    /// `in_batch_claimed` per-shard sets ensure two new labels in the
+    /// same publish can't collide on the same empty slot.
+    fn plan_phase_1_batches(
+        &mut self,
+        updates: &[(Label, Value)],
+    ) -> Result<(Vec<SubBatch<E::ScalarField>>, Vec<NewPlacement>), AegonError> {
         let n = self.shards.len();
-
-        // 1. Cross-shard open-addressing: assign trails for new labels,
-        //    reuse existing trails for known labels. Build a per-shard
-        //    write batch `(slot_bits, h_label_or_zero, h_value)`.
-        let mut sub_batches: Vec<Vec<(Vec<bool>, E::ScalarField, E::ScalarField)>> =
+        let mut sub_batches: Vec<SubBatch<E::ScalarField>> =
             (0..n).map(|_| Vec::new()).collect();
-        // Slots already claimed within this batch (by shard) — needed so
-        // two new labels in the same publish don't both land on the same
-        // empty slot.
         let mut in_batch_claimed: Vec<HashSet<usize>> = (0..n).map(|_| HashSet::new()).collect();
+        let mut new_placements: Vec<NewPlacement> = Vec::new();
 
         for (label, value) in updates {
             let h_value = H::h_f(value);
             if let Some(routing) = self.routing.get(label) {
                 let (sid, slot_bits) = routing.final_assignment().clone();
-                // Existing label — keep its h_label in place by passing
-                // zero, and write the new h_value at the final slot.
-                sub_batches[sid as usize].push((slot_bits, E::ScalarField::zero(), h_value));
+                sub_batches[sid as usize].push(ShardWrite {
+                    slot_bits,
+                    h_label_or_zero: E::ScalarField::zero(),
+                    h_value,
+                });
             } else {
                 let h_label = H::h_f(label);
                 let trail = self.assign_trail(label, &mut in_batch_claimed)?;
                 let (sid, slot_bits) = trail.final_assignment().clone();
-                sub_batches[sid as usize].push((slot_bits, h_label, h_value));
+                let slot_idx = bool_index_to_usize_dims(&slot_bits, &self.shard_dims);
+                sub_batches[sid as usize].push(ShardWrite {
+                    slot_bits,
+                    h_label_or_zero: h_label,
+                    h_value,
+                });
+                new_placements.push(NewPlacement {
+                    label: label.clone(),
+                    shard_id: sid,
+                    slot_idx,
+                });
                 self.routing.insert(label.clone(), trail);
             }
         }
+        Ok((sub_batches, new_placements))
+    }
 
-        // 2. Phase 1 on every shard, parallelized. Shards are
-        //    independent (separate polynomials, separate state); only
-        //    the read-only prover_param is shared. Collect new data
-        //    commits in shard-id order for FS hashing.
-        let prev_r_index = self.r_index;
-        let prev_r_value = self.r_value;
+    /// Drive every shard's `publish_phase_1_at_slots` in parallel and
+    /// transpose the per-shard `(index_com, value_com)` pairs into
+    /// two shard-id-ordered vectors. Shards are independent (separate
+    /// polynomials + state), so rayon's data-parallel pattern is
+    /// safe; only the read-only prover_param is shared.
+    fn run_phase_1(
+        &mut self,
+        sub_batches: &[SubBatch<E::ScalarField>],
+    ) -> Result<(Vec<P::Commitment>, Vec<P::Commitment>), AegonError> {
         let phase_1: Vec<(P::Commitment, P::Commitment)> = self
             .shards
             .par_iter_mut()
             .zip(sub_batches.par_iter())
             .map(|(shard, batch)| shard.publish_phase_1_at_slots(batch))
             .collect::<Result<Vec<_>, _>>()?;
-        let (new_index_commits, new_value_commits): (Vec<_>, Vec<_>) =
-            phase_1.into_iter().unzip();
+        Ok(phase_1.into_iter().unzip())
+    }
 
-        // 3. Derive shared FS scalars from prev_r + ALL shards' new data
-        //    commits. Soundness: each shard's rand-poly invariance is
-        //    independently checked at the FS-random eval point; binding
-        //    to all N commits up-front means the prover can't tune any
-        //    one shard's commit after seeing r.
+    /// Derive the shared `(r_index, r_value)` Fiat-Shamir scalars for
+    /// this epoch transition. Each scalar is `O(prev_r, every shard's
+    /// new data commitment)` — binding to all N commits up front is
+    /// what stops a malicious server from re-tuning any one shard's
+    /// commit after observing the chain randomness.
+    fn derive_chain_scalars(
+        &self,
+        new_index_commits: &[P::Commitment],
+        new_value_commits: &[P::Commitment],
+    ) -> (E::ScalarField, E::ScalarField) {
         let new_r_index = fs_chain_scalar::<E::ScalarField, P::Commitment>(
             b"aegon.sharded.fs.r_index",
-            prev_r_index,
-            &new_index_commits,
+            self.r_index,
+            new_index_commits,
         );
         let new_r_value = fs_chain_scalar::<E::ScalarField, P::Commitment>(
             b"aegon.sharded.fs.r_value",
-            prev_r_value,
-            &new_value_commits,
+            self.r_value,
+            new_value_commits,
         );
+        (new_r_index, new_r_value)
+    }
 
-        // 4. Phase 2 on every shard with the shared scalars, parallelized.
+    /// Drive every shard's `publish_phase_2` with the shared scalars
+    /// in parallel and split the per-shard `(EpochCommitment,
+    /// InvarianceProof)` pairs into shard-id-ordered vectors. After
+    /// the commitment-homomorphism audit refactor the
+    /// `InvarianceProof` is empty, so the second vec is essentially
+    /// `Vec<()>` and carries no per-epoch data — the auditor recovers
+    /// everything it needs from the per-shard commitments.
+    fn run_phase_2(
+        &mut self,
+        new_r_index: E::ScalarField,
+        new_r_value: E::ScalarField,
+    ) -> Result<(Vec<EpochCommitment<E, P>>, Vec<InvarianceProof<E, P>>), AegonError> {
         let phase_2: Vec<(EpochCommitment<E, P>, InvarianceProof<E, P>)> = self
             .shards
             .par_iter_mut()
             .map(|shard| shard.publish_phase_2(new_r_index, new_r_value))
             .collect::<Result<Vec<_>, _>>()?;
-        let (per_shard_commits, per_shard_invariance): (Vec<_>, Vec<_>) =
-            phase_2.into_iter().unzip();
+        Ok(phase_2.into_iter().unzip())
+    }
 
-        // 5. Coordinator-side commit.
+    /// Coordinator-side bookkeeping: advance `(r_index, r_value,
+    /// epoch)`, build the Merkle root over the per-shard commits, and
+    /// append the new `ShardedEpochCommitment` to the history. Returns
+    /// the commitment the caller will publish externally.
+    fn finalize_epoch(
+        &mut self,
+        per_shard_commits: Vec<EpochCommitment<E, P>>,
+        new_r_index: E::ScalarField,
+        new_r_value: E::ScalarField,
+    ) -> ShardedEpochCommitment<E, P> {
         self.r_index = new_r_index;
         self.r_value = new_r_value;
         self.epoch += 1;
@@ -824,22 +1079,100 @@ where
             per_shard: per_shard_commits,
         };
         self.epoch_commits.push(sharded_commit.clone());
+        sharded_commit
+    }
 
-        // 6. Mirror the raw label→value bytes into the coordinator's
-        //    KV store, so `lookup` can return the value alongside the
-        //    proof. The polynomial commitment already binds H_F(value)
-        //    at the right slot, so the DB is just a side-channel for
-        //    retrieval — the verifier re-hashes the bytes itself.
-        if let Some(db) = &self.db {
-            db.put_batch(updates)?;
+    /// Durability barrier for one publish: write every key the
+    /// coordinator (and a future restarted coordinator) needs to
+    /// reconstruct its view, atomically via Redis MULTI/EXEC.
+    ///
+    /// One `aegon:value:{label}` and one `SADD aegon:labels {label}`
+    /// per update (value-update or new). For brand-new labels, also
+    /// one `aegon:routing:{label}` and one `aegon:slot:{shard}:{slot}`.
+    /// Finally, two coordinator-global keys: `aegon:coord:state` (epoch
+    /// + FS scalars) and `aegon:coord:epoch_commit:{epoch}` (the new
+    /// sharded epoch commitment).
+    ///
+    /// The polynomial commitment binds `H_F(value)` at the right slot
+    /// already — Redis is only the side-channel that lets `lookup`
+    /// return the value alongside the proof, and the durability layer
+    /// for crash recovery; the verifier still re-hashes everything it
+    /// receives. No-op when no DB was configured (`DbSource::None`).
+    fn persist_publish_to_db(
+        &self,
+        updates: &[(Label, Value)],
+        new_placements: &[NewPlacement],
+        sharded_commit: &ShardedEpochCommitment<E, P>,
+    ) -> Result<(), AegonError> {
+        let Some(db) = &self.db else { return Ok(()) };
+
+        // Pre-size: 2 ops per update (value SET + labels SADD) + 2 ops
+        // per new placement (routing SET + slot SET) + 2 global ops
+        // (coord:state SET + coord:epoch_commit:{epoch} SET).
+        let mut ops: Vec<DbOp> =
+            Vec::with_capacity(updates.len() * 2 + new_placements.len() * 2 + 2);
+
+        // 1. value:{label} + labels SADD for every update.
+        for (label, value) in updates {
+            ops.push(DbOp::Set {
+                key: key_value(label),
+                value: value.clone(),
+            });
+            ops.push(DbOp::SAdd {
+                key: key_labels_set().to_vec(),
+                member: label.clone(),
+            });
         }
 
-        Ok((
-            sharded_commit,
-            ShardedInvarianceProof {
-                per_shard: per_shard_invariance,
-            },
-        ))
+        // 2. routing:{label} + slot:{shard}:{slot} for new placements.
+        for placement in new_placements {
+            let routing = self.routing.get(&placement.label).ok_or_else(|| {
+                AegonError::Database(format!(
+                    "internal: routing missing for newly-placed label {:?}",
+                    placement.label
+                ))
+            })?;
+            let mut routing_bytes = Vec::new();
+            routing
+                .serialize_compressed(&mut routing_bytes)
+                .map_err(|e| AegonError::Database(format!("serialize routing: {e}")))?;
+            ops.push(DbOp::Set {
+                key: key_routing(&placement.label),
+                value: routing_bytes,
+            });
+            ops.push(DbOp::Set {
+                key: key_slot(placement.shard_id, placement.slot_idx),
+                value: placement.label.clone(),
+            });
+        }
+
+        // 3. coord:state — one key, contains (epoch, r_index, r_value).
+        let mut state_bytes = Vec::new();
+        self.epoch
+            .serialize_compressed(&mut state_bytes)
+            .map_err(|e| AegonError::Database(format!("serialize epoch: {e}")))?;
+        self.r_index
+            .serialize_compressed(&mut state_bytes)
+            .map_err(|e| AegonError::Database(format!("serialize r_index: {e}")))?;
+        self.r_value
+            .serialize_compressed(&mut state_bytes)
+            .map_err(|e| AegonError::Database(format!("serialize r_value: {e}")))?;
+        ops.push(DbOp::Set {
+            key: key_coord_state().to_vec(),
+            value: state_bytes,
+        });
+
+        // 4. coord:epoch_commit:{epoch} — the externally-published commitment.
+        let mut commit_bytes = Vec::new();
+        sharded_commit
+            .serialize_compressed(&mut commit_bytes)
+            .map_err(|e| AegonError::Database(format!("serialize epoch commit: {e}")))?;
+        ops.push(DbOp::Set {
+            key: key_epoch_commit(sharded_commit.epoch),
+            value: commit_bytes,
+        });
+
+        db.write_atomic(&ops)
     }
 
     /// Walk the cross-shard probe trail for a brand-new `label`, marking
@@ -860,8 +1193,18 @@ where
             trail.push((shard_id, slot_bits.clone()));
 
             let slot_idx = bool_index_to_usize_dims(&slot_bits, &self.shard_dims);
-            let occupied_prev =
-                self.shards[shard_id as usize].is_index_slot_occupied(&slot_bits);
+            // Occupancy check: when a DB is configured, ask Redis (one
+            // EXISTS — no gRPC). Otherwise fall back to the shard
+            // (in-process test path). Redis is authoritative once it's
+            // configured because `persist_publish_to_db` writes
+            // `aegon:slot:*` in the same atomic txn as the shard
+            // commitments are finalized, so the two never disagree
+            // unless we're mid-recovery.
+            let occupied_prev = if let Some(db) = &self.db {
+                db.exists(&key_slot(shard_id, slot_idx))?
+            } else {
+                self.shards[shard_id as usize].is_index_slot_occupied(&slot_bits)
+            };
             let occupied_in_batch = in_batch_claimed[shard_id as usize].contains(&slot_idx);
             if !occupied_prev && !occupied_in_batch {
                 in_batch_claimed[shard_id as usize].insert(slot_idx);
@@ -912,7 +1255,7 @@ where
             self.shards[*final_shard as usize].open_value_at_slot(final_slot)?;
 
         let value: Value = match &self.db {
-            Some(db) => db.get(label)?.ok_or_else(|| {
+            Some(db) => db.get(&key_value(label))?.ok_or_else(|| {
                 AegonError::Database(format!(
                     "label {label:?} routed but missing from KV store"
                 ))
@@ -1280,7 +1623,7 @@ where
 /// On success, `audit_state` is advanced to the new chain scalars,
 /// ready for the next transition.
 pub fn verify_sharded_invariance<E, P>(
-    ctx: &ShardedVerifierContext<E, P>,
+    _ctx: &ShardedVerifierContext<E, P>,
     audit_state: &mut AuditState<E::ScalarField>,
     prev: &ShardedEpochCommitment<E, P>,
     next: &ShardedEpochCommitment<E, P>,
@@ -1289,6 +1632,11 @@ pub fn verify_sharded_invariance<E, P>(
 where
     E: Pairing,
     P: AegonPcs<E>,
+    P::Commitment: Clone
+        + PartialEq
+        + std::ops::Add<Output = P::Commitment>
+        + std::ops::Sub<Output = P::Commitment>
+        + std::ops::Mul<E::ScalarField, Output = P::Commitment>,
 {
     if next.epoch != prev.epoch + 1 {
         return Err(AegonError::Verification(
@@ -1317,36 +1665,32 @@ where
     let (new_r_index, new_r_value) =
         rederive_sharded_fs_scalars::<E, P>(audit_state.r_index, audit_state.r_value, next);
 
-    // (3) Per-shard chain checks with the *shared* scalars.
-    for (i, witness) in proof.per_shard.iter().enumerate() {
+    // (3) Per-shard chain checks with the *shared* scalars. The per-
+    // shard `InvarianceProof` is an empty marker now — all the bytes
+    // the auditor needs are in `prev.per_shard[i]` / `next.per_shard[i]`,
+    // and `verify_chain` does the homomorphism check directly on
+    // commitments.
+    for i in 0..next.per_shard.len() {
         let prev_i = &prev.per_shard[i];
         let next_i = &next.per_shard[i];
 
         let index_ok = verify_chain::<E, P>(
-            &ctx.inner.verifier_param,
-            ctx.shard_log_capacity(),
-            b"aegon.invariance.index",
             new_r_index,
             &prev_i.index_commitment,
             &next_i.index_commitment,
             &prev_i.rand_index_commitment,
             &next_i.rand_index_commitment,
-            &witness.index_chain,
-        )?;
+        );
         if !index_ok {
             return Ok(false);
         }
         let value_ok = verify_chain::<E, P>(
-            &ctx.inner.verifier_param,
-            ctx.shard_log_capacity(),
-            b"aegon.invariance.value",
             new_r_value,
             &prev_i.value_commitment,
             &next_i.value_commitment,
             &prev_i.rand_value_commitment,
             &next_i.rand_value_commitment,
-            &witness.value_chain,
-        )?;
+        );
         if !value_ok {
             return Ok(false);
         }

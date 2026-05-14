@@ -34,6 +34,9 @@ use super::config::VerifierContext;
 use super::error::AegonError;
 use super::hash::{HashSuite, Sha256Hash};
 use super::server::Aegon;
+use super::db::{key_shard_state, Db, DbOp, DbSource, RedisDb};
+use super::server::AegonCheckpoint;
+use super::sharded::ShardWrite;
 use super::types::{AegonPcs, EpochCommitment, InvarianceProof, Label, Value};
 
 // Generated tonic code lives in this module. `tonic-build` emits one
@@ -87,7 +90,7 @@ where
 {
     fn publish_phase_1_at_slots(
         &mut self,
-        batch: &[(Vec<bool>, E::ScalarField, E::ScalarField)],
+        batch: &[ShardWrite<E::ScalarField>],
     ) -> Result<(P::Commitment, P::Commitment), AegonError>;
 
     fn publish_phase_2(
@@ -148,7 +151,7 @@ where
 {
     fn publish_phase_1_at_slots(
         &mut self,
-        batch: &[(Vec<bool>, E::ScalarField, E::ScalarField)],
+        batch: &[ShardWrite<E::ScalarField>],
     ) -> Result<(P::Commitment, P::Commitment), AegonError> {
         Aegon::publish_phase_1_at_slots(self, batch)
     }
@@ -249,6 +252,12 @@ where
     H: HashSuite<E::ScalarField>,
 {
     aegon: Arc<AsyncRwLock<Aegon<E, P, H>>>,
+    /// Optional Redis client. When set, the shard writes its
+    /// [`AegonCheckpoint`] to `aegon:shard:{shard_id}:state` after
+    /// every successful `publish_phase_2`. Powers shard-restart
+    /// recovery (`aegon_shard_server --db-url`).
+    db: Option<Arc<dyn Db>>,
+    shard_id: u32,
 }
 
 impl<E, P, H> ShardServer<E, P, H>
@@ -270,7 +279,33 @@ where
     pub fn new(aegon: Aegon<E, P, H>) -> Self {
         Self {
             aegon: Arc::new(AsyncRwLock::new(aegon)),
+            db: None,
+            shard_id: 0,
         }
+    }
+
+    /// Same as `new`, but also wires up the Redis-backed durability
+    /// barrier — every successful `publish_phase_2` writes the new
+    /// `AegonCheckpoint` to `aegon:shard:{shard_id}:state`. The shard
+    /// server binary calls this when started with `--db-url`.
+    pub fn new_with_checkpoint(
+        aegon: Aegon<E, P, H>,
+        db_source: DbSource,
+        shard_id: u32,
+    ) -> Result<Self, AegonError> {
+        let db: Arc<dyn Db> = match db_source {
+            DbSource::None => {
+                return Err(AegonError::Config(
+                    "ShardServer::new_with_checkpoint requires a Redis DbSource".into(),
+                ));
+            },
+            DbSource::Redis(url) => Arc::new(RedisDb::connect(&url)?),
+        };
+        Ok(Self {
+            aegon: Arc::new(AsyncRwLock::new(aegon)),
+            db: Some(db),
+            shard_id,
+        })
     }
 
     /// Bind and serve indefinitely on `addr` (plaintext HTTP/2).
@@ -315,12 +350,13 @@ where
     H: HashSuite<E::ScalarField> + Send + Sync + 'static,
     EpochCommitment<E, P>: CanonicalSerialize + Send + Sync + 'static,
     InvarianceProof<E, P>: CanonicalSerialize + Send + Sync + 'static,
+    AegonCheckpoint<E, P>: CanonicalSerialize + Send + Sync + 'static,
 {
     async fn publish_phase1_at_slots(
         &self,
         req: Request<PublishPhase1Request>,
     ) -> Result<Response<PublishPhase1Response>, Status> {
-        let batch: Vec<(Vec<bool>, E::ScalarField, E::ScalarField)> =
+        let batch: Vec<ShardWrite<E::ScalarField>> =
             decode(&req.into_inner().batch_bytes).map_err(err_to_status)?;
         let mut aegon = self.aegon.write().await;
         let (index_com, value_com) = aegon
@@ -343,6 +379,24 @@ where
         let (commit, invariance) = aegon
             .publish_phase_2(r_index, r_value)
             .map_err(err_to_status)?;
+
+        // Durability barrier: snapshot the live state into Redis
+        // *while still holding the write lock*, so nothing else can
+        // mutate the shard before we've captured this epoch's
+        // checkpoint. A failed checkpoint write doesn't roll back
+        // the publish — we surface it as an error so the caller
+        // knows the durability promise wasn't kept this round.
+        if let Some(db) = &self.db {
+            let ckpt = aegon.capture_checkpoint();
+            let bytes = encode(&ckpt).map_err(err_to_status)?;
+            db.write_atomic(&[DbOp::Set {
+                key: key_shard_state(self.shard_id),
+                value: bytes,
+            }])
+            .map_err(err_to_status)?;
+        }
+        drop(aegon);
+
         Ok(Response::new(PublishPhase2Response {
             epoch_commitment: encode(&commit).map_err(err_to_status)?,
             invariance_proof: encode(&invariance).map_err(err_to_status)?,
@@ -640,7 +694,7 @@ where
 {
     fn publish_phase_1_at_slots(
         &mut self,
-        batch: &[(Vec<bool>, E::ScalarField, E::ScalarField)],
+        batch: &[ShardWrite<E::ScalarField>],
     ) -> Result<(P::Commitment, P::Commitment), AegonError> {
         let req = PublishPhase1Request {
             batch_bytes: encode(&batch.to_vec())?,

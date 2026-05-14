@@ -10,9 +10,10 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use akd::aegon::server::load_aegon_checkpoint_from_db;
 use akd::aegon::shard_grpc::{ShardServer, ShardServerTlsConfig};
 use akd::aegon::sharded::read_srs_from_file;
-use akd::aegon::{AegonConfig, Sha256Hash};
+use akd::aegon::{AegonConfig, DbSource, Sha256Hash};
 use akd_core::aegon_crypto::pcs::kzhk::structs::KZHKConfig;
 use akd_core::aegon_crypto::pcs::kzhk::KZHK;
 use ark_bn254::Bn254;
@@ -69,6 +70,24 @@ struct Args {
     /// Path to the PEM-encoded private key matching `--tls-cert`.
     #[arg(long, requires = "tls_cert")]
     tls_key: Option<PathBuf>,
+
+    /// Optional Redis URL for shard-side durability. When set:
+    /// (1) on startup, if `aegon:shard:{shard_id}:state` exists, the
+    ///     shard restores its polynomial state from that checkpoint
+    ///     instead of re-initializing fresh;
+    /// (2) after every `publish_phase_2`, the shard re-writes the
+    ///     checkpoint to that key. URL form is the standard
+    ///     `redis://host[:port][/db]`. Requires `--shard-id`.
+    #[arg(long, requires = "shard_id")]
+    db_url: Option<String>,
+
+    /// Identifier this shard registers under in the coordinator's
+    /// routing namespace. Required with `--db-url`; otherwise unused
+    /// but accepted for documentation. Set to the same `i` the
+    /// coordinator uses for `endpoints[i]` (typically the position in
+    /// the cluster's shard list, 0..N-1).
+    #[arg(long)]
+    shard_id: Option<u32>,
 }
 
 #[tokio::main]
@@ -87,6 +106,12 @@ async fn main() -> ExitCode {
         _e: PhantomData,
     };
 
+    let db_source = match &args.db_url {
+        Some(url) => DbSource::Redis(url.clone()),
+        None => DbSource::None,
+    };
+    let shard_id = args.shard_id.unwrap_or(0);
+
     let aegon = match (&args.srs_path, args.setup_seed) {
         (Some(path), _) => {
             eprintln!("loading SRS from {}", path.display());
@@ -97,11 +122,36 @@ async fn main() -> ExitCode {
                     return ExitCode::from(1);
                 },
             };
-            match Aegon::init(pk, vk, &aegon_cfg) {
-                Ok(a) => a,
+            // Checkpoint-recovery path: if a previous incarnation of
+            // this shard left a checkpoint behind, resume from it
+            // instead of starting fresh at epoch 0.
+            let recovered = match load_aegon_checkpoint_from_db::<Bn254, Pcs>(&db_source, shard_id) {
+                Ok(c) => c,
                 Err(e) => {
-                    eprintln!("error initializing Aegon: {e}");
+                    eprintln!("error reading shard checkpoint: {e}");
                     return ExitCode::from(1);
+                },
+            };
+            match recovered {
+                Some(ckpt) => {
+                    eprintln!(
+                        "resuming shard {shard_id} from Redis checkpoint at epoch {}",
+                        ckpt.epoch
+                    );
+                    match Aegon::restore_from_checkpoint(pk, vk, &aegon_cfg, ckpt) {
+                        Ok(a) => a,
+                        Err(e) => {
+                            eprintln!("error restoring Aegon from checkpoint: {e}");
+                            return ExitCode::from(1);
+                        },
+                    }
+                },
+                None => match Aegon::init(pk, vk, &aegon_cfg) {
+                    Ok(a) => a,
+                    Err(e) => {
+                        eprintln!("error initializing Aegon: {e}");
+                        return ExitCode::from(1);
+                    },
                 },
             }
         },
@@ -139,7 +189,20 @@ async fn main() -> ExitCode {
         args.private,
     );
 
-    let server = ShardServer::<Bn254, Pcs, Sha256Hash>::new(aegon);
+    let server = match args.db_url.is_some() {
+        true => match ShardServer::<Bn254, Pcs, Sha256Hash>::new_with_checkpoint(
+            aegon,
+            db_source.clone(),
+            shard_id,
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("error wiring shard checkpoint sink: {e}");
+                return ExitCode::from(1);
+            },
+        },
+        false => ShardServer::<Bn254, Pcs, Sha256Hash>::new(aegon),
+    };
     let result = if let Some(tls) = tls_config {
         server.serve_with_tls(args.bind, tls).await
     } else {

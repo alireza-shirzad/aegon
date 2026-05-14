@@ -15,7 +15,7 @@ use rayon::iter::{
     IntoParallelRefMutIterator, ParallelIterator,
 };
 use std::collections::BTreeMap;
-use std::ops::{Add, Deref, DerefMut, Range};
+use std::ops::{Add, Deref, DerefMut, Mul, Range};
 
 /// Configuration for the KZH-k scheme.
 ///
@@ -95,6 +95,28 @@ impl<'b, E: Pairing> Sub<&'b KZHKCommitment<E>> for &KZHKCommitment<E> {
     fn sub(self, rhs: &'b KZHKCommitment<E>) -> Self::Output {
         debug_assert_eq!(self.nv, rhs.nv, "commitments for different nv!");
         let com = (self.com - rhs.com).into_affine();
+        KZHKCommitment::new(com, self.nv)
+    }
+}
+
+// Scalar multiplication. The commitment is a Pedersen MSM on the
+// polynomial's evaluation vector (plus an optional `tau*h` blinding
+// term in zk mode), so `C(alpha * p) == alpha * C(p)` — true in both
+// the plain and zk variants. The auditor's homomorphism check
+// (`audit::verify_chain`) relies on this; the in-place sanity checks
+// on `nv` mirror the ones on `Add`/`Sub`.
+impl<E: Pairing> Mul<E::ScalarField> for KZHKCommitment<E> {
+    type Output = Self;
+    fn mul(self, scalar: E::ScalarField) -> Self {
+        let com = self.com.mul(scalar).into_affine();
+        KZHKCommitment::new(com, self.nv)
+    }
+}
+
+impl<E: Pairing> Mul<E::ScalarField> for &KZHKCommitment<E> {
+    type Output = KZHKCommitment<E>;
+    fn mul(self, scalar: E::ScalarField) -> KZHKCommitment<E> {
+        let com = self.com.mul(scalar).into_affine();
         KZHKCommitment::new(com, self.nv)
     }
 }
