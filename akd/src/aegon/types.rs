@@ -182,3 +182,69 @@ pub struct ConsistencyProof<E: Pairing, P: AegonPcs<E>> {
     pub index_witnesses: Vec<RandPair<E, P>>,
     pub value_witness: RandPair<E, P>,
 }
+
+/// Per-new-label history witness emitted by a shard during
+/// `publish_phase_2` (paper §6.4). For every brand-new slot the publish
+/// batch touched on this shard, the shard opens:
+///
+/// * `rand_index` and `rand_value` **before** the rand-poly update
+///   (i.e. at the prior epoch). For a fresh slot these openings are
+///   the polynomials' values at a previously-empty address.
+/// * `rand_index` and `rand_value` **after** the rand-poly update, plus
+///   `value` (which was committed at the end of phase 1). These three
+///   together are the new-epoch view of the slot.
+///
+/// A future history verifier replays the update equation
+/// `rand_X_new(s) − rand_X_old(s) == r_X · (data_X_new(s) − data_X_old(s))`
+/// at every slot in this list, using `data_X_old(s) = 0` (the
+/// brand-new slot was empty at the prior epoch). `value` is bound
+/// directly; the index-side data value is the canonical
+/// `H_F(label)` which the verifier reconstructs from the label bytes
+/// stored in Redis under `aegon:value:` and `aegon:routing:`.
+#[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
+pub struct HistoryOpeningEntry<E: Pairing, P: AegonPcs<E>> {
+    /// The slot bits this entry's openings are at. Same encoding as
+    /// `LabelRouting::final_assignment().1` — bit-vector of length
+    /// `shard_log_capacity`, low bit first.
+    pub slot_bits: Vec<bool>,
+    /// `rand_index_n(slot)` opened against this shard's prior-epoch
+    /// `rand_index_commitment`. Will be zero for a brand-new slot,
+    /// but the proof binds it to the prior commitment regardless.
+    pub rand_index_pre_eval: E::ScalarField,
+    pub rand_index_pre_proof: P::Proof,
+    /// `rand_value_n(slot)` opened against the prior-epoch
+    /// `rand_value_commitment`. Same caveat — zero on fresh slots.
+    pub rand_value_pre_eval: E::ScalarField,
+    pub rand_value_pre_proof: P::Proof,
+    /// `rand_index_{n+1}(slot)` opened against the new-epoch
+    /// `rand_index_commitment`. Equals `r_index_n · H_F(label)` on a
+    /// fresh slot.
+    pub rand_index_post_eval: E::ScalarField,
+    pub rand_index_post_proof: P::Proof,
+    /// `rand_value_{n+1}(slot)` opened against the new-epoch
+    /// `rand_value_commitment`. Equals `r_value_n · H_F(value)` on a
+    /// fresh slot.
+    pub rand_value_post_eval: E::ScalarField,
+    pub rand_value_post_proof: P::Proof,
+    /// `value_{n+1}(slot) = H_F(value)` opened against the new-epoch
+    /// `value_commitment`.
+    pub value_post_eval: E::ScalarField,
+    pub value_post_proof: P::Proof,
+}
+
+/// All §6.4 history witnesses one shard produced during one publish.
+/// Empty when the publish carried no new labels for this shard (only
+/// value-updates to already-occupied slots, which the rand-poly chain
+/// covers via standard consistency proofs).
+#[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
+pub struct HistoryOpenings<E: Pairing, P: AegonPcs<E>> {
+    pub entries: Vec<HistoryOpeningEntry<E, P>>,
+}
+
+impl<E: Pairing, P: AegonPcs<E>> Default for HistoryOpenings<E, P> {
+    fn default() -> Self {
+        Self {
+            entries: Vec::new(),
+        }
+    }
+}

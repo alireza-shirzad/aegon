@@ -38,7 +38,8 @@ use super::fs::derive_chain_scalar;
 use super::hash::{bool_index_to_point, bool_index_to_usize, HashSuite, Sha256Hash};
 use super::sharded::ShardWrite;
 use super::types::{
-    AegonPcs, EpochCommitment, InvarianceProof, Label, LookupProof, RandPair, Value,
+    AegonPcs, EpochCommitment, HistoryOpeningEntry, HistoryOpenings, InvarianceProof, Label,
+    LookupProof, RandPair, Value,
 };
 
 /// Snapshot of the polynomials needed for serving consistency proofs at
@@ -177,6 +178,11 @@ struct PendingPublish<E: Pairing, P: AegonPcs<E>> {
     new_index_state: P::State,
     new_value_com: P::Commitment,
     new_value_state: P::State,
+    /// Slot bits for every brand-new placement in this batch (entries
+    /// whose `h_label_or_zero != 0`). Populated by `publish_phase_1`,
+    /// consumed by `publish_phase_2` to drive the §6.4 history-opening
+    /// computation. Empty when the batch was value-updates only.
+    new_label_slots: Vec<Vec<bool>>,
 }
 
 impl<E, P, H> Aegon<E, P, H>
@@ -491,7 +497,14 @@ where
             prev_r_value,
             &new_value_com,
         );
-        self.publish_phase_2(new_r_index, new_r_value)
+        // Discard the §6.4 history openings: this convenience wrapper
+        // is the non-sharded path, where there's no coordinator-side
+        // Redis to persist them to. Sharded callers go through
+        // `ShardedAegon::publish`, which threads the openings into
+        // `persist_publish_to_db`.
+        let (commit, invariance, _history) =
+            self.publish_phase_2(new_r_index, new_r_value)?;
+        Ok((commit, invariance))
     }
 
     /// First half of a sharded publish: apply data updates, commit the
@@ -579,7 +592,10 @@ where
         let prev_rand_value_com = self.rand_value_commitment.clone();
         let prev_rand_value_state = self.rand_value_state.clone();
 
-        // Apply writes.
+        // Apply writes. Collect the slot_bits of brand-new placements
+        // (h_label_or_zero != 0) so phase 2 knows where to open for the
+        // §6.4 history witnesses without re-scanning the batch.
+        let mut new_label_slots: Vec<Vec<bool>> = Vec::new();
         for ShardWrite {
             slot_bits,
             h_label_or_zero,
@@ -589,6 +605,7 @@ where
             let usize_idx = bool_index_to_usize(slot_bits, &self.dims);
             if !h_label_or_zero.is_zero() {
                 self.index_poly.evaluations.insert(usize_idx, *h_label_or_zero);
+                new_label_slots.push(slot_bits.clone());
             }
             self.set_value(usize_idx, *h_value);
         }
@@ -616,6 +633,7 @@ where
             new_index_state,
             new_value_com: new_value_com.clone(),
             new_value_state,
+            new_label_slots,
         });
 
         Ok((new_index_com, new_value_com))
@@ -629,7 +647,8 @@ where
         &mut self,
         new_r_index: E::ScalarField,
         new_r_value: E::ScalarField,
-    ) -> Result<(EpochCommitment<E, P>, InvarianceProof<E, P>), AegonError> {
+    ) -> Result<(EpochCommitment<E, P>, InvarianceProof<E, P>, HistoryOpenings<E, P>), AegonError>
+    {
         let pending = self.pending.take().ok_or_else(|| {
             AegonError::Config(
                 "publish_phase_2 called without a pending publish; call publish_phase_1 first"
@@ -653,7 +672,40 @@ where
             new_index_state,
             new_value_com,
             new_value_state,
+            new_label_slots,
         } = pending;
+
+        // §6.4 step 1: open `rand_index` and `rand_value` at each
+        // new-label slot **before** the rand-polys are mutated. The
+        // openings bind against the prior-epoch rand commitments
+        // (`prev_rand_*_com`); evaluations are zero by construction
+        // (a brand-new slot has had no chain delta applied to it
+        // through any prior epoch), but the PCS proof is still required
+        // for the future history-check verifier.
+        let mut pre_rand_index: Vec<(E::ScalarField, P::Proof)> =
+            Vec::with_capacity(new_label_slots.len());
+        let mut pre_rand_value: Vec<(E::ScalarField, P::Proof)> =
+            Vec::with_capacity(new_label_slots.len());
+        for slot_bits in &new_label_slots {
+            pre_rand_index.push(open_at_point::<E, P>(
+                &self.prover_param,
+                &prev_rand_index_poly,
+                &prev_rand_index_com,
+                &prev_rand_index_state,
+                slot_bits,
+                &self.dims,
+                b"aegon.rand_index.open",
+            )?);
+            pre_rand_value.push(open_at_point::<E, P>(
+                &self.prover_param,
+                &prev_rand_value_poly,
+                &prev_rand_value_com,
+                &prev_rand_value_state,
+                slot_bits,
+                &self.dims,
+                b"aegon.rand_value.open",
+            )?);
+        }
 
         // Update rand polynomials: rand_{n+1} = rand_n + r_n · ∆.
         // Computed pointwise on the sparse evaluation tables. ∆ is
@@ -677,6 +729,49 @@ where
         let (new_rand_value_com, new_rand_value_state) =
             commit_with_aux::<E, P>(&self.prover_param, &self.rand_value_poly)?;
 
+        // §6.4 step 2: open `rand_index` and `rand_value` (now at the
+        // new epoch) and `value` (also at the new epoch — the
+        // value-poly was committed at the end of phase 1) at every
+        // new-label slot. Together with the pre-openings above, this
+        // pins both endpoints of the update equation
+        // `rand_X_new(s) − rand_X_old(s) = r_X · (data_X_new(s) − 0)`
+        // at every slot the verifier needs to check.
+        let mut post_rand_index: Vec<(E::ScalarField, P::Proof)> =
+            Vec::with_capacity(new_label_slots.len());
+        let mut post_rand_value: Vec<(E::ScalarField, P::Proof)> =
+            Vec::with_capacity(new_label_slots.len());
+        let mut post_value: Vec<(E::ScalarField, P::Proof)> =
+            Vec::with_capacity(new_label_slots.len());
+        for slot_bits in &new_label_slots {
+            post_rand_index.push(open_at_point::<E, P>(
+                &self.prover_param,
+                &self.rand_index_poly,
+                &new_rand_index_com,
+                &new_rand_index_state,
+                slot_bits,
+                &self.dims,
+                b"aegon.rand_index.open",
+            )?);
+            post_rand_value.push(open_at_point::<E, P>(
+                &self.prover_param,
+                &self.rand_value_poly,
+                &new_rand_value_com,
+                &new_rand_value_state,
+                slot_bits,
+                &self.dims,
+                b"aegon.rand_value.open",
+            )?);
+            post_value.push(open_at_point::<E, P>(
+                &self.prover_param,
+                &self.value_poly,
+                &new_value_com,
+                &new_value_state,
+                slot_bits,
+                &self.dims,
+                b"aegon.value.open",
+            )?);
+        }
+
         // The invariance proof carries no per-epoch data anymore: with
         // the commitment-homomorphism audit path, every group element
         // the auditor needs is already in the published `EpochCommitment`.
@@ -691,17 +786,34 @@ where
         let _ = (
             &prev_index_poly,
             &prev_index_state,
-            &prev_rand_index_poly,
-            &prev_rand_index_state,
             &prev_value_poly,
             &prev_value_state,
-            &prev_rand_value_poly,
-            &prev_rand_value_state,
             &prev_index_com,
-            &prev_rand_index_com,
             &prev_value_com,
-            &prev_rand_value_com,
         );
+
+        // Assemble the §6.4 history witness bundle. Per-slot evals +
+        // proofs come from the two passes above, addressed by the
+        // same `new_label_slots` ordering.
+        let history = HistoryOpenings {
+            entries: new_label_slots
+                .iter()
+                .enumerate()
+                .map(|(i, slot_bits)| HistoryOpeningEntry {
+                    slot_bits: slot_bits.clone(),
+                    rand_index_pre_eval: pre_rand_index[i].0,
+                    rand_index_pre_proof: pre_rand_index[i].1.clone(),
+                    rand_value_pre_eval: pre_rand_value[i].0,
+                    rand_value_pre_proof: pre_rand_value[i].1.clone(),
+                    rand_index_post_eval: post_rand_index[i].0,
+                    rand_index_post_proof: post_rand_index[i].1.clone(),
+                    rand_value_post_eval: post_rand_value[i].0,
+                    rand_value_post_proof: post_rand_value[i].1.clone(),
+                    value_post_eval: post_value[i].0,
+                    value_post_proof: post_value[i].1.clone(),
+                })
+                .collect(),
+        };
 
         // Commit the new epoch to live state and history.
         self.index_commitment = new_index_com.clone();
@@ -730,7 +842,7 @@ where
             },
         );
 
-        Ok((self.current_commitment(), invariance))
+        Ok((self.current_commitment(), invariance, history))
     }
 
     /// Find the first free slot for `label` via local-only open addressing.

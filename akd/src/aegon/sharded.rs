@@ -34,13 +34,15 @@ use sha2::{Digest, Sha256};
 use super::audit::verify_chain;
 use super::config::{AegonConfig, VerifierContext};
 use super::db::{
-    self, key_coord_state, key_epoch_commit, key_labels_set, key_routing, key_slot, key_value,
-    Db, DbOp, DbSource, RedisDb,
+    key_coord_state, key_epoch_commit, key_history_openings, key_labels_set, key_routing,
+    key_slot, key_value, Db, DbOp, DbSource, RedisDb,
 };
 use super::error::AegonError;
 use super::hash::{bool_index_to_point, HashSuite, Sha256Hash};
 use super::server::Aegon;
-use super::types::{AegonPcs, AuditState, EpochCommitment, InvarianceProof, Label, RandPair, Value};
+use super::types::{
+    AegonPcs, AuditState, EpochCommitment, HistoryOpenings, InvarianceProof, Label, RandPair, Value,
+};
 
 /// Where the shards live, and how the coordinator talks to them.
 ///
@@ -920,10 +922,15 @@ where
         let (new_index_commits, new_value_commits) = self.run_phase_1(&sub_batches)?;
         let (new_r_index, new_r_value) =
             self.derive_chain_scalars(&new_index_commits, &new_value_commits);
-        let (per_shard_commits, per_shard_invariance) =
+        let (per_shard_commits, per_shard_invariance, per_shard_history) =
             self.run_phase_2(new_r_index, new_r_value)?;
         let sharded_commit = self.finalize_epoch(per_shard_commits, new_r_index, new_r_value);
-        self.persist_publish_to_db(updates, &new_placements, &sharded_commit)?;
+        self.persist_publish_to_db(
+            updates,
+            &new_placements,
+            &sharded_commit,
+            &per_shard_history,
+        )?;
         Ok((
             sharded_commit,
             ShardedInvarianceProof {
@@ -1041,22 +1048,42 @@ where
 
     /// Drive every shard's `publish_phase_2` with the shared scalars
     /// in parallel and split the per-shard `(EpochCommitment,
-    /// InvarianceProof)` pairs into shard-id-ordered vectors. After
-    /// the commitment-homomorphism audit refactor the
+    /// InvarianceProof, HistoryOpenings)` triples into shard-id-ordered
+    /// vectors. After the commitment-homomorphism audit refactor the
     /// `InvarianceProof` is empty, so the second vec is essentially
-    /// `Vec<()>` and carries no per-epoch data — the auditor recovers
-    /// everything it needs from the per-shard commitments.
+    /// `Vec<()>` — the auditor recovers what it needs from the
+    /// per-shard commitments. The third vec carries the §6.4 history
+    /// witnesses (one `HistoryOpenings` per shard, possibly empty).
     fn run_phase_2(
         &mut self,
         new_r_index: E::ScalarField,
         new_r_value: E::ScalarField,
-    ) -> Result<(Vec<EpochCommitment<E, P>>, Vec<InvarianceProof<E, P>>), AegonError> {
-        let phase_2: Vec<(EpochCommitment<E, P>, InvarianceProof<E, P>)> = self
+    ) -> Result<
+        (
+            Vec<EpochCommitment<E, P>>,
+            Vec<InvarianceProof<E, P>>,
+            Vec<HistoryOpenings<E, P>>,
+        ),
+        AegonError,
+    > {
+        let phase_2: Vec<(
+            EpochCommitment<E, P>,
+            InvarianceProof<E, P>,
+            HistoryOpenings<E, P>,
+        )> = self
             .shards
             .par_iter_mut()
             .map(|shard| shard.publish_phase_2(new_r_index, new_r_value))
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(phase_2.into_iter().unzip())
+        let mut commits = Vec::with_capacity(phase_2.len());
+        let mut invariances = Vec::with_capacity(phase_2.len());
+        let mut histories = Vec::with_capacity(phase_2.len());
+        for (c, i, h) in phase_2 {
+            commits.push(c);
+            invariances.push(i);
+            histories.push(h);
+        }
+        Ok((commits, invariances, histories))
     }
 
     /// Coordinator-side bookkeeping: advance `(r_index, r_value,
@@ -1103,14 +1130,18 @@ where
         updates: &[(Label, Value)],
         new_placements: &[NewPlacement],
         sharded_commit: &ShardedEpochCommitment<E, P>,
+        per_shard_history: &[HistoryOpenings<E, P>],
     ) -> Result<(), AegonError> {
         let Some(db) = &self.db else { return Ok(()) };
 
         // Pre-size: 2 ops per update (value SET + labels SADD) + 2 ops
         // per new placement (routing SET + slot SET) + 2 global ops
-        // (coord:state SET + coord:epoch_commit:{epoch} SET).
-        let mut ops: Vec<DbOp> =
-            Vec::with_capacity(updates.len() * 2 + new_placements.len() * 2 + 2);
+        // (coord:state SET + coord:epoch_commit:{epoch} SET) + 1 op per
+        // non-empty shard's §6.4 history bundle.
+        let non_empty_histories = per_shard_history.iter().filter(|h| !h.entries.is_empty()).count();
+        let mut ops: Vec<DbOp> = Vec::with_capacity(
+            updates.len() * 2 + new_placements.len() * 2 + 2 + non_empty_histories,
+        );
 
         // 1. value:{label} + labels SADD for every update.
         for (label, value) in updates {
@@ -1171,6 +1202,25 @@ where
             key: key_epoch_commit(sharded_commit.epoch),
             value: commit_bytes,
         });
+
+        // 5. openings:{epoch}:{shard_id} — §6.4 history witnesses. One
+        // key per shard whose batch carried at least one brand-new
+        // label. Shards that did only value-updates produced an empty
+        // `HistoryOpenings`; persisting an empty bundle would just
+        // waste a Redis SET, so those are skipped here.
+        for (shard_id, history) in per_shard_history.iter().enumerate() {
+            if history.entries.is_empty() {
+                continue;
+            }
+            let mut history_bytes = Vec::new();
+            history
+                .serialize_compressed(&mut history_bytes)
+                .map_err(|e| AegonError::Database(format!("serialize history openings: {e}")))?;
+            ops.push(DbOp::Set {
+                key: key_history_openings(sharded_commit.epoch, shard_id as u32),
+                value: history_bytes,
+            });
+        }
 
         db.write_atomic(&ops)
     }

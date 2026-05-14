@@ -42,7 +42,7 @@ pub use sharded::{
     ShardedRandPair, ShardedVerifierContext, SrsSource,
 };
 pub use types::{
-    AegonPcs, AuditState, ConsistencyProof, EpochCommitment, InvarianceProof, Label, LookupProof,
-    RandPair, Value,
+    AegonPcs, AuditState, ConsistencyProof, EpochCommitment, HistoryOpeningEntry, HistoryOpenings,
+    InvarianceProof, Label, LookupProof, RandPair, Value,
 };
 pub use verify::verify_lookup;

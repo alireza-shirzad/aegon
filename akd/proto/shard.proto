@@ -62,6 +62,10 @@ message PublishPhase2Response {
   bytes epoch_commitment = 1;
   // Canonical-serialized InvarianceProof<E, P>.
   bytes invariance_proof = 2;
+  // Canonical-serialized HistoryOpenings<E, P> — §6.4 history witnesses
+  // covering every brand-new label this shard placed in the batch.
+  // Empty when the shard's batch was value-updates only.
+  bytes history_openings = 3;
 }
 
 message SlotRequest {

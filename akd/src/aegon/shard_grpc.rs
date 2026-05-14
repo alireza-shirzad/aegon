@@ -37,7 +37,7 @@ use super::server::Aegon;
 use super::db::{key_shard_state, Db, DbOp, DbSource, RedisDb};
 use super::server::AegonCheckpoint;
 use super::sharded::ShardWrite;
-use super::types::{AegonPcs, EpochCommitment, InvarianceProof, Label, Value};
+use super::types::{AegonPcs, EpochCommitment, HistoryOpenings, InvarianceProof, Label, Value};
 
 // Generated tonic code lives in this module. `tonic-build` emits one
 // rust module per proto package; ours is `aegon.shard.v1`.
@@ -97,7 +97,7 @@ where
         &mut self,
         new_r_index: E::ScalarField,
         new_r_value: E::ScalarField,
-    ) -> Result<(EpochCommitment<E, P>, InvarianceProof<E, P>), AegonError>;
+    ) -> Result<(EpochCommitment<E, P>, InvarianceProof<E, P>, HistoryOpenings<E, P>), AegonError>;
 
     fn is_index_slot_occupied(&self, slot_bits: &[bool]) -> bool;
 
@@ -160,7 +160,8 @@ where
         &mut self,
         new_r_index: E::ScalarField,
         new_r_value: E::ScalarField,
-    ) -> Result<(EpochCommitment<E, P>, InvarianceProof<E, P>), AegonError> {
+    ) -> Result<(EpochCommitment<E, P>, InvarianceProof<E, P>, HistoryOpenings<E, P>), AegonError>
+    {
         Aegon::publish_phase_2(self, new_r_index, new_r_value)
     }
 
@@ -350,6 +351,7 @@ where
     H: HashSuite<E::ScalarField> + Send + Sync + 'static,
     EpochCommitment<E, P>: CanonicalSerialize + Send + Sync + 'static,
     InvarianceProof<E, P>: CanonicalSerialize + Send + Sync + 'static,
+    HistoryOpenings<E, P>: CanonicalSerialize + Send + Sync + 'static,
     AegonCheckpoint<E, P>: CanonicalSerialize + Send + Sync + 'static,
 {
     async fn publish_phase1_at_slots(
@@ -376,7 +378,7 @@ where
         let r_index: E::ScalarField = decode(&r.r_index).map_err(err_to_status)?;
         let r_value: E::ScalarField = decode(&r.r_value).map_err(err_to_status)?;
         let mut aegon = self.aegon.write().await;
-        let (commit, invariance) = aegon
+        let (commit, invariance, history) = aegon
             .publish_phase_2(r_index, r_value)
             .map_err(err_to_status)?;
 
@@ -400,6 +402,7 @@ where
         Ok(Response::new(PublishPhase2Response {
             epoch_commitment: encode(&commit).map_err(err_to_status)?,
             invariance_proof: encode(&invariance).map_err(err_to_status)?,
+            history_openings: encode(&history).map_err(err_to_status)?,
         }))
     }
 
@@ -691,6 +694,7 @@ where
     H: HashSuite<E::ScalarField> + Send + Sync,
     EpochCommitment<E, P>: CanonicalDeserialize + Send + Sync,
     InvarianceProof<E, P>: CanonicalDeserialize + Send + Sync,
+    HistoryOpenings<E, P>: CanonicalDeserialize + Send + Sync,
 {
     fn publish_phase_1_at_slots(
         &mut self,
@@ -717,7 +721,8 @@ where
         &mut self,
         new_r_index: E::ScalarField,
         new_r_value: E::ScalarField,
-    ) -> Result<(EpochCommitment<E, P>, InvarianceProof<E, P>), AegonError> {
+    ) -> Result<(EpochCommitment<E, P>, InvarianceProof<E, P>, HistoryOpenings<E, P>), AegonError>
+    {
         let req = PublishPhase2Request {
             r_index: encode(&new_r_index)?,
             r_value: encode(&new_r_value)?,
@@ -733,7 +738,8 @@ where
         let inner = resp.into_inner();
         let commit: EpochCommitment<E, P> = decode(&inner.epoch_commitment)?;
         let invariance: InvarianceProof<E, P> = decode(&inner.invariance_proof)?;
-        Ok((commit, invariance))
+        let history: HistoryOpenings<E, P> = decode(&inner.history_openings)?;
+        Ok((commit, invariance, history))
     }
 
     fn is_index_slot_occupied(&self, slot_bits: &[bool]) -> bool {

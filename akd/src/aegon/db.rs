@@ -24,6 +24,7 @@
 //! | `aegon:coord:state`                            | serialized `CoordState { epoch, r_index, r_value }`    |
 //! | `aegon:coord:epoch_commit:{epoch}`             | serialized `ShardedEpochCommitment`                    |
 //! | `aegon:shard:{shard_id}:state`                 | serialized shard polynomial+commitment checkpoint      |
+//! | `aegon:openings:{epoch}:{shard_id}`            | serialized §6.4 `HistoryOpenings` for new placements   |
 
 use std::sync::Mutex;
 use std::time::Duration;
@@ -203,4 +204,12 @@ pub(crate) fn key_epoch_commit(epoch: u64) -> Vec<u8> {
 /// `aegon:shard:{shard_id}:state` — shard's own checkpoint.
 pub(crate) fn key_shard_state(shard_id: u32) -> Vec<u8> {
     format!("aegon:shard:{shard_id}:state").into_bytes()
+}
+
+/// `aegon:openings:{epoch}:{shard_id}` — paper §6.4 history witnesses
+/// for every brand-new label `shard_id` placed during the transition
+/// into `epoch`. Serialized `HistoryOpenings<E, P>` bytes. Absent when
+/// the publish carried no new labels for that shard.
+pub(crate) fn key_history_openings(epoch: u64, shard_id: u32) -> Vec<u8> {
+    format!("aegon:openings:{epoch}:{shard_id}").into_bytes()
 }
