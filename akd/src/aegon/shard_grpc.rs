@@ -323,7 +323,7 @@ where
         self,
         addr: std::net::SocketAddr,
     ) -> Result<(), tonic::transport::Error> {
-        let service = ShardServiceServer::new(self);
+        let service = Self::wrap_service(self);
         Server::builder().add_service(service).serve(addr).await
     }
 
@@ -335,12 +335,25 @@ where
         addr: std::net::SocketAddr,
         tls: ShardServerTlsConfig,
     ) -> Result<(), tonic::transport::Error> {
-        let service = ShardServiceServer::new(self);
+        let service = Self::wrap_service(self);
         Server::builder()
             .tls_config(tls.inner)?
             .add_service(service)
             .serve(addr)
             .await
+    }
+
+    /// Wrap `self` as a tonic service with the message-size limits the
+    /// cluster needs. Tonic defaults to 4 MiB, which is fine for tiny
+    /// batches but breaks publish_phase_1 once §6.4 openings per shard
+    /// cross that threshold (happens around batch=10k for a 4-shard
+    /// cluster). Set to 1 GiB on both directions so the limit is
+    /// effectively never reached.
+    fn wrap_service(this: Self) -> ShardServiceServer<Self> {
+        const MAX_MSG_BYTES: usize = 1024 * 1024 * 1024;
+        ShardServiceServer::new(this)
+            .max_decoding_message_size(MAX_MSG_BYTES)
+            .max_encoding_message_size(MAX_MSG_BYTES)
     }
 }
 
@@ -647,7 +660,12 @@ where
         let client = runtime
             .block_on(endpoint.connect())
             .map_err(|e| AegonError::Config(format!("connect '{}': {e}", cfg.endpoint)))?;
-        let client = ShardServiceClient::new(client);
+        // See `ShardServer::wrap_service` for the rationale on the 1 GiB
+        // limit — same trigger (batch=10k publish_phase_1 response).
+        const MAX_MSG_BYTES: usize = 1024 * 1024 * 1024;
+        let client = ShardServiceClient::new(client)
+            .max_decoding_message_size(MAX_MSG_BYTES)
+            .max_encoding_message_size(MAX_MSG_BYTES);
 
         Ok(Self {
             runtime: Arc::new(runtime),
