@@ -267,45 +267,60 @@ cmd_deploy() {
   local per_shard; per_shard="$(prefill_per_shard)"
   log "shards will prefill ${per_shard} entries each (total = 2^$TOTAL_PRELOAD_LOG2)"
 
-  # ---- push to every shard + start ----
+  # ---- push to every shard + start, all in parallel ----
   # Each shard generates its own SRS in-process from --setup-seed
   # (no file transfer of a 30 GB SRS), then prefills with
   # --prefill-count entries (deterministic, seeded by PREFILL_SEED + i
   # so different shards fill different slot patterns).
+  #
+  # Each shard's upload+start runs in a background subshell because
+  # gcloud's IAP-tunnel ssh has slow channel teardown (tens of seconds
+  # per call), and we have N of them — serial would be O(N*teardown).
+  local -a deploy_pids=()
   for ((i = 0; i < N_SHARDS; i++)); do
     local name; name="$(shard_name "$i")"
-    log "[$name] uploading aegon_shard_server"
-    scp_to "$name" "$remote_bin_dir/aegon_shard_server"
-    remote "$name" "sudo mkdir -p $REMOTE_BIN_DIR && \
-      sudo mv /tmp/aegon_shard_server $REMOTE_BIN_DIR/ && \
-      sudo chmod +x $REMOTE_BIN_DIR/aegon_shard_server"
     local shard_prefill_seed=$((PREFILL_SEED + i))
-    log "[$name] starting shard server (shard_id=$i, prefill_count=$per_shard, prefill_seed=$shard_prefill_seed)"
-    # PID-file restart pattern (see cluster.sh for the rationale on
-    # avoiding `pkill -f`).
-    # setsid + disown + explicit `exit 0` so gcloud ssh's pty channel
-    # closes the moment the shell finishes, even though the shard
-    # server is mid-SRS-gen. Without these, gcloud waits on the
-    # session until the long-running child terminates.
-    remote "$name" "if [ -f /tmp/aegon-shard.pid ]; then \
-        kill \$(cat /tmp/aegon-shard.pid) 2>/dev/null || true; \
-        sleep 1; \
-      fi; \
-      mkdir -p \$HOME/aegon-run \$HOME/artifacts/srs && \
-      cd \$HOME/aegon-run && \
-      setsid nohup $REMOTE_BIN_DIR/aegon_shard_server \
-        --bind 0.0.0.0:$SHARD_PORT \
-        --shard-log-capacity $SHARD_LOG_CAPACITY \
-        --kzh-k $KZH_K \
-        --setup-seed $SETUP_SEED \
-        --shard-id $i \
-        --prefill-count $per_shard \
-        --prefill-seed $shard_prefill_seed \
-        > /tmp/aegon-shard.log 2>&1 < /dev/null & \
-      echo \$! > /tmp/aegon-shard.pid; \
-      disown 2>/dev/null || true; \
-      exit 0"
+    (
+      log "[$name] uploading aegon_shard_server"
+      scp_to "$name" "$remote_bin_dir/aegon_shard_server"
+      remote "$name" "sudo mkdir -p $REMOTE_BIN_DIR && \
+        sudo mv /tmp/aegon_shard_server $REMOTE_BIN_DIR/ && \
+        sudo chmod +x $REMOTE_BIN_DIR/aegon_shard_server"
+      log "[$name] starting shard server (shard_id=$i, prefill_count=$per_shard, prefill_seed=$shard_prefill_seed)"
+      # PID-file restart pattern (see cluster.sh for the rationale on
+      # avoiding `pkill -f`).  setsid + disown + `exit 0` so the remote
+      # shell can exit immediately even though the shard server is
+      # still mid-SRS-gen and holds onto inherited fds.
+      remote "$name" "if [ -f /tmp/aegon-shard.pid ]; then \
+          kill \$(cat /tmp/aegon-shard.pid) 2>/dev/null || true; \
+          sleep 1; \
+        fi; \
+        mkdir -p \$HOME/aegon-run \$HOME/artifacts/srs && \
+        cd \$HOME/aegon-run && \
+        setsid nohup $REMOTE_BIN_DIR/aegon_shard_server \
+          --bind 0.0.0.0:$SHARD_PORT \
+          --shard-log-capacity $SHARD_LOG_CAPACITY \
+          --kzh-k $KZH_K \
+          --setup-seed $SETUP_SEED \
+          --shard-id $i \
+          --prefill-count $per_shard \
+          --prefill-seed $shard_prefill_seed \
+          > /tmp/aegon-shard.log 2>&1 < /dev/null & \
+        echo \$! > /tmp/aegon-shard.pid; \
+        disown 2>/dev/null || true; \
+        exit 0"
+      log "[$name] deploy done"
+    ) &
+    deploy_pids+=("$!")
   done
+  log "waiting on ${#deploy_pids[@]} per-shard deploys (parallel)..."
+  local failed=0
+  for pid in "${deploy_pids[@]}"; do
+    wait "$pid" || failed=$((failed + 1))
+  done
+  if (( failed > 0 )); then
+    die "$failed shard deploy(s) failed — inspect output above and run 'logs <i>' to debug"
+  fi
 
   # ---- push to coordinator ----
   local cname; cname="$(coord_name)"
