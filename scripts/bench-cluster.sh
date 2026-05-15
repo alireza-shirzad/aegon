@@ -283,13 +283,17 @@ cmd_deploy() {
     log "[$name] starting shard server (shard_id=$i, prefill_count=$per_shard, prefill_seed=$shard_prefill_seed)"
     # PID-file restart pattern (see cluster.sh for the rationale on
     # avoiding `pkill -f`).
+    # setsid + disown + explicit `exit 0` so gcloud ssh's pty channel
+    # closes the moment the shell finishes, even though the shard
+    # server is mid-SRS-gen. Without these, gcloud waits on the
+    # session until the long-running child terminates.
     remote "$name" "if [ -f /tmp/aegon-shard.pid ]; then \
         kill \$(cat /tmp/aegon-shard.pid) 2>/dev/null || true; \
         sleep 1; \
       fi; \
       mkdir -p \$HOME/aegon-run \$HOME/artifacts/srs && \
       cd \$HOME/aegon-run && \
-      nohup $REMOTE_BIN_DIR/aegon_shard_server \
+      setsid nohup $REMOTE_BIN_DIR/aegon_shard_server \
         --bind 0.0.0.0:$SHARD_PORT \
         --shard-log-capacity $SHARD_LOG_CAPACITY \
         --kzh-k $KZH_K \
@@ -298,7 +302,9 @@ cmd_deploy() {
         --prefill-count $per_shard \
         --prefill-seed $shard_prefill_seed \
         > /tmp/aegon-shard.log 2>&1 < /dev/null & \
-      echo \$! > /tmp/aegon-shard.pid"
+      echo \$! > /tmp/aegon-shard.pid; \
+      disown 2>/dev/null || true; \
+      exit 0"
   done
 
   # ---- push to coordinator ----
