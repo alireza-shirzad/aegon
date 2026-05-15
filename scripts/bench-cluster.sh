@@ -287,6 +287,8 @@ cmd_deploy() {
         kill \$(cat /tmp/aegon-shard.pid) 2>/dev/null || true; \
         sleep 1; \
       fi; \
+      mkdir -p \$HOME/aegon-run \$HOME/artifacts/srs && \
+      cd \$HOME/aegon-run && \
       nohup $REMOTE_BIN_DIR/aegon_shard_server \
         --bind 0.0.0.0:$SHARD_PORT \
         --shard-log-capacity $SHARD_LOG_CAPACITY \
@@ -322,7 +324,9 @@ cmd_bench() {
   log "endpoints (first 2 shown): $(echo "$csv" | cut -d, -f1-2),..."
   log "[$cname] running aegon_coordinator_bench"
   remote "$cname" \
-    "$REMOTE_BIN_DIR/aegon_coordinator_bench \
+    "mkdir -p \$HOME/aegon-run \$HOME/artifacts/srs && \
+     cd \$HOME/aegon-run && \
+     $REMOTE_BIN_DIR/aegon_coordinator_bench \
        --shard-log-capacity $SHARD_LOG_CAPACITY \
        --kzh-k $KZH_K \
        --setup-seed $SETUP_SEED \
