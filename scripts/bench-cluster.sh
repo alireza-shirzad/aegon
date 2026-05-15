@@ -312,7 +312,7 @@ cmd_deploy() {
       remote "$name" "if [ -f /tmp/aegon-shard.pid ]; then \
           kill \$(cat /tmp/aegon-shard.pid) 2>/dev/null || true; \
         fi; \
-        pkill -x aegon_shard_server 2>/dev/null || true; \
+        pkill -x aegon_shard_ser 2>/dev/null || true; \
         sleep 2; \
         mkdir -p \$HOME/aegon-run \$HOME/artifacts/srs && \
         cd \$HOME/aegon-run && \
