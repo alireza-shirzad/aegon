@@ -94,6 +94,20 @@ remote() {
   local cmd="$2"
   if [[ "${3:-}" == "stream" ]]; then
     gcloud compute ssh "$instance" --zone="$ZONE" --tunnel-through-iap --command="$cmd"
+  elif [[ "${3:-}" == "fire-and-forget" ]]; then
+    # IAP-tunnel ssh teardown can hang for minutes after the remote
+    # command exits. For start commands where the remote process is
+    # already detached (setsid + nohup), we don't care whether the
+    # gcloud client cleans up — kill it after a short grace window.
+    # Portable timeout (macOS has neither `timeout` nor `gtimeout`
+    # out of the box): background gcloud, sleep, send SIGTERM.
+    gcloud compute ssh "$instance" --zone="$ZONE" --tunnel-through-iap \
+      --quiet --command="$cmd" &
+    local _ssh_pid=$!
+    ( sleep 30 && kill "$_ssh_pid" 2>/dev/null ) &
+    local _watchdog_pid=$!
+    wait "$_ssh_pid" 2>/dev/null || true
+    kill "$_watchdog_pid" 2>/dev/null || true
   else
     gcloud compute ssh "$instance" --zone="$ZONE" --tunnel-through-iap --quiet --command="$cmd"
   fi
@@ -308,7 +322,8 @@ cmd_deploy() {
           > /tmp/aegon-shard.log 2>&1 < /dev/null & \
         echo \$! > /tmp/aegon-shard.pid; \
         disown 2>/dev/null || true; \
-        exit 0"
+        exit 0" \
+        fire-and-forget
       log "[$name] deploy done"
     ) &
     deploy_pids+=("$!")
