@@ -302,16 +302,21 @@ cmd_deploy() {
         sudo chmod +x $REMOTE_BIN_DIR/aegon_shard_server"
       log "[$name] starting shard server (shard_id=$i, prefill_count=$per_shard, prefill_seed=$shard_prefill_seed)"
       # PID-file restart pattern (see cluster.sh for the rationale on
-      # avoiding `pkill -f`).  setsid + disown + `exit 0` so the remote
-      # shell can exit immediately even though the shard server is
-      # still mid-SRS-gen and holds onto inherited fds.
+      # avoiding `pkill -f`). We deliberately do NOT use `setsid` here:
+      # it forks when the caller is a session leader, so $! would point
+      # at a short-lived intermediate rather than the shard server, and
+      # the next deploy's PID-file kill would no-op (leaving the old
+      # server holding port 50051). Plain `nohup ... &` keeps $! aligned
+      # with the actual shard server. The SSH-session hang that setsid
+      # was trying to solve is handled by `fire-and-forget` instead.
       remote "$name" "if [ -f /tmp/aegon-shard.pid ]; then \
           kill \$(cat /tmp/aegon-shard.pid) 2>/dev/null || true; \
-          sleep 1; \
         fi; \
+        pkill -x aegon_shard_server 2>/dev/null || true; \
+        sleep 2; \
         mkdir -p \$HOME/aegon-run \$HOME/artifacts/srs && \
         cd \$HOME/aegon-run && \
-        setsid nohup $REMOTE_BIN_DIR/aegon_shard_server \
+        nohup $REMOTE_BIN_DIR/aegon_shard_server \
           --bind 0.0.0.0:$SHARD_PORT \
           --shard-log-capacity $SHARD_LOG_CAPACITY \
           --kzh-k $KZH_K \
