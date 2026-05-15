@@ -89,6 +89,7 @@ tracing = { version = "0.1.40", optional = true }
 
 [dev-dependencies]
 criterion = "0.5"
+divan = { git = "https://github.com/alireza-shirzad/divan.git" }
 serial_test = "2"
 proptest = "1"
 proptest-derive = "0.4"
@@ -117,6 +118,10 @@ required-features = ["bench"]
 name = "directory"
 harness = false
 required-features = ["bench"]
+
+[[bench]]
+name = "publish_sweep"
+harness = false
 
 [build-dependencies]
 tonic-build = "0.12"

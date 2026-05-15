@@ -41,7 +41,7 @@ use super::error::AegonError;
 use super::hash::{bool_index_to_point, HashSuite, Sha256Hash};
 use super::server::Aegon;
 use super::types::{
-    AegonPcs, AuditState, EpochCommitment, HistoryOpenings, InvarianceProof, Label, RandPair, Value,
+    AegonPcs, AuditState, EpochCommitment, HistoryOpenings, Label, RandPair, Value,
 };
 
 /// Where the shards live, and how the coordinator talks to them.
@@ -371,9 +371,7 @@ pub type EpochDigest = [u8; 32];
 /// [`super::server::Aegon::publish_phase_1_at_slots`].
 ///
 /// Field order is the wire-format order. CanonicalSerialize emits the
-/// fields in declaration order, so the on-wire bytes are identical to
-/// the legacy `(Vec<bool>, F, F)` tuple — older audit logs round-trip
-/// unchanged.
+/// fields in declaration order.
 #[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
 pub struct ShardWrite<F: Field> {
     /// Slot inside *this* shard's polynomial — length equals
@@ -385,15 +383,15 @@ pub struct ShardWrite<F: Field> {
     pub slot_bits: Vec<bool>,
     /// What to put at this slot in the **index** polynomial.
     ///
-    /// - `H_F(label)` when the label is brand-new in this epoch — the
-    ///   shard writes this hash as the slot's identity, which is what
-    ///   the lookup-side open-addressing trail checks against.
-    /// - **Zero** when the label already exists (the slot's identity
-    ///   was set in a prior epoch and must not change). Zero is the
-    ///   sentinel `Aegon::publish_phase_1_at_slots` interprets as
-    ///   "skip the identity write"; safe because `H_F(label)` is a
-    ///   hash output and never zero for any real label.
-    pub h_label_or_zero: F,
+    /// - `Some(H_F(label))` when the label is brand-new in this
+    ///   epoch — the shard writes this hash as the slot's identity,
+    ///   which is what the lookup-side open-addressing trail checks
+    ///   against.
+    /// - `None` when the label already exists (the slot's identity
+    ///   was set in a prior epoch and must not change). Tells
+    ///   `Aegon::publish_phase_1_at_slots` to skip the index-poly
+    ///   write at this slot.
+    pub h_label: Option<F>,
     /// What to put at this slot in the **value** polynomial. Always
     /// `H_F(value)` — the value polynomial is overwritten every
     /// epoch the label appears, so there's no analogous "skip" mode.
@@ -501,14 +499,6 @@ pub struct ShardedConsistencyProof<E: Pairing, P: AegonPcs<E>> {
     pub value_witness: ShardedRandPair<E, P>,
 }
 
-/// Per-epoch invariance proof. The auditor verifies the Merkle root
-/// over the new shard commits, derives the shared FS scalars, and
-/// checks each shard's inner invariance witness.
-#[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
-pub struct ShardedInvarianceProof<E: Pairing, P: AegonPcs<E>> {
-    pub per_shard: Vec<InvarianceProof<E, P>>,
-}
-
 /// Verifier-side bundle, including the deployment's `log_n_shards`
 /// (clients need it to recompute the probe trail).
 #[derive(Clone)]
@@ -608,7 +598,12 @@ where
     P: AegonPcs<E> + Send + Sync + 'static,
     P::ProverParam: PCSGlobalParam + CanonicalDeserialize + Send + Sync + 'static,
     P::VerifierParam: PCSGlobalParam + CanonicalDeserialize + Send + Sync + 'static,
-    P::Commitment: Clone + Send + Sync + 'static,
+    P::Commitment: Clone
+        + Send
+        + Sync
+        + 'static
+        + std::ops::Add<Output = P::Commitment>
+        + std::ops::Mul<E::ScalarField, Output = P::Commitment>,
     P::Proof: Clone + Send + Sync + 'static,
     P::State: Send + Sync + 'static,
     P::Polynomial: Send + Sync,
@@ -911,18 +906,29 @@ where
     ///      — coordinator advances `(r_index, r_value, epoch)`, builds
     ///      the Merkle root, and mirrors raw `(label, value)` bytes
     ///      into Redis for the lookup path.
+    #[cfg_attr(
+        feature = "tracing_instrument",
+        tracing::instrument(
+            level = "debug",
+            skip_all,
+            name = "ShardedAegon::Publish",
+            fields(num_updates = updates.len())
+        )
+    )]
     pub fn publish(
         &mut self,
         updates: &[(Label, Value)],
-    ) -> Result<(ShardedEpochCommitment<E, P>, ShardedInvarianceProof<E, P>), AegonError> {
+    ) -> Result<ShardedEpochCommitment<E, P>, AegonError> {
         // There must not be any duplicate labels in the batch
         Self::reject_duplicate_labels(updates)?;
-
+        // Deciding where every update lands in the shards
         let (sub_batches, new_placements) = self.plan_phase_1_batches(updates)?;
+        // Run per shard commitments in parallel in each shard
         let (new_index_commits, new_value_commits) = self.run_phase_1(&sub_batches)?;
+        // Derive the FS challenges
         let (new_r_index, new_r_value) =
             self.derive_chain_scalars(&new_index_commits, &new_value_commits);
-        let (per_shard_commits, per_shard_invariance, per_shard_history) =
+        let (per_shard_commits, per_shard_history) =
             self.run_phase_2(new_r_index, new_r_value)?;
         let sharded_commit = self.finalize_epoch(per_shard_commits, new_r_index, new_r_value);
         self.persist_publish_to_db(
@@ -931,17 +937,16 @@ where
             &sharded_commit,
             &per_shard_history,
         )?;
-        Ok((
-            sharded_commit,
-            ShardedInvarianceProof {
-                per_shard: per_shard_invariance,
-            },
-        ))
+        Ok(sharded_commit)
     }
 
     /// O(n) scan for `label` appearing twice. Errors out the whole
     /// batch on the first collision so phase 1 never sees a malformed
     /// input.
+    #[cfg_attr(
+        feature = "tracing_instrument",
+        tracing::instrument(level = "debug", skip_all, name = "ShardedAegon::RejectDuplicates")
+    )]
     fn reject_duplicate_labels(updates: &[(Label, Value)]) -> Result<(), AegonError> {
         let mut seen: HashSet<&[u8]> = HashSet::with_capacity(updates.len());
         for (label, _) in updates {
@@ -954,7 +959,7 @@ where
 
     /// Decide where every `(label, value)` write lands. Returns one
     /// sub-batch per shard, each entry shaped
-    /// `(slot_bits, h_label_or_zero, h_value)`:
+    /// `ShardWrite { slot_bits, h_label, h_value }`:
     ///
     /// - **New label**: open-addressing finds the first empty
     ///   `(shard_id, slot)`; the trail is cached in `self.routing`,
@@ -965,6 +970,10 @@ where
     ///
     /// `in_batch_claimed` per-shard sets ensure two new labels in the
     /// same publish can't collide on the same empty slot.
+    #[cfg_attr(
+        feature = "tracing_instrument",
+        tracing::instrument(level = "debug", skip_all, name = "ShardedAegon::PlanPhase1")
+    )]
     fn plan_phase_1_batches(
         &mut self,
         updates: &[(Label, Value)],
@@ -981,7 +990,7 @@ where
                 let (sid, slot_bits) = routing.final_assignment().clone();
                 sub_batches[sid as usize].push(ShardWrite {
                     slot_bits,
-                    h_label_or_zero: E::ScalarField::zero(),
+                    h_label: None,
                     h_value,
                 });
             } else {
@@ -991,7 +1000,7 @@ where
                 let slot_idx = bool_index_to_usize_dims(&slot_bits, &self.shard_dims);
                 sub_batches[sid as usize].push(ShardWrite {
                     slot_bits,
-                    h_label_or_zero: h_label,
+                    h_label: Some(h_label),
                     h_value,
                 });
                 new_placements.push(NewPlacement {
@@ -1010,6 +1019,10 @@ where
     /// two shard-id-ordered vectors. Shards are independent (separate
     /// polynomials + state), so rayon's data-parallel pattern is
     /// safe; only the read-only prover_param is shared.
+    #[cfg_attr(
+        feature = "tracing_instrument",
+        tracing::instrument(level = "debug", skip_all, name = "ShardedAegon::RunPhase1")
+    )]
     fn run_phase_1(
         &mut self,
         sub_batches: &[SubBatch<E::ScalarField>],
@@ -1028,6 +1041,14 @@ where
     /// new data commitment)` — binding to all N commits up front is
     /// what stops a malicious server from re-tuning any one shard's
     /// commit after observing the chain randomness.
+    #[cfg_attr(
+        feature = "tracing_instrument",
+        tracing::instrument(
+            level = "debug",
+            skip_all,
+            name = "ShardedAegon::DeriveChainScalars"
+        )
+    )]
     fn derive_chain_scalars(
         &self,
         new_index_commits: &[P::Commitment],
@@ -1048,48 +1069,36 @@ where
 
     /// Drive every shard's `publish_phase_2` with the shared scalars
     /// in parallel and split the per-shard `(EpochCommitment,
-    /// InvarianceProof, HistoryOpenings)` triples into shard-id-ordered
-    /// vectors. After the commitment-homomorphism audit refactor the
-    /// `InvarianceProof` is empty, so the second vec is essentially
-    /// `Vec<()>` — the auditor recovers what it needs from the
-    /// per-shard commitments. The third vec carries the §6.4 history
-    /// witnesses (one `HistoryOpenings` per shard, possibly empty).
+    /// HistoryOpenings)` pairs into shard-id-ordered vectors. The
+    /// auditor recovers everything it needs from the per-shard
+    /// commitments via the commitment-homomorphism check; the
+    /// `HistoryOpenings` vec carries the §6.4 history witnesses (one
+    /// per shard, possibly empty).
+    #[cfg_attr(
+        feature = "tracing_instrument",
+        tracing::instrument(level = "debug", skip_all, name = "ShardedAegon::RunPhase2")
+    )]
     fn run_phase_2(
         &mut self,
         new_r_index: E::ScalarField,
         new_r_value: E::ScalarField,
-    ) -> Result<
-        (
-            Vec<EpochCommitment<E, P>>,
-            Vec<InvarianceProof<E, P>>,
-            Vec<HistoryOpenings<E, P>>,
-        ),
-        AegonError,
-    > {
-        let phase_2: Vec<(
-            EpochCommitment<E, P>,
-            InvarianceProof<E, P>,
-            HistoryOpenings<E, P>,
-        )> = self
+    ) -> Result<(Vec<EpochCommitment<E, P>>, Vec<HistoryOpenings<E, P>>), AegonError> {
+        let phase_2: Vec<(EpochCommitment<E, P>, HistoryOpenings<E, P>)> = self
             .shards
             .par_iter_mut()
             .map(|shard| shard.publish_phase_2(new_r_index, new_r_value))
             .collect::<Result<Vec<_>, _>>()?;
-        let mut commits = Vec::with_capacity(phase_2.len());
-        let mut invariances = Vec::with_capacity(phase_2.len());
-        let mut histories = Vec::with_capacity(phase_2.len());
-        for (c, i, h) in phase_2 {
-            commits.push(c);
-            invariances.push(i);
-            histories.push(h);
-        }
-        Ok((commits, invariances, histories))
+        Ok(phase_2.into_iter().unzip())
     }
 
     /// Coordinator-side bookkeeping: advance `(r_index, r_value,
     /// epoch)`, build the Merkle root over the per-shard commits, and
     /// append the new `ShardedEpochCommitment` to the history. Returns
     /// the commitment the caller will publish externally.
+    #[cfg_attr(
+        feature = "tracing_instrument",
+        tracing::instrument(level = "debug", skip_all, name = "ShardedAegon::FinalizeEpoch")
+    )]
     fn finalize_epoch(
         &mut self,
         per_shard_commits: Vec<EpochCommitment<E, P>>,
@@ -1125,6 +1134,10 @@ where
     /// return the value alongside the proof, and the durability layer
     /// for crash recovery; the verifier still re-hashes everything it
     /// receives. No-op when no DB was configured (`DbSource::None`).
+    #[cfg_attr(
+        feature = "tracing_instrument",
+        tracing::instrument(level = "debug", skip_all, name = "ShardedAegon::PersistToDb")
+    )]
     fn persist_publish_to_db(
         &self,
         updates: &[(Label, Value)],
@@ -1677,7 +1690,6 @@ pub fn verify_sharded_invariance<E, P>(
     audit_state: &mut AuditState<E::ScalarField>,
     prev: &ShardedEpochCommitment<E, P>,
     next: &ShardedEpochCommitment<E, P>,
-    proof: &ShardedInvarianceProof<E, P>,
 ) -> Result<bool, AegonError>
 where
     E: Pairing,
@@ -1698,11 +1710,6 @@ where
             "sharded audit: prev and next per_shard lengths differ",
         ));
     }
-    if proof.per_shard.len() != next.per_shard.len() {
-        return Err(AegonError::Verification(
-            "sharded audit: invariance per_shard length does not match commit per_shard length",
-        ));
-    }
 
     // (1) Merkle root reconstructs from the announced per-shard commits.
     if merkle_root(&next.per_shard) != next.merkle_root {
@@ -1715,11 +1722,10 @@ where
     let (new_r_index, new_r_value) =
         rederive_sharded_fs_scalars::<E, P>(audit_state.r_index, audit_state.r_value, next);
 
-    // (3) Per-shard chain checks with the *shared* scalars. The per-
-    // shard `InvarianceProof` is an empty marker now — all the bytes
-    // the auditor needs are in `prev.per_shard[i]` / `next.per_shard[i]`,
-    // and `verify_chain` does the homomorphism check directly on
-    // commitments.
+    // (3) Per-shard chain checks with the *shared* scalars. Every group
+    // element the auditor needs is in `prev.per_shard[i]` /
+    // `next.per_shard[i]`, and `verify_chain` does the homomorphism
+    // check directly on commitments.
     for i in 0..next.per_shard.len() {
         let prev_i = &prev.per_shard[i];
         let next_i = &next.per_shard[i];

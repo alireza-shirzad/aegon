@@ -17,7 +17,7 @@ service ShardService {
 
   // Phase 2: apply the shared FS scalars from the coordinator,
   // recommit rand polynomials, finalize the epoch. Returns the
-  // shard's new EpochCommitment + InvarianceProof.
+  // shard's new EpochCommitment + §6.4 HistoryOpenings.
   rpc PublishPhase2(PublishPhase2Request) returns (PublishPhase2Response);
 
   // Open-addressing helper: is the given slot already occupied in
@@ -40,9 +40,9 @@ service ShardService {
 
 message PublishPhase1Request {
   // Canonical-serialized Vec<ShardWrite<F>>. Field order on the wire
-  // is { slot_bits, h_label_or_zero, h_value } — byte-identical to the
-  // legacy (Vec<bool>, F, F) tuple it replaced, so older audit logs
-  // round-trip unchanged.
+  // is { slot_bits, h_label, h_value }, where h_label is the
+  // CanonicalSerialize encoding of Option<F> (one-byte tag + F bytes
+  // when Some, single-byte 0 when None).
   bytes batch_bytes = 1;
 }
 
@@ -60,8 +60,6 @@ message PublishPhase2Request {
 message PublishPhase2Response {
   // Canonical-serialized EpochCommitment<E, P>.
   bytes epoch_commitment = 1;
-  // Canonical-serialized InvarianceProof<E, P>.
-  bytes invariance_proof = 2;
   // Canonical-serialized HistoryOpenings<E, P> — §6.4 history witnesses
   // covering every brand-new label this shard placed in the batch.
   // Empty when the shard's batch was value-updates only.

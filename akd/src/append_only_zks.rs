@@ -807,7 +807,7 @@ impl Azks {
         _parallelism_config: AzksParallelismConfig,
     ) -> Result<AppendOnlyProof, AkdError> {
         unimplemented!(
-            "AKD-on-Aegon: legacy AppendOnlyProof shape is SEEMless-only; use Directory::aegon_invariance_proofs"
+            "AKD-on-Aegon: legacy AppendOnlyProof shape is SEEMless-only; use Directory::aegon_epoch_commits"
         )
     }
 

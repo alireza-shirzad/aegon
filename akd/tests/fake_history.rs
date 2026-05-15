@@ -109,12 +109,7 @@ async fn audit_one_transition(
         .epoch_commitment(next_epoch)
         .await
         .expect("next commitment retained");
-    let chain = directory
-        .aegon_invariance_proofs(next_epoch - 1, next_epoch)
-        .await
-        .expect("single-transition invariance proof");
-    assert_eq!(chain.len(), 1);
-    let ok = aegon_facade::verify_invariance(ctx, audit_state, prev, &next, &chain[0])
+    let ok = aegon_facade::verify_invariance(ctx, audit_state, prev, &next)
         .expect("verify_invariance");
     assert!(
         ok,
@@ -408,21 +403,10 @@ async fn interleaved_eight_epoch_lifecycle_with_updates() {
     // what data flowed through them.
     let mut fresh_state = AuditState::default();
     let mut fresh_prev = directory.epoch_commitment(0).await.unwrap();
-    let chain = directory
-        .aegon_invariance_proofs(0, 8)
-        .await
-        .expect("full chain");
-    assert_eq!(chain.len(), 8);
-    for (i, proof) in chain.iter().enumerate() {
-        let next = directory.epoch_commitment((i + 1) as u64).await.unwrap();
-        let ok = aegon_facade::verify_invariance(
-            &ctx,
-            &mut fresh_state,
-            &fresh_prev,
-            &next,
-            proof,
-        )
-        .expect("verify_invariance");
+    for i in 0..8u64 {
+        let next = directory.epoch_commitment(i + 1).await.unwrap();
+        let ok = aegon_facade::verify_invariance(&ctx, &mut fresh_state, &fresh_prev, &next)
+            .expect("verify_invariance");
         assert!(ok, "full chain replay must accept transition {i}");
         fresh_prev = next;
     }

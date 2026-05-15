@@ -12,7 +12,7 @@
 use akd::aegon::presets;
 use akd::aegon::{
     verify_consistency, verify_invariance, verify_lookup, Aegon, AegonConfig, AuditState,
-    InvarianceProof, Sha256Hash, VerifierContext,
+    Sha256Hash, VerifierContext,
 };
 use ark_bn254::Bn254;
 use rand_chacha::rand_core::SeedableRng;
@@ -96,7 +96,7 @@ fn publish_lookup_verify_happy_path() {
         (b"carol".to_vec(), b"carol-key-v1".to_vec()),
     ];
 
-    let (commitment, _audit) = server.publish(&updates).expect("publish");
+    let commitment = server.publish(&updates).expect("publish");
     assert_eq!(commitment.epoch, 1);
 
     let ctx: VerifierContext<Bn254, Pcs> = server.verifier_context();
@@ -112,7 +112,7 @@ fn publish_lookup_verify_happy_path() {
 fn verify_rejects_wrong_value() {
     let mut server = fresh_aegon();
     let label = b"alice".to_vec();
-    let (commitment, _audit) = server
+    let commitment = server
         .publish(&[(label.clone(), b"alice-key-v1".to_vec())])
         .expect("publish");
 
@@ -142,7 +142,7 @@ fn republish_updates_value_in_place() {
     let _ = server
         .publish(&[(label.clone(), b"v1".to_vec())])
         .expect("publish v1");
-    let (commitment_v2, _audit) = server
+    let commitment_v2 = server
         .publish(&[(label.clone(), b"v2".to_vec())])
         .expect("publish v2");
 
@@ -179,51 +179,27 @@ fn verify_invariance_accepts_honest_chain() {
     let ctx = server.verifier_context();
     let mut audit_state = AuditState::<<Bn254 as ark_ec::pairing::Pairing>::ScalarField>::default();
 
-    let (com1, audit1) = server.publish(&[]).expect("publish empty");
-    let ok = verify_invariance::<Bn254, Pcs>(&ctx, &mut audit_state, &prev0, &com1, &audit1)
+    let com1 = server.publish(&[]).expect("publish empty");
+    let ok = verify_invariance::<Bn254, Pcs>(&ctx, &mut audit_state, &prev0, &com1)
         .expect("audit 0->1");
     assert!(ok);
 
-    let (com2, audit2) = server
+    let com2 = server
         .publish(&[
             (b"alice".to_vec(), b"a1".to_vec()),
             (b"bob".to_vec(), b"b1".to_vec()),
         ])
         .expect("publish two labels");
-    let ok = verify_invariance::<Bn254, Pcs>(&ctx, &mut audit_state, &com1, &com2, &audit2)
+    let ok = verify_invariance::<Bn254, Pcs>(&ctx, &mut audit_state, &com1, &com2)
         .expect("audit 1->2");
     assert!(ok);
 
-    let (com3, audit3) = server
+    let com3 = server
         .publish(&[(b"alice".to_vec(), b"a2".to_vec())])
         .expect("publish update");
-    let ok = verify_invariance::<Bn254, Pcs>(&ctx, &mut audit_state, &com2, &com3, &audit3)
+    let ok = verify_invariance::<Bn254, Pcs>(&ctx, &mut audit_state, &com2, &com3)
         .expect("audit 2->3");
     assert!(ok);
-}
-
-#[test]
-fn verify_invariance_rejects_tampered_proof() {
-    let mut server = fresh_aegon();
-    let prev0 = server.current_commitment();
-    let (com1, mut audit1) = server
-        .publish(&[(b"alice".to_vec(), b"a1".to_vec())])
-        .expect("publish");
-
-    use ark_ff::UniformRand;
-    let mut rng = ChaCha20Rng::seed_from_u64(0xBADBADBA);
-    audit1.index_chain.next_rand_eval +=
-        <Bn254 as ark_ec::pairing::Pairing>::ScalarField::rand(&mut rng);
-
-    let mut audit_state = AuditState::<<Bn254 as ark_ec::pairing::Pairing>::ScalarField>::default();
-    let result = verify_invariance::<Bn254, Pcs>(
-        &server.verifier_context(),
-        &mut audit_state,
-        &prev0,
-        &com1,
-        &audit1,
-    );
-    assert!(matches!(result, Ok(false)));
 }
 
 #[test]
@@ -231,22 +207,15 @@ fn verify_invariance_rejects_skipped_epoch() {
     let mut server = fresh_aegon();
     let prev0 = server.current_commitment();
     let _ = server.publish(&[]).expect("e1");
-    let (com2, _) = server.publish(&[]).expect("e2");
+    let com2 = server.publish(&[]).expect("e2");
     let mut audit_state = AuditState::<<Bn254 as ark_ec::pairing::Pairing>::ScalarField>::default();
     let result = verify_invariance::<Bn254, Pcs>(
         &server.verifier_context(),
         &mut audit_state,
         &prev0,
         &com2,
-        &dummy_invariance_proof(),
     );
     assert!(matches!(result, Err(akd::aegon::AegonError::Verification(_))));
-}
-
-fn dummy_invariance_proof() -> InvarianceProof<Bn254, Pcs> {
-    let mut server = fresh_aegon();
-    let (_, p) = server.publish(&[]).expect("dummy publish");
-    p
 }
 
 // --------------------------------------------------------------------
@@ -257,13 +226,13 @@ fn dummy_invariance_proof() -> InvarianceProof<Bn254, Pcs> {
 fn verify_consistency_accepts_static_value_and_index() {
     let mut server = fresh_aegon();
     let label = b"alice".to_vec();
-    let (s0_commit, _) = server
+    let s0_commit = server
         .publish(&[(label.clone(), b"a1".to_vec())])
         .expect("e1");
     let _ = server
         .publish(&[(b"bob".to_vec(), b"b1".to_vec())])
         .expect("e2");
-    let (s1_commit, _) = server
+    let s1_commit = server
         .publish(&[(b"carol".to_vec(), b"c1".to_vec())])
         .expect("e3");
 
@@ -290,13 +259,13 @@ fn verify_consistency_accepts_static_value_and_index() {
 fn verify_consistency_rejects_changed_value() {
     let mut server = fresh_aegon();
     let label = b"alice".to_vec();
-    let (s0_commit, _) = server
+    let s0_commit = server
         .publish(&[(label.clone(), b"a1".to_vec())])
         .expect("e1");
     let lookup_at_s0 = server.lookup(&label).expect("lookup s0");
     let expected_ctr0 = lookup_at_s0.ctr0;
 
-    let (s1_commit, _) = server
+    let s1_commit = server
         .publish(&[(label.clone(), b"a2".to_vec())])
         .expect("e2");
 
@@ -319,10 +288,10 @@ fn verify_consistency_rejects_changed_value() {
 fn verify_consistency_rejects_wrong_expected_ctr0() {
     let mut server = fresh_aegon();
     let label = b"alice".to_vec();
-    let (s0_commit, _) = server
+    let s0_commit = server
         .publish(&[(label.clone(), b"a1".to_vec())])
         .expect("e1");
-    let (s1_commit, _) = server.publish(&[]).expect("e2");
+    let s1_commit = server.publish(&[]).expect("e2");
     let lookup = server.lookup(&label).expect("lookup");
     let proof = server
         .consistency_proof(&label, s0_commit.epoch)
@@ -353,7 +322,7 @@ fn private_mode_lookup_and_audit_roundtrip() {
     let value = b"alice-key-v1".to_vec();
     let prev = server.current_commitment();
 
-    let (commitment, audit) = server
+    let commitment = server
         .publish(&[(label.clone(), value.clone())])
         .expect("private publish");
     let ctx = server.verifier_context();
@@ -366,8 +335,8 @@ fn private_mode_lookup_and_audit_roundtrip() {
 
     // Auditor invariance
     let mut audit_state = AuditState::<<Bn254 as ark_ec::pairing::Pairing>::ScalarField>::default();
-    let ok =
-        verify_invariance::<Bn254, Pcs>(&ctx, &mut audit_state, &prev, &commitment, &audit).expect("audit");
+    let ok = verify_invariance::<Bn254, Pcs>(&ctx, &mut audit_state, &prev, &commitment)
+        .expect("audit");
     assert!(ok);
 }
 
@@ -393,33 +362,33 @@ fn end_to_end_two_batches_with_idle_epochs() {
         .collect();
 
     // Epoch 1: batch1 signs up.
-    let (com1, audit1) = server.publish(&batch1).expect("publish batch1");
+    let com1 = server.publish(&batch1).expect("publish batch1");
     assert!(
-        verify_invariance::<Bn254, Pcs>(&ctx, &mut audit_state, &prev0, &com1, &audit1)
+        verify_invariance::<Bn254, Pcs>(&ctx, &mut audit_state, &prev0, &com1)
             .expect("audit 0->1"),
         "auditor must accept honest 0->1 transition",
     );
 
     // Epoch 2: an idle epoch passes (no signups, no value updates).
-    let (com2, audit2) = server.publish(&[]).expect("idle epoch 1->2");
+    let com2 = server.publish(&[]).expect("idle epoch 1->2");
     assert!(
-        verify_invariance::<Bn254, Pcs>(&ctx, &mut audit_state, &com1, &com2, &audit2)
+        verify_invariance::<Bn254, Pcs>(&ctx, &mut audit_state, &com1, &com2)
             .expect("audit 1->2"),
         "auditor must accept honest idle 1->2 transition",
     );
 
     // Epoch 3: batch2 signs up.
-    let (com3, audit3) = server.publish(&batch2).expect("publish batch2");
+    let com3 = server.publish(&batch2).expect("publish batch2");
     assert!(
-        verify_invariance::<Bn254, Pcs>(&ctx, &mut audit_state, &com2, &com3, &audit3)
+        verify_invariance::<Bn254, Pcs>(&ctx, &mut audit_state, &com2, &com3)
             .expect("audit 2->3"),
         "auditor must accept honest 2->3 transition",
     );
 
     // Epoch 4: another idle epoch passes.
-    let (com4, audit4) = server.publish(&[]).expect("idle epoch 3->4");
+    let com4 = server.publish(&[]).expect("idle epoch 3->4");
     assert!(
-        verify_invariance::<Bn254, Pcs>(&ctx, &mut audit_state, &com3, &com4, &audit4)
+        verify_invariance::<Bn254, Pcs>(&ctx, &mut audit_state, &com3, &com4)
             .expect("audit 3->4"),
         "auditor must accept honest idle 3->4 transition",
     );

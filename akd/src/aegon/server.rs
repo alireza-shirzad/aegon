@@ -23,7 +23,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::marker::PhantomData;
 
 use ark_ec::pairing::Pairing;
-use ark_ff::Zero;
+use ark_ff::{One, UniformRand, Zero};
 use ark_poly::SparseMultilinearExtension;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::rand::Rng;
@@ -38,8 +38,8 @@ use super::fs::derive_chain_scalar;
 use super::hash::{bool_index_to_point, bool_index_to_usize, HashSuite, Sha256Hash};
 use super::sharded::ShardWrite;
 use super::types::{
-    AegonPcs, EpochCommitment, HistoryOpeningEntry, HistoryOpenings, InvarianceProof, Label,
-    LookupProof, RandPair, Value,
+    AegonPcs, EpochCommitment, HistoryOpeningEntry, HistoryOpenings, Label, LookupProof, RandPair,
+    Value,
 };
 
 /// Snapshot of the polynomials needed for serving consistency proofs at
@@ -178,8 +178,23 @@ struct PendingPublish<E: Pairing, P: AegonPcs<E>> {
     new_index_state: P::State,
     new_value_com: P::Commitment,
     new_value_state: P::State,
+    /// Commitment of the **delta** polynomial committed in phase 1 —
+    /// i.e. only the slots this batch touched, evaluations equal to
+    /// `new − prev`. Reused in phase 2 to derive the rand-poly
+    /// commitments via the homomorphism
+    /// `delta_rand_X_com = r_X · delta_X_com`, so phase 2 never has to
+    /// run another MSM over the rand polynomials.
+    delta_index_com: P::Commitment,
+    delta_value_com: P::Commitment,
+    /// Prover `State` for the same delta polynomials. The KZH-k aux
+    /// table over a batch-sized support is built in phase 1 (cost
+    /// `O(k · batch)`); phase 2 then uses the State homomorphism
+    /// `new_rand_state = prev_rand_state + r_X · delta_state` via
+    /// `P::fma_state` to avoid recomputing aux from scratch.
+    delta_index_state: P::State,
+    delta_value_state: P::State,
     /// Slot bits for every brand-new placement in this batch (entries
-    /// whose `h_label_or_zero != 0`). Populated by `publish_phase_1`,
+    /// whose `h_label` is `Some`). Populated by `publish_phase_1`,
     /// consumed by `publish_phase_2` to drive the §6.4 history-opening
     /// computation. Empty when the batch was value-updates only.
     new_label_slots: Vec<Vec<bool>>,
@@ -191,6 +206,13 @@ where
     P: AegonPcs<E>,
     P::ProverParam: PCSGlobalParam,
     P::VerifierParam: PCSGlobalParam,
+    // Incremental publish needs the commitment-side homomorphism:
+    // `prev + delta` for phase 1 data polys and `prev + r · delta` for
+    // phase 2 rand polys. KZH-k's KZHKCommitment satisfies all three
+    // (impls live in akd_core's structs.rs).
+    P::Commitment: Clone
+        + std::ops::Add<Output = P::Commitment>
+        + std::ops::Mul<E::ScalarField, Output = P::Commitment>,
     H: HashSuite<E::ScalarField>,
 {
     /// Generate an SRS, trim it, and initialise an empty Aegon. The
@@ -426,6 +448,77 @@ where
             _phantom: PhantomData,
         })
     }
+    /// **Benchmark-only bulk-load**: populate `count` random
+    /// `(slot, h_label, h_value)` entries directly into `index_poly` /
+    /// `value_poly`, then recommit and rebuild the prover state. Used
+    /// to bring a shard's polynomials to a "looks like the dictionary
+    /// already has N users" state without going through the full
+    /// publish protocol (which would serialize on the coordinator's
+    /// open-addressing trail). Leaves `epoch = 0`, `r_index = r_value
+    /// = 0`, and the rand polynomials empty — i.e. there's no FS-chain
+    /// history covering the prefill, so an auditor walking the chain
+    /// would only see transitions from this state forward, not into
+    /// it. **Do not use in production.**
+    ///
+    /// Slot collisions are handled by simple overwrite — at sub-50%
+    /// load factor (`count < 2^(log_capacity - 1)`) this is rare and
+    /// doesn't materially change the resulting polynomial support
+    /// size; at higher load factors `count` overstates the actual
+    /// populated cell count.
+    pub fn prefill_random<R: Rng>(
+        &mut self,
+        rng: &mut R,
+        count: usize,
+    ) -> Result<(), AegonError> {
+        if self.pending.is_some() {
+            return Err(AegonError::Config(
+                "prefill_random called with a pending publish".into(),
+            ));
+        }
+        if self.epoch != 0 {
+            return Err(AegonError::Config(
+                "prefill_random can only be called at epoch 0 (before any publish)".into(),
+            ));
+        }
+        let capacity = 1usize << self.log_capacity;
+        for _ in 0..count {
+            // `rng.next_u64() as usize % capacity` is biased for
+            // non-power-of-two `capacity`, but `capacity` here is
+            // exactly `2^log_capacity` so the modulo is a clean mask.
+            let slot = (rng.next_u64() as usize) & (capacity - 1);
+            let h_label = E::ScalarField::rand(rng);
+            let h_value = E::ScalarField::rand(rng);
+            self.index_poly.evaluations.insert(slot, h_label);
+            self.value_poly.evaluations.insert(slot, h_value);
+        }
+        // Recommit the populated data polynomials. Rand polys stay at
+        // zero — there's been no publish, so the chain randomness is
+        // still zero.
+        let (com_i, state_i) = commit_with_aux::<E, P>(&self.prover_param, &self.index_poly)?;
+        let (com_v, state_v) = commit_with_aux::<E, P>(&self.prover_param, &self.value_poly)?;
+        self.index_commitment = com_i;
+        self.index_state = state_i;
+        self.value_commitment = com_v;
+        self.value_state = state_v;
+        // Refresh the epoch-0 snapshot so consistency-proof queries
+        // against `epoch = 0` see the prefilled state, not the empty
+        // state that `setup` originally inserted.
+        self.epoch_history.insert(
+            0,
+            EpochSnapshot {
+                index_commitment: self.index_commitment.clone(),
+                value_commitment: self.value_commitment.clone(),
+                rand_index_poly: self.rand_index_poly.clone(),
+                rand_index_commitment: self.rand_index_commitment.clone(),
+                rand_index_state: self.rand_index_state.clone(),
+                rand_value_poly: self.rand_value_poly.clone(),
+                rand_value_commitment: self.rand_value_commitment.clone(),
+                rand_value_state: self.rand_value_state.clone(),
+            },
+        );
+        Ok(())
+    }
+
     pub fn log_capacity(&self) -> usize {
         self.log_capacity
     }
@@ -471,8 +564,9 @@ where
     }
 
     /// Apply a batch of `(label, value)` updates and produce a new epoch.
-    /// Returns the new commitment and the auditor-facing invariance proof
-    /// for the transition that was just performed.
+    /// Returns the new `EpochCommitment` — auditors verify the transition
+    /// straight off the commitment fields (commitment-homomorphism path),
+    /// no per-epoch proof bytes flow.
     ///
     /// Convenience wrapper around [`Self::publish_phase_1`] +
     /// [`Self::publish_phase_2`] for the single-shard case: derives the
@@ -483,7 +577,7 @@ where
     pub fn publish(
         &mut self,
         updates: &[(Label, Value)],
-    ) -> Result<(EpochCommitment<E, P>, InvarianceProof<E, P>), AegonError> {
+    ) -> Result<EpochCommitment<E, P>, AegonError> {
         let prev_r_index = self.r_index;
         let prev_r_value = self.r_value;
         let (new_index_com, new_value_com) = self.publish_phase_1(updates)?;
@@ -502,9 +596,8 @@ where
         // Redis to persist them to. Sharded callers go through
         // `ShardedAegon::publish`, which threads the openings into
         // `persist_publish_to_db`.
-        let (commit, invariance, _history) =
-            self.publish_phase_2(new_r_index, new_r_value)?;
-        Ok((commit, invariance))
+        let (commit, _history) = self.publish_phase_2(new_r_index, new_r_value)?;
+        Ok(commit)
     }
 
     /// First half of a sharded publish: apply data updates, commit the
@@ -538,12 +631,12 @@ where
         for (label, value) in updates {
             let (slot_bits, h_label_write) = match self.label_table.get(label) {
                 // Existing label — slot is fixed, no need to re-write h_label.
-                Some((slot, _ctr0)) => (slot.clone(), E::ScalarField::zero()),
+                Some((slot, _ctr0)) => (slot.clone(), None),
                 None => {
                     let (slot_bits, ctr0) = self.find_free_slot(label, &claimed)?;
                     self.label_table
                         .insert(label.clone(), (slot_bits.clone(), ctr0));
-                    (slot_bits, H::h_f(label))
+                    (slot_bits, Some(H::h_f(label)))
                 },
             };
             let usize_idx = bool_index_to_usize(&slot_bits, &self.dims);
@@ -551,7 +644,7 @@ where
             let h_value = H::h_f(value);
             batch.push(ShardWrite {
                 slot_bits,
-                h_label_or_zero: h_label_write,
+                h_label: h_label_write,
                 h_value,
             });
         }
@@ -567,6 +660,15 @@ where
     /// updated (the slot already holds the right `H_f(label)`). The
     /// `ShardedAegon` coordinator drives open addressing across all
     /// shards and feeds the decisions in via this method.
+    #[cfg_attr(
+        feature = "tracing_instrument",
+        tracing::instrument(
+            level = "debug",
+            skip_all,
+            name = "Aegon::PublishPhase1",
+            fields(batch_size = batch.len())
+        )
+    )]
     pub fn publish_phase_1_at_slots(
         &mut self,
         batch: &[ShardWrite<E::ScalarField>],
@@ -592,29 +694,98 @@ where
         let prev_rand_value_com = self.rand_value_commitment.clone();
         let prev_rand_value_state = self.rand_value_state.clone();
 
-        // Apply writes. Collect the slot_bits of brand-new placements
-        // (h_label_or_zero != 0) so phase 2 knows where to open for the
-        // §6.4 history witnesses without re-scanning the batch.
+        // Apply writes AND build delta polys in one pass. The deltas
+        // are sparse polynomials with support exactly equal to the
+        // touched slots — used below to commit + aux only the changes
+        // (cost `O(k · batch)`) instead of recomputing the commitment
+        // and aux over the full dictionary support (cost
+        // `O(k · current_nnz)`). Also collect new-placement slot bits
+        // for §6.4 history witnesses.
+        #[cfg(feature = "tracing_instrument")]
+        let _apply_writes_span =
+            tracing::debug_span!("Aegon::Phase1::ApplyWritesBuildDeltas").entered();
+        let mut delta_index_poly: SparseMultilinearExtension<E::ScalarField> =
+            SparseMultilinearExtension::from_evaluations(self.index_poly.num_vars, &[]);
+        let mut delta_value_poly: SparseMultilinearExtension<E::ScalarField> =
+            SparseMultilinearExtension::from_evaluations(self.value_poly.num_vars, &[]);
         let mut new_label_slots: Vec<Vec<bool>> = Vec::new();
         for ShardWrite {
             slot_bits,
-            h_label_or_zero,
+            h_label,
             h_value,
         } in batch
         {
             let usize_idx = bool_index_to_usize(slot_bits, &self.dims);
-            if !h_label_or_zero.is_zero() {
-                self.index_poly.evaluations.insert(usize_idx, *h_label_or_zero);
-                new_label_slots.push(slot_bits.clone());
+            // Value side: every batch entry updates value_poly. Compute
+            // the per-slot delta from the pre-update polynomial state,
+            // then commit the new value.
+            let old_value = self
+                .value_poly
+                .evaluations
+                .get(&usize_idx)
+                .copied()
+                .unwrap_or_else(<E::ScalarField as Zero>::zero);
+            let value_delta = *h_value - old_value;
+            if !value_delta.is_zero() {
+                delta_value_poly.evaluations.insert(usize_idx, value_delta);
             }
             self.set_value(usize_idx, *h_value);
+            // Index side: only brand-new placements write h_label. The
+            // old value at a brand-new slot is zero by construction
+            // (open-addressing picks empty slots), so the delta is just
+            // `h_label`.
+            if let Some(h_label) = h_label {
+                let old_index = self
+                    .index_poly
+                    .evaluations
+                    .get(&usize_idx)
+                    .copied()
+                    .unwrap_or_else(<E::ScalarField as Zero>::zero);
+                let index_delta = *h_label - old_index;
+                if !index_delta.is_zero() {
+                    delta_index_poly.evaluations.insert(usize_idx, index_delta);
+                }
+                self.index_poly.evaluations.insert(usize_idx, *h_label);
+                new_label_slots.push(slot_bits.clone());
+            }
         }
+        #[cfg(feature = "tracing_instrument")]
+        drop(_apply_writes_span);
 
-        // Recommit data polynomials.
-        let (new_index_com, new_index_state) =
-            commit_with_aux::<E, P>(&self.prover_param, &self.index_poly)?;
-        let (new_value_com, new_value_state) =
-            commit_with_aux::<E, P>(&self.prover_param, &self.value_poly)?;
+        // Commit + aux the delta polynomials (size `batch`). Cost is
+        // `O(batch)` for `P::commit` and `O(k · batch)` for the
+        // per-row aux fill inside `commit_with_aux`.
+        let (delta_index_com, delta_index_state) =
+            commit_with_aux::<E, P>(&self.prover_param, &delta_index_poly)?;
+        let (delta_value_com, delta_value_state) =
+            commit_with_aux::<E, P>(&self.prover_param, &delta_value_poly)?;
+
+        // Homomorphism on commitments and on the prover state:
+        //   new_com   = prev_com   + delta_com
+        //   new_state = prev_state + delta_state    (sparse-walk FMA)
+        // Both ops cost `O(|support(delta)|)` group ops, independent
+        // of how big the prior epoch's support is. See
+        // `KZHKState::iadd_scaled` for the per-row primitive.
+        #[cfg(feature = "tracing_instrument")]
+        let _combine_span = tracing::debug_span!("Aegon::Phase1::CombineHomomorphic").entered();
+        let new_index_com = prev_index_com.clone() + delta_index_com.clone();
+        let new_value_com = prev_value_com.clone() + delta_value_com.clone();
+        let mut new_index_state = prev_index_state.clone();
+        P::fma_state(
+            &self.prover_param,
+            &mut new_index_state,
+            E::ScalarField::one(),
+            &delta_index_state,
+        )?;
+        let mut new_value_state = prev_value_state.clone();
+        P::fma_state(
+            &self.prover_param,
+            &mut new_value_state,
+            E::ScalarField::one(),
+            &delta_value_state,
+        )?;
+        #[cfg(feature = "tracing_instrument")]
+        drop(_combine_span);
 
         self.pending = Some(PendingPublish {
             prev_index_poly,
@@ -633,6 +804,10 @@ where
             new_index_state,
             new_value_com: new_value_com.clone(),
             new_value_state,
+            delta_index_com,
+            delta_value_com,
+            delta_index_state,
+            delta_value_state,
             new_label_slots,
         });
 
@@ -642,13 +817,18 @@ where
     /// Second half of a sharded publish: consumes the pending state
     /// stashed by [`Self::publish_phase_1`], applies the externally-
     /// derived chain scalars to update the rand polynomials, commits
-    /// them, builds the invariance proof, and finalizes the new epoch.
+    /// them, and finalizes the new epoch. Returns the new
+    /// `EpochCommitment` together with the §6.4 history witnesses for
+    /// every brand-new placement this batch touched.
+    #[cfg_attr(
+        feature = "tracing_instrument",
+        tracing::instrument(level = "debug", skip_all, name = "Aegon::PublishPhase2")
+    )]
     pub fn publish_phase_2(
         &mut self,
         new_r_index: E::ScalarField,
         new_r_value: E::ScalarField,
-    ) -> Result<(EpochCommitment<E, P>, InvarianceProof<E, P>, HistoryOpenings<E, P>), AegonError>
-    {
+    ) -> Result<(EpochCommitment<E, P>, HistoryOpenings<E, P>), AegonError> {
         let pending = self.pending.take().ok_or_else(|| {
             AegonError::Config(
                 "publish_phase_2 called without a pending publish; call publish_phase_1 first"
@@ -672,6 +852,10 @@ where
             new_index_state,
             new_value_com,
             new_value_state,
+            delta_index_com,
+            delta_value_com,
+            delta_index_state,
+            delta_value_state,
             new_label_slots,
         } = pending;
 
@@ -682,6 +866,12 @@ where
         // (a brand-new slot has had no chain delta applied to it
         // through any prior epoch), but the PCS proof is still required
         // for the future history-check verifier.
+        #[cfg(feature = "tracing_instrument")]
+        let _pre_openings_span = tracing::debug_span!(
+            "Aegon::Phase2::PreUpdateOpenings",
+            new_slots = new_label_slots.len()
+        )
+        .entered();
         let mut pre_rand_index: Vec<(E::ScalarField, P::Proof)> =
             Vec::with_capacity(new_label_slots.len());
         let mut pre_rand_value: Vec<(E::ScalarField, P::Proof)> =
@@ -706,10 +896,14 @@ where
                 b"aegon.rand_value.open",
             )?);
         }
+        #[cfg(feature = "tracing_instrument")]
+        drop(_pre_openings_span);
 
-        // Update rand polynomials: rand_{n+1} = rand_n + r_n · ∆.
-        // Computed pointwise on the sparse evaluation tables. ∆ is
-        // non-zero only where (prev, next) differ.
+        // Update rand polynomials: `rand_{n+1} = rand_n + r_n · ∆`.
+        // The polynomial update is still done pointwise on the sparse
+        // evaluation tables (cheap, `O(|support(∆)|)`), because future
+        // openings of `rand_*_poly` need it to be consistent with the
+        // commitment we publish below.
         update_rand(
             &mut self.rand_index_poly,
             &prev_index_poly,
@@ -723,11 +917,39 @@ where
             new_r_value,
         );
 
-        // Recommit the rand polynomials.
-        let (new_rand_index_com, new_rand_index_state) =
-            commit_with_aux::<E, P>(&self.prover_param, &self.rand_index_poly)?;
-        let (new_rand_value_com, new_rand_value_state) =
-            commit_with_aux::<E, P>(&self.prover_param, &self.rand_value_poly)?;
+        // No new MSM for the rand commitments. Phase 1 already
+        // committed + aux'd the data-side delta (`delta_index_com`,
+        // `delta_index_state` and friends). Since rand_{n+1} − rand_n =
+        // r_X · ∆_X holds pointwise on the polynomial, the same
+        // homomorphism holds on commitments and on the prover state:
+        //   new_rand_X_com   = prev_rand_X_com   + r_X · delta_X_com
+        //   new_rand_X_state = prev_rand_X_state + r_X · delta_X_state
+        // The `+ r_X ·` part is one scalar-mul on the commitment group
+        // element and `O(k · batch)` group ops on the state (only
+        // touched cells get updated — see `KZHKState::iadd_scaled`).
+        #[cfg(feature = "tracing_instrument")]
+        let _combine_rand_span =
+            tracing::debug_span!("Aegon::Phase2::CombineRandHomomorphic").entered();
+        let new_rand_index_com = prev_rand_index_com.clone()
+            + delta_index_com.clone() * new_r_index;
+        let new_rand_value_com = prev_rand_value_com.clone()
+            + delta_value_com.clone() * new_r_value;
+        let mut new_rand_index_state = prev_rand_index_state.clone();
+        P::fma_state(
+            &self.prover_param,
+            &mut new_rand_index_state,
+            new_r_index,
+            &delta_index_state,
+        )?;
+        let mut new_rand_value_state = prev_rand_value_state.clone();
+        P::fma_state(
+            &self.prover_param,
+            &mut new_rand_value_state,
+            new_r_value,
+            &delta_value_state,
+        )?;
+        #[cfg(feature = "tracing_instrument")]
+        drop(_combine_rand_span);
 
         // §6.4 step 2: open `rand_index` and `rand_value` (now at the
         // new epoch) and `value` (also at the new epoch — the
@@ -736,6 +958,12 @@ where
         // pins both endpoints of the update equation
         // `rand_X_new(s) − rand_X_old(s) = r_X · (data_X_new(s) − 0)`
         // at every slot the verifier needs to check.
+        #[cfg(feature = "tracing_instrument")]
+        let _post_openings_span = tracing::debug_span!(
+            "Aegon::Phase2::PostUpdateOpenings",
+            new_slots = new_label_slots.len()
+        )
+        .entered();
         let mut post_rand_index: Vec<(E::ScalarField, P::Proof)> =
             Vec::with_capacity(new_label_slots.len());
         let mut post_rand_value: Vec<(E::ScalarField, P::Proof)> =
@@ -771,18 +999,15 @@ where
                 b"aegon.value.open",
             )?);
         }
+        #[cfg(feature = "tracing_instrument")]
+        drop(_post_openings_span);
 
-        // The invariance proof carries no per-epoch data anymore: with
-        // the commitment-homomorphism audit path, every group element
-        // the auditor needs is already in the published `EpochCommitment`.
-        // See `audit::verify_invariance` for the verification side.
-        //
         // The prev_*_poly / prev_*_state / prev_*_com bindings the
         // destructure pulled out of `PendingPublish` were threaded into
-        // the old `build_invariance_proof` helper. With that helper
-        // gone, suppress the unused-binding warnings explicitly so the
-        // destructure pattern stays one place.
-        let invariance: InvarianceProof<E, P> = InvarianceProof::default();
+        // the old `build_invariance_proof` helper. With both that
+        // helper and the empty `InvarianceProof` marker gone, suppress
+        // the unused-binding warnings explicitly so the destructure
+        // pattern stays one place.
         let _ = (
             &prev_index_poly,
             &prev_index_state,
@@ -816,6 +1041,8 @@ where
         };
 
         // Commit the new epoch to live state and history.
+        #[cfg(feature = "tracing_instrument")]
+        let _finalize_span = tracing::debug_span!("Aegon::Phase2::FinalizeEpoch").entered();
         self.index_commitment = new_index_com.clone();
         self.index_state = new_index_state;
         self.value_commitment = new_value_com.clone();
@@ -842,7 +1069,7 @@ where
             },
         );
 
-        Ok((self.current_commitment(), invariance, history))
+        Ok((self.current_commitment(), history))
     }
 
     /// Find the first free slot for `label` via local-only open addressing.
@@ -1131,6 +1358,15 @@ where
 /// per-row aux precomputation; PCSs that don't need aux state can
 /// override `update_state` to a no-op. We always call it so every
 /// backend gets a consistent commit→open contract.
+#[cfg_attr(
+    feature = "tracing_instrument",
+    tracing::instrument(
+        level = "debug",
+        skip_all,
+        name = "Aegon::CommitWithAux",
+        fields(nnz = poly.evaluations.len())
+    )
+)]
 fn commit_with_aux<E, P>(
     pp: &P::ProverParam,
     poly: &SparseMultilinearExtension<E::ScalarField>,
@@ -1148,6 +1384,10 @@ where
 /// `rand += r · (next - prev)` on sparse evaluation tables. The support
 /// of the result is the union of the supports of `rand`, `prev`, and
 /// `next`; we walk each non-zero entry of `(next - prev)` exactly once.
+#[cfg_attr(
+    feature = "tracing_instrument",
+    tracing::instrument(level = "debug", skip_all, name = "Aegon::UpdateRand")
+)]
 fn update_rand<F: ark_ff::Field>(
     rand: &mut SparseMultilinearExtension<F>,
     prev: &SparseMultilinearExtension<F>,

@@ -38,11 +38,11 @@ pub use sharded::{
     probe_at, rederive_sharded_fs_scalars, verify_merkle_path, verify_sharded_consistency,
     verify_sharded_invariance, verify_sharded_lookup, EpochDigest, ShardTransport,
     ShardedAegon, ShardedAegonConfig, ShardedAegonConfigBuilder, ShardedConsistencyProof,
-    ShardedEpochCommitment, ShardedInvarianceProof, ShardedLookupProof, ShardedProbe,
+    ShardedEpochCommitment, ShardedLookupProof, ShardedProbe,
     ShardedRandPair, ShardedVerifierContext, SrsSource,
 };
 pub use types::{
     AegonPcs, AuditState, ConsistencyProof, EpochCommitment, HistoryOpeningEntry, HistoryOpenings,
-    InvarianceProof, Label, LookupProof, RandPair, Value,
+    Label, LookupProof, RandPair, Value,
 };
 pub use verify::verify_lookup;

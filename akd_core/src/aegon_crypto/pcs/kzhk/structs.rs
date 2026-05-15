@@ -327,6 +327,69 @@ impl<E: Pairing> AuxRow<E> {
             cfg_iter!(lhs).zip(cfg_iter!(rhs)).map(|(&a, &b)| op(a, b)).collect();
         AuxRow::Dense(out)
     }
+
+    /// In-place sparse FMA: `self += scalar · other`.
+    ///
+    /// Walks the **support of `other`** (its non-zero cells) — cost is
+    /// `O(|support(other)|)`, regardless of `self`'s density. This is
+    /// the per-row primitive that powers the §6.4 incremental-publish
+    /// path: at publish time the `other` is built from a batch-sized
+    /// delta polynomial, so it has at most `batch` non-zero cells per
+    /// row, while `self` carries the prior epoch's full support.
+    ///
+    /// `self`'s representation is preserved: a `Sparse` row stays
+    /// `Sparse` (entries are inserted into the `BTreeMap`); a `Dense`
+    /// row stays `Dense` (cells are mutated in place). Note that this
+    /// can cause `Sparse` rows to grow past the `update_state` sparsity
+    /// threshold over many publishes — repeated incremental adds don't
+    /// re-trigger the dense-conversion heuristic. Callers that care
+    /// about layout can rebuild the row via `update_state` at any time.
+    pub fn iadd_scaled(&mut self, scalar: E::ScalarField, other: &AuxRow<E>) {
+        assert_eq!(
+            self.len(),
+            other.len(),
+            "AuxRow::iadd_scaled: length mismatch ({} vs {})",
+            self.len(),
+            other.len()
+        );
+        let is_one = scalar.is_one();
+        let add_at = |this: &mut AuxRow<E>, i: usize, delta: E::G1| {
+            match this {
+                AuxRow::Dense(v) => {
+                    v[i] = (v[i] + delta).into_affine();
+                },
+                AuxRow::Sparse { entries, .. } => {
+                    let cur = entries.get(&i).copied().unwrap_or_else(E::G1Affine::zero);
+                    let sum = (cur + delta).into_affine();
+                    if sum.is_zero() {
+                        entries.remove(&i);
+                    } else {
+                        entries.insert(i, sum);
+                    }
+                },
+            }
+        };
+        match other {
+            AuxRow::Dense(other_vec) => {
+                for (i, &p) in other_vec.iter().enumerate() {
+                    if p.is_zero() {
+                        continue;
+                    }
+                    let delta: E::G1 = if is_one { p.into_group() } else { p.mul(scalar) };
+                    add_at(self, i, delta);
+                }
+            },
+            AuxRow::Sparse { entries: other_entries, .. } => {
+                for (&i, &p) in other_entries {
+                    if p.is_zero() {
+                        continue;
+                    }
+                    let delta: E::G1 = if is_one { p.into_group() } else { p.mul(scalar) };
+                    add_at(self, i, delta);
+                }
+            },
+        }
+    }
 }
 
 /// Prover-side state attached to a commitment.
@@ -387,6 +450,59 @@ impl<E: Pairing> KZHKState<E> {
 
     pub fn set_d_bool(&mut self, d_bool: Vec<AuxRow<E>>) {
         self.d_bool = Some(d_bool);
+    }
+
+    /// In-place sparse FMA on the prover state: `self += scalar · other`.
+    ///
+    /// Walks the support of `other`'s aux table and, when in zk mode,
+    /// accumulates the matching `tau` blinding scalar:
+    ///   * `self.tau += scalar · other.tau`,
+    ///   * `self.d_bool[j][i] += scalar · other.d_bool[j][i]` for every
+    ///     non-zero cell of `other`.
+    ///
+    /// Cost: `O(k · |support(other)|)`. This is the homomorphism that
+    /// lets the publish path avoid recomputing aux from scratch — at
+    /// each epoch the system can commit + aux the delta polynomial
+    /// (size `batch`) and merge it into the prior state in time
+    /// proportional to the batch, not the dictionary.
+    ///
+    /// Panics if `self.d_bool` and `other.d_bool` differ in `Some`-ness
+    /// (one initialized, the other not) or in level count — both are
+    /// determined by the polynomial's `num_vars` and the PCS's block
+    /// dimensions, so any mismatch is a caller bug, not a runtime
+    /// condition we can paper over.
+    pub fn iadd_scaled(&mut self, scalar: E::ScalarField, other: &KZHKState<E>) {
+        // tau (zk variant): tau_self += scalar · tau_other.
+        match (self.tau.as_mut(), other.tau) {
+            (Some(t), Some(o)) => *t += scalar * o,
+            (None, None) => {},
+            (Some(_), None) => {},
+            (None, Some(_)) => {
+                panic!(
+                    "KZHKState::iadd_scaled: tau presence mismatch — self is non-zk but other carries blinding"
+                );
+            },
+        }
+        // d_bool: combine each level's AuxRow with the sparse-walk FMA.
+        match (self.d_bool.as_mut(), other.d_bool.as_ref()) {
+            (Some(self_rows), Some(other_rows)) => {
+                assert_eq!(
+                    self_rows.len(),
+                    other_rows.len(),
+                    "KZHKState::iadd_scaled: aux level count mismatch ({} vs {})",
+                    self_rows.len(),
+                    other_rows.len(),
+                );
+                for (a, b) in self_rows.iter_mut().zip(other_rows.iter()) {
+                    a.iadd_scaled(scalar, b);
+                }
+            },
+            (None, None) => {},
+            _ => panic!("KZHKState::iadd_scaled: d_bool presence mismatch"),
+        }
+        // sparsity is a soft hint; preserve self's value (the post-FMA
+        // sparsity is at most self.sparsity + other.sparsity, but we
+        // never read this value for arithmetic correctness).
     }
 }
 

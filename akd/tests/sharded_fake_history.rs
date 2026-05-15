@@ -72,7 +72,7 @@ fn audit_one_transition(
     for (idx, new_value) in updates {
         entries.push((truth[*idx].label.clone(), new_value.as_bytes().to_vec()));
     }
-    let (commit, invariance) = server.publish(&entries).expect("publish");
+    let commit = server.publish(&entries).expect("publish");
     for (name, value) in sign_ups {
         truth.push(UserRecord {
             label: name.as_bytes().to_vec(),
@@ -85,7 +85,7 @@ fn audit_one_transition(
         truth[*idx].value = new_value.as_bytes().to_vec();
         truth[*idx].last_change_epoch = commit.epoch;
     }
-    let ok = verify_sharded_invariance::<Bn254, Pcs>(ctx, audit_state, prev, &commit, &invariance)
+    let ok = verify_sharded_invariance::<Bn254, Pcs>(ctx, audit_state, prev, &commit)
         .expect("verify_sharded_invariance");
     assert!(
         ok,

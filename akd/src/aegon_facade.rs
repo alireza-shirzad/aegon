@@ -31,8 +31,6 @@ use crate::aegon::verify_sharded_lookup as aegon_verify_lookup;
 
 /// Sharded epoch commitment specialised to AKD's BN254+KZHK backend.
 pub type EpochCommitment = crate::aegon::ShardedEpochCommitment<DirectoryE, DirectoryPcs>;
-/// Sharded invariance proof specialised to AKD's BN254+KZHK backend.
-pub type InvarianceProof = crate::aegon::ShardedInvarianceProof<DirectoryE, DirectoryPcs>;
 /// Sharded consistency proof specialised to AKD's BN254+KZHK backend.
 pub type ConsistencyProof = crate::aegon::ShardedConsistencyProof<DirectoryE, DirectoryPcs>;
 /// Sharded verifier context specialised to AKD's BN254+KZHK backend.
@@ -83,18 +81,19 @@ pub fn verify_lookup_aegon(
     .map_err(map_aegon_err)
 }
 
-/// Verify a single-transition sharded invariance proof. Callers walk
-/// the per-transition chain returned by
-/// [`crate::Directory::aegon_invariance_proofs`] and call this for
-/// each step, threading a single `AuditState`.
+/// Verify a single-transition sharded invariance relation. Callers walk
+/// consecutive pairs of the commitment chain returned by
+/// [`crate::Directory::aegon_epoch_commits`] and call this for each
+/// step, threading a single `AuditState`. No per-epoch proof bytes
+/// flow — verification reads only from the published
+/// `EpochCommitment`s (commitment-homomorphism path).
 pub fn verify_invariance(
     ctx: &VerifierContext,
     audit_state: &mut AuditState,
     prev: &EpochCommitment,
     next: &EpochCommitment,
-    proof: &InvarianceProof,
 ) -> Result<bool, AkdError> {
-    aegon_verify_invariance::<DirectoryE, DirectoryPcs>(ctx, audit_state, prev, next, proof)
+    aegon_verify_invariance::<DirectoryE, DirectoryPcs>(ctx, audit_state, prev, next)
         .map_err(map_aegon_err)
 }
 

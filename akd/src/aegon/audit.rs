@@ -22,8 +22,9 @@
 //!
 //! The auditor's old "openings at a random point" path is gone; in
 //! exchange the auditor's per-epoch cost dropped from `O(N_shards × 8
-//! PCS verifies)` to `O(N_shards × 2 group equations)` and the wire
-//! format for `InvarianceProof` is now empty.
+//! PCS verifies)` to `O(N_shards × 2 group equations)`. No per-epoch
+//! proof bytes flow alongside the commitments — every group element the
+//! auditor needs is in [`EpochCommitment`] already.
 
 use std::ops::{Add, Mul, Sub};
 
@@ -32,16 +33,15 @@ use ark_ec::pairing::Pairing;
 use super::config::VerifierContext;
 use super::error::AegonError;
 use super::fs::derive_chain_scalar;
-use super::types::{AegonPcs, AuditState, EpochCommitment, InvarianceProof};
+use super::types::{AegonPcs, AuditState, EpochCommitment};
 
-/// Verify the invariance proof for a single epoch transition. Updates
-/// `audit_state` with the new chain scalars on success.
+/// Verify the invariance relation for a single epoch transition.
+/// Updates `audit_state` with the new chain scalars on success.
 pub fn verify_invariance<E, P>(
     _ctx: &VerifierContext<E, P>,
     audit_state: &mut AuditState<E::ScalarField>,
     prev: &EpochCommitment<E, P>,
     next: &EpochCommitment<E, P>,
-    _proof: &InvarianceProof<E, P>,
 ) -> Result<bool, AegonError>
 where
     E: Pairing,

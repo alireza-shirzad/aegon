@@ -84,6 +84,32 @@ pub trait PolynomialCommitmentScheme<E: Pairing> {
         unimplemented!()
     }
 
+    /// Linearly combine two prover `State`s in-place:
+    /// `target ← target + scalar · other`.
+    ///
+    /// Mathematically this is the homomorphism `state(f + c·g) =
+    /// state(f) + c·state(g)` — the same one that makes the commitment
+    /// itself linearly homomorphic. For Pedersen-MSM-based PCSs the
+    /// state is a row of group commitments, so the same linearity
+    /// applies cell-by-cell.
+    ///
+    /// Implementations should walk the **sparse support** of `other`
+    /// so the cost is `O(|support(other)|)`, not `O(|support(target)|)`.
+    /// A correct but degenerate implementation could densify both and
+    /// walk every cell; the speedup only materialises when implementors
+    /// hand off to a per-non-zero loop.
+    ///
+    /// Default impl `unimplemented!()` — PCSs that need the
+    /// incremental-publish path on the Aegon side must override this.
+    fn fma_state(
+        _prover_param: impl Borrow<Self::ProverParam>,
+        _target: &mut Self::State,
+        _scalar: E::ScalarField,
+        _other: &Self::State,
+    ) -> Result<(), PCSError> {
+        unimplemented!("PCS::fma_state has no default — implement the homomorphism for your State")
+    }
+
     fn open(
         prover_param: impl Borrow<Self::ProverParam>,
         commitment: &Self::Commitment,

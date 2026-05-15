@@ -5,7 +5,7 @@
 //! verify_lookup, verify_invariance, verify_consistency).
 
 use akd::aegon_facade::{
-    self, AuditState, ConsistencyProof, EpochCommitment, InvarianceProof, VerifierContext,
+    self, AuditState, ConsistencyProof, EpochCommitment, VerifierContext,
 };
 use akd::append_only_zks::AzksParallelismConfig;
 use akd::directory::Directory;
@@ -90,10 +90,6 @@ async fn batch_lookup_works() {
 async fn auditor_walks_invariance_chain() {
     let directory = fresh_directory().await;
     let ctx = directory.verifier_context().await;
-    let prev0: EpochCommitment = directory
-        .epoch_commitment(0)
-        .await
-        .expect("epoch 0 retained");
 
     let _ = directory
         .publish(vec![(AkdLabel::from("alice"), AkdValue::from("a1"))])
@@ -105,23 +101,22 @@ async fn auditor_walks_invariance_chain() {
         .await
         .expect("e3");
 
-    let chain: Vec<InvarianceProof> = directory
-        .aegon_invariance_proofs(0, 3)
+    let commits: Vec<EpochCommitment> = directory
+        .aegon_epoch_commits(0, 3)
         .await
-        .expect("audit chain");
-    assert_eq!(chain.len(), 3);
+        .expect("commit chain");
+    assert_eq!(commits.len(), 4);
 
     let mut audit_state = AuditState::default();
-    let mut prev = prev0;
-    for (i, proof) in chain.iter().enumerate() {
-        let next = directory
-            .epoch_commitment((i + 1) as u64)
-            .await
-            .expect("commitment retained");
-        let ok = aegon_facade::verify_invariance(&ctx, &mut audit_state, &prev, &next, proof)
-            .expect("verify_invariance");
+    for i in 0..3 {
+        let ok = aegon_facade::verify_invariance(
+            &ctx,
+            &mut audit_state,
+            &commits[i],
+            &commits[i + 1],
+        )
+        .expect("verify_invariance");
         assert!(ok, "invariance must hold for transition {i}");
-        prev = next;
     }
 }
 

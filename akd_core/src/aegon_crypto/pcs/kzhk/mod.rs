@@ -234,6 +234,23 @@ where
         Self::update_state_inner(prover_param, polynomial, com, state)
     }
 
+    /// Sparse-walk FMA on the prover state. Drives the §6.4
+    /// incremental-publish path: the system commits + aux's the
+    /// **delta polynomial** for the current batch (size `batch`) and
+    /// then merges it into the prior epoch's state via this method.
+    /// Cost is `O(k · batch)` regardless of how many users the
+    /// dictionary already holds — see [`KZHKState::iadd_scaled`].
+    #[tracing::instrument(level = "debug", skip_all, name = "KZH::FMAState")]
+    fn fma_state(
+        _prover_param: impl Borrow<Self::ProverParam>,
+        target: &mut Self::State,
+        scalar: E::ScalarField,
+        other: &Self::State,
+    ) -> Result<(), PCSError> {
+        target.iadd_scaled(scalar, other);
+        Ok(())
+    }
+
     /// Produces an opening proof `pi = ({D_j}_{j=1}^{k-1}, f_{x_1..x_{k-1}})`
     /// of `f` at the point `(x_1, ..., x_k)` and the evaluation `y = f(x)`.
     /// Dispatches to the zk Sigma-protocol variant (Appendix D) when the

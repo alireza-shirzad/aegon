@@ -103,7 +103,7 @@ fn srs_path_round_trip() {
         (b"alice".to_vec(), b"alice-v1".to_vec()),
         (b"bob".to_vec(), b"bob-v1".to_vec()),
     ];
-    let (commit, _audit) = server.publish(&updates).expect("publish");
+    let commit = server.publish(&updates).expect("publish");
     let ctx = server.sharded_verifier_context();
     for (label, value) in &updates {
         let (_db_value, proof) = server.lookup(label).expect("lookup");
@@ -260,7 +260,7 @@ fn n_shards_1_behaves_like_single_aegon() {
         (b"bob".to_vec(), b"bob-v1".to_vec()),
         (b"carol".to_vec(), b"carol-v1".to_vec()),
     ];
-    let (commit, _audit) = server.publish(&updates).expect("publish");
+    let commit = server.publish(&updates).expect("publish");
     assert_eq!(commit.epoch, 1);
     assert_eq!(commit.per_shard.len(), 1);
 
@@ -280,7 +280,7 @@ fn n_shards_4_routes_via_vrf_and_audits() {
     let updates: Vec<(Vec<u8>, Vec<u8>)> = (0..12u32)
         .map(|i| (format!("user-{i}").into_bytes(), format!("v-{i}").into_bytes()))
         .collect();
-    let (commit, _audit) = server.publish(&updates).expect("publish");
+    let commit = server.publish(&updates).expect("publish");
     assert_eq!(commit.epoch, 1);
     assert_eq!(commit.per_shard.len(), 4);
 
@@ -320,7 +320,7 @@ fn cross_shard_open_addressing_handles_collisions() {
     let updates: Vec<(Vec<u8>, Vec<u8>)> = (0..6u32)
         .map(|i| (format!("u{i}").into_bytes(), format!("v{i}").into_bytes()))
         .collect();
-    let (commit, _audit) = server.publish(&updates).expect("publish");
+    let commit = server.publish(&updates).expect("publish");
 
     for (label, value) in &updates {
         assert_lookup_verifies(&server, label, value, &commit);
@@ -391,7 +391,7 @@ fn bench_production_shard_scale() {
         .map(|i| (format!("user-{i}").into_bytes(), format!("v-{i}").into_bytes()))
         .collect();
     let t0 = std::time::Instant::now();
-    let (commit, _audit) = server.publish(&updates).expect("publish");
+    let commit = server.publish(&updates).expect("publish");
     let publish_ms = t0.elapsed().as_millis();
     println!(
         "PUBLISH {n_users} entries: {publish_ms} ms ({:.2} s)",
@@ -440,7 +440,7 @@ fn bench_setup_and_publish() {
         .map(|i| (format!("user-{i}").into_bytes(), format!("v-{i}").into_bytes()))
         .collect();
     let t0 = std::time::Instant::now();
-    let (commit, _audit) = server.publish(&updates).expect("publish");
+    let commit = server.publish(&updates).expect("publish");
     let publish_ms = t0.elapsed().as_millis();
     println!(
         "publish {} entries across {n_shards} shards: {publish_ms} ms",
@@ -471,7 +471,7 @@ fn auditor_rederives_shared_fs_scalars() {
     let prev = server.epoch_commitment(0).expect("epoch 0");
     let audit_state = AuditState::<<Bn254 as Pairing>::ScalarField>::default();
 
-    let (next, _audit) = server
+    let next = server
         .publish(&[(b"alice".to_vec(), b"a1".to_vec())])
         .expect("publish");
 

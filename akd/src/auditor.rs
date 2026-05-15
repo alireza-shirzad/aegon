@@ -11,11 +11,11 @@
 //! [`verify_consecutive_append_only`] entry points are kept on the
 //! public surface for source-level compatibility but cannot be
 //! invoked: their inputs (a `Vec<Digest>` and an [`AppendOnlyProof`]
-//! built from `AzksElement`s) do not carry the Fiat-Shamir-bound
-//! invariance witnesses that the Aegon auditor checks. Auditors
-//! should call [`crate::aegon_facade::verify_invariance`] over the
-//! per-transition proofs returned by
-//! [`crate::Directory::aegon_invariance_proofs`].
+//! built from `AzksElement`s) carry the wrong shape. Auditors should
+//! walk the commitment chain returned by
+//! [`crate::Directory::aegon_epoch_commits`] and call
+//! [`crate::aegon_facade::verify_invariance`] on consecutive pairs
+//! (commitment-homomorphism check, no per-epoch proof bytes).
 
 use akd_core::configuration::Configuration;
 
@@ -32,8 +32,8 @@ pub async fn audit_verify<TC: Configuration>(
     _proof: AppendOnlyProof,
 ) -> Result<(), AkdError> {
     unimplemented!(
-        "AKD-on-Aegon: legacy audit_verify cannot transport the Aegon invariance proof \
-         shape; use akd::aegon_facade::verify_invariance over Directory::aegon_invariance_proofs"
+        "AKD-on-Aegon: legacy audit_verify is unsupported; \
+         use akd::aegon_facade::verify_invariance over Directory::aegon_epoch_commits"
     )
 }
 
@@ -50,7 +50,7 @@ pub async fn verify_consecutive_append_only<TC: Configuration>(
     _end_epoch: u64,
 ) -> Result<(), AkdError> {
     unimplemented!(
-        "AKD-on-Aegon: legacy verify_consecutive_append_only cannot transport the Aegon \
-         invariance proof shape; use akd::aegon_facade::verify_invariance"
+        "AKD-on-Aegon: legacy verify_consecutive_append_only is unsupported; \
+         use akd::aegon_facade::verify_invariance"
     )
 }

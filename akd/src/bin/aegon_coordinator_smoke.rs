@@ -149,7 +149,7 @@ fn main() -> ExitCode {
         .map(|i| (format!("user-{i}").into_bytes(), format!("v-{i}").into_bytes()))
         .collect();
     let t0 = Instant::now();
-    let (commit, _audit) = match server.publish(&updates) {
+    let commit = match server.publish(&updates) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("error: publish failed: {e}");

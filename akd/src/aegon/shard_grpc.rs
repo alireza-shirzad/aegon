@@ -37,7 +37,7 @@ use super::server::Aegon;
 use super::db::{key_shard_state, Db, DbOp, DbSource, RedisDb};
 use super::server::AegonCheckpoint;
 use super::sharded::ShardWrite;
-use super::types::{AegonPcs, EpochCommitment, HistoryOpenings, InvarianceProof, Label, Value};
+use super::types::{AegonPcs, EpochCommitment, HistoryOpenings, Label, Value};
 
 // Generated tonic code lives in this module. `tonic-build` emits one
 // rust module per proto package; ours is `aegon.shard.v1`.
@@ -97,7 +97,7 @@ where
         &mut self,
         new_r_index: E::ScalarField,
         new_r_value: E::ScalarField,
-    ) -> Result<(EpochCommitment<E, P>, InvarianceProof<E, P>, HistoryOpenings<E, P>), AegonError>;
+    ) -> Result<(EpochCommitment<E, P>, HistoryOpenings<E, P>), AegonError>;
 
     fn is_index_slot_occupied(&self, slot_bits: &[bool]) -> bool;
 
@@ -141,7 +141,11 @@ where
     P: AegonPcs<E> + Send + Sync,
     P::ProverParam: akd_core::aegon_crypto::pcs::PCSGlobalParam + Send + Sync,
     P::VerifierParam: akd_core::aegon_crypto::pcs::PCSGlobalParam + Send + Sync,
-    P::Commitment: Clone + Send + Sync,
+    P::Commitment: Clone
+        + Send
+        + Sync
+        + std::ops::Add<Output = P::Commitment>
+        + std::ops::Mul<E::ScalarField, Output = P::Commitment>,
     P::Proof: Clone + Send + Sync,
     P::State: Send + Sync,
     P::Polynomial: Send + Sync,
@@ -160,8 +164,7 @@ where
         &mut self,
         new_r_index: E::ScalarField,
         new_r_value: E::ScalarField,
-    ) -> Result<(EpochCommitment<E, P>, InvarianceProof<E, P>, HistoryOpenings<E, P>), AegonError>
-    {
+    ) -> Result<(EpochCommitment<E, P>, HistoryOpenings<E, P>), AegonError> {
         Aegon::publish_phase_2(self, new_r_index, new_r_value)
     }
 
@@ -267,7 +270,14 @@ where
     P: AegonPcs<E> + Send + Sync + 'static,
     P::ProverParam: akd_core::aegon_crypto::pcs::PCSGlobalParam + Send + Sync + 'static,
     P::VerifierParam: akd_core::aegon_crypto::pcs::PCSGlobalParam + Clone + Send + Sync + 'static,
-    P::Commitment: CanonicalSerialize + CanonicalDeserialize + Clone + Send + Sync + 'static,
+    P::Commitment: CanonicalSerialize
+        + CanonicalDeserialize
+        + Clone
+        + Send
+        + Sync
+        + 'static
+        + std::ops::Add<Output = P::Commitment>
+        + std::ops::Mul<E::ScalarField, Output = P::Commitment>,
     P::Proof: CanonicalSerialize + Send + Sync + 'static,
     P::State: Send + Sync + 'static,
     P::Polynomial: Send + Sync + 'static,
@@ -275,7 +285,6 @@ where
     P::Evaluation: Send + Sync + 'static,
     H: HashSuite<E::ScalarField> + Send + Sync + 'static,
     EpochCommitment<E, P>: CanonicalSerialize + Send + Sync + 'static,
-    InvarianceProof<E, P>: CanonicalSerialize + Send + Sync + 'static,
 {
     pub fn new(aegon: Aegon<E, P, H>) -> Self {
         Self {
@@ -342,7 +351,14 @@ where
     P: AegonPcs<E> + Send + Sync + 'static,
     P::ProverParam: akd_core::aegon_crypto::pcs::PCSGlobalParam + Send + Sync + 'static,
     P::VerifierParam: akd_core::aegon_crypto::pcs::PCSGlobalParam + Clone + Send + Sync + 'static,
-    P::Commitment: CanonicalSerialize + CanonicalDeserialize + Clone + Send + Sync + 'static,
+    P::Commitment: CanonicalSerialize
+        + CanonicalDeserialize
+        + Clone
+        + Send
+        + Sync
+        + 'static
+        + std::ops::Add<Output = P::Commitment>
+        + std::ops::Mul<E::ScalarField, Output = P::Commitment>,
     P::Proof: CanonicalSerialize + Send + Sync + 'static,
     P::State: Send + Sync + 'static,
     P::Polynomial: Send + Sync + 'static,
@@ -350,7 +366,6 @@ where
     P::Evaluation: Send + Sync + 'static,
     H: HashSuite<E::ScalarField> + Send + Sync + 'static,
     EpochCommitment<E, P>: CanonicalSerialize + Send + Sync + 'static,
-    InvarianceProof<E, P>: CanonicalSerialize + Send + Sync + 'static,
     HistoryOpenings<E, P>: CanonicalSerialize + Send + Sync + 'static,
     AegonCheckpoint<E, P>: CanonicalSerialize + Send + Sync + 'static,
 {
@@ -378,7 +393,7 @@ where
         let r_index: E::ScalarField = decode(&r.r_index).map_err(err_to_status)?;
         let r_value: E::ScalarField = decode(&r.r_value).map_err(err_to_status)?;
         let mut aegon = self.aegon.write().await;
-        let (commit, invariance, history) = aegon
+        let (commit, history) = aegon
             .publish_phase_2(r_index, r_value)
             .map_err(err_to_status)?;
 
@@ -401,7 +416,6 @@ where
 
         Ok(Response::new(PublishPhase2Response {
             epoch_commitment: encode(&commit).map_err(err_to_status)?,
-            invariance_proof: encode(&invariance).map_err(err_to_status)?,
             history_openings: encode(&history).map_err(err_to_status)?,
         }))
     }
@@ -685,7 +699,13 @@ where
     P: AegonPcs<E> + Send + Sync,
     P::ProverParam: Send + Sync,
     P::VerifierParam: Clone + Send + Sync,
-    P::Commitment: CanonicalSerialize + CanonicalDeserialize + Clone + Send + Sync,
+    P::Commitment: CanonicalSerialize
+        + CanonicalDeserialize
+        + Clone
+        + Send
+        + Sync
+        + std::ops::Add<Output = P::Commitment>
+        + std::ops::Mul<E::ScalarField, Output = P::Commitment>,
     P::Proof: CanonicalDeserialize + Clone + Send + Sync,
     P::State: Send + Sync,
     P::Polynomial: Send + Sync,
@@ -693,7 +713,6 @@ where
     P::Evaluation: Send + Sync,
     H: HashSuite<E::ScalarField> + Send + Sync,
     EpochCommitment<E, P>: CanonicalDeserialize + Send + Sync,
-    InvarianceProof<E, P>: CanonicalDeserialize + Send + Sync,
     HistoryOpenings<E, P>: CanonicalDeserialize + Send + Sync,
 {
     fn publish_phase_1_at_slots(
@@ -721,8 +740,7 @@ where
         &mut self,
         new_r_index: E::ScalarField,
         new_r_value: E::ScalarField,
-    ) -> Result<(EpochCommitment<E, P>, InvarianceProof<E, P>, HistoryOpenings<E, P>), AegonError>
-    {
+    ) -> Result<(EpochCommitment<E, P>, HistoryOpenings<E, P>), AegonError> {
         let req = PublishPhase2Request {
             r_index: encode(&new_r_index)?,
             r_value: encode(&new_r_value)?,
@@ -737,9 +755,8 @@ where
         })?;
         let inner = resp.into_inner();
         let commit: EpochCommitment<E, P> = decode(&inner.epoch_commitment)?;
-        let invariance: InvarianceProof<E, P> = decode(&inner.invariance_proof)?;
         let history: HistoryOpenings<E, P> = decode(&inner.history_openings)?;
-        Ok((commit, invariance, history))
+        Ok((commit, history))
     }
 
     fn is_index_slot_occupied(&self, slot_bits: &[bool]) -> bool {

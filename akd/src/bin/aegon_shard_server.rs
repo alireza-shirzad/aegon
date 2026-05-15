@@ -88,6 +88,23 @@ struct Args {
     /// the cluster's shard list, 0..N-1).
     #[arg(long)]
     shard_id: Option<u32>,
+
+    /// **Benchmark-only**: after setup, locally populate this many
+    /// random `(slot, h_label, h_value)` entries directly into the
+    /// shard's polynomials (via `Aegon::prefill_random`) and recommit.
+    /// Lets a benchmark cluster start at a "dictionary already has N
+    /// users" state without paying for `N` round-trip coordinator
+    /// publishes. **Do not use in production** — the FS-chain has no
+    /// history covering these entries, so an auditor walking the chain
+    /// could only validate from this state forward, not into it.
+    #[arg(long)]
+    prefill_count: Option<usize>,
+
+    /// Seed for the deterministic RNG that drives `--prefill-count`'s
+    /// slot/value generation. Default-zero gives a fixed prefill
+    /// across runs; vary it to get a different fill pattern.
+    #[arg(long, default_value_t = 0)]
+    prefill_seed: u64,
 }
 
 #[tokio::main]
@@ -112,7 +129,7 @@ async fn main() -> ExitCode {
     };
     let shard_id = args.shard_id.unwrap_or(0);
 
-    let aegon = match (&args.srs_path, args.setup_seed) {
+    let mut aegon = match (&args.srs_path, args.setup_seed) {
         (Some(path), _) => {
             eprintln!("loading SRS from {}", path.display());
             let (pk, vk) = match read_srs_from_file::<Bn254, Pcs>(path) {
@@ -168,6 +185,25 @@ async fn main() -> ExitCode {
         },
         (None, None) => unreachable!("checked above"),
     };
+
+    // Benchmark-only prefill. Runs after setup but before binding the
+    // gRPC socket — we want the polynomials populated by the time the
+    // coordinator connects, but the prefill itself takes time at large
+    // counts (each entry = 1 RNG draw + 1 HashMap insert, plus one
+    // commit + update_state pass at the end).
+    if let Some(count) = args.prefill_count {
+        if count > 0 {
+            eprintln!(
+                "prefilling shard with {count} random entries (seed={})",
+                args.prefill_seed
+            );
+            let mut prefill_rng = ChaCha20Rng::seed_from_u64(args.prefill_seed);
+            if let Err(e) = aegon.prefill_random(&mut prefill_rng, count) {
+                eprintln!("error prefilling shard: {e}");
+                return ExitCode::from(1);
+            }
+        }
+    }
 
     let tls_config = match (&args.tls_cert, &args.tls_key) {
         (Some(cert), Some(key)) => match ShardServerTlsConfig::from_pem_files(cert, key) {

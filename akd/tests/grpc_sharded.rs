@@ -125,7 +125,7 @@ async fn grpc_sharded_publish_lookup_verify_roundtrip() {
     let coord_clone = coordinator.clone();
     let commit = tokio::task::spawn_blocking(move || {
         let mut server = coord_clone.blocking_lock();
-        let (commit, _audit) = server.publish(&updates_for_publish).expect("publish");
+        let commit = server.publish(&updates_for_publish).expect("publish");
         commit
     })
     .await

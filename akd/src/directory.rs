@@ -32,7 +32,7 @@ use crate::{
 
 use crate::aegon::{
     optimal_kzh_k, Sha256Hash, ShardedAegon, ShardedAegonConfig, ShardedConsistencyProof,
-    ShardedEpochCommitment, ShardedInvarianceProof, ShardedLookupProof, ShardedVerifierContext,
+    ShardedEpochCommitment, ShardedLookupProof, ShardedVerifierContext,
 };
 use akd_core::configuration::Configuration;
 use akd_core::verify::history::HistoryParams;
@@ -97,10 +97,6 @@ pub struct Directory<TC, S: Database, V> {
     /// values, so to return `AkdValue` from a lookup we keep the raw
     /// bytes here keyed by label.
     label_values: Arc<RwLock<HashMap<AkdLabel, AkdValue>>>,
-    /// Per-epoch sharded invariance proofs returned by
-    /// `ShardedAegon::publish`. Indexed by `epoch - 1` (epoch 0 has no
-    /// transition).
-    invariance_proofs: Arc<RwLock<Vec<ShardedInvarianceProof<DirectoryE, DirectoryPcs>>>>,
     /// Snapshot of the sharded epoch commitments at every published
     /// epoch, including the empty epoch 0. Used to serve consistency
     /// proofs and epoch-by-epoch audits.
@@ -118,7 +114,6 @@ impl<TC, S: Database, V: VRFKeyStorage> Clone for Directory<TC, S, V> {
             cache_lock: self.cache_lock.clone(),
             aegon: self.aegon.clone(),
             label_values: self.label_values.clone(),
-            invariance_proofs: self.invariance_proofs.clone(),
             epoch_commits: self.epoch_commits.clone(),
             tc: PhantomData,
         }
@@ -161,7 +156,6 @@ where
             cache_lock: Arc::new(RwLock::new(())),
             aegon: Arc::new(Mutex::new(aegon)),
             label_values: Arc::new(RwLock::new(HashMap::new())),
-            invariance_proofs: Arc::new(RwLock::new(Vec::new())),
             epoch_commits: Arc::new(RwLock::new(vec![initial_commitment])),
             tc: PhantomData,
         })
@@ -189,7 +183,7 @@ where
             .map(|(l, v)| (l.0.clone(), v.0.clone()))
             .collect();
 
-        let (commitment, invariance) = {
+        let commitment = {
             let mut aegon = self.aegon.lock().await;
             aegon
                 .publish(&aegon_updates)
@@ -204,7 +198,6 @@ where
             }
         }
 
-        self.invariance_proofs.write().await.push(invariance);
         self.epoch_commits.write().await.push(commitment.clone());
 
         Ok(EpochHash(commitment.epoch, digest_of_commitment(&commitment)))
@@ -317,11 +310,11 @@ where
     }
 
     /// **Not implemented via the legacy [`AppendOnlyProof`] shape.** The
-    /// Aegon auditor proof carries different data (Fiat-Shamir-bound
-    /// invariance witnesses) which does not fit inside
-    /// `AppendOnlyProof`. Use
-    /// [`Self::aegon_invariance_proofs`] to fetch the Aegon-shaped audit
-    /// chain.
+    /// Aegon auditor walks `ShardedEpochCommitment`s directly via the
+    /// commitment-homomorphism check and doesn't produce per-epoch
+    /// proof bytes. Use [`Self::aegon_epoch_commits`] to fetch the
+    /// commitment chain and feed consecutive pairs to
+    /// [`crate::aegon_facade::verify_invariance`].
     #[cfg_attr(feature = "tracing_instrument", tracing::instrument(skip_all, fields(start_epoch = audit_start_ep, end_epoch = audit_end_ep)))]
     pub async fn audit(
         &self,
@@ -330,7 +323,7 @@ where
     ) -> Result<AppendOnlyProof, AkdError> {
         let _ = (audit_start_ep, audit_end_ep);
         unimplemented!(
-            "Directory::audit returns the legacy AppendOnlyProof shape; use Directory::aegon_invariance_proofs for the Aegon audit chain"
+            "Directory::audit returns the legacy AppendOnlyProof shape; use Directory::aegon_epoch_commits for the Aegon audit chain"
         )
     }
 
@@ -392,22 +385,25 @@ where
         self.aegon.lock().await.sharded_verifier_context()
     }
 
-    /// Returns the slice of per-transition sharded invariance proofs
-    /// for the epoch range `[start_ep, end_ep)`. The auditor walks
-    /// these via [`crate::aegon_facade::verify_invariance`].
-    pub async fn aegon_invariance_proofs(
+    /// Returns the slice of sharded epoch commitments for the inclusive
+    /// epoch range `[start_ep, end_ep]`. Auditors walk consecutive
+    /// pairs and feed them to
+    /// [`crate::aegon_facade::verify_invariance`], which checks the
+    /// transition straight off the commitment fields (no per-epoch
+    /// proof bytes are produced or stored).
+    pub async fn aegon_epoch_commits(
         &self,
         start_ep: u64,
         end_ep: u64,
-    ) -> Result<Vec<ShardedInvarianceProof<DirectoryE, DirectoryPcs>>, AkdError> {
-        let proofs = self.invariance_proofs.read().await;
-        if end_ep as usize > proofs.len() + 1 || start_ep > end_ep {
+    ) -> Result<Vec<ShardedEpochCommitment<DirectoryE, DirectoryPcs>>, AkdError> {
+        let commits = self.epoch_commits.read().await;
+        if end_ep as usize >= commits.len() || start_ep > end_ep {
             return Err(AkdError::Directory(DirectoryError::Publish(format!(
-                "epoch range [{start_ep}, {end_ep}) outside available history of {} transitions",
-                proofs.len()
+                "epoch range [{start_ep}, {end_ep}] outside available history of {} epochs",
+                commits.len()
             ))));
         }
-        Ok(proofs[(start_ep as usize)..(end_ep as usize)].to_vec())
+        Ok(commits[(start_ep as usize)..=(end_ep as usize)].to_vec())
     }
 }
 

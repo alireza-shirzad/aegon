@@ -89,49 +89,6 @@ impl<E: Pairing, P: AegonPcs<E>> LookupProof<E, P> {
 
 // ---------- auditor-facing types --------------------------------------
 
-/// Per-epoch invariance proof. With the homomorphism-on-commitments
-/// audit path, the proof itself carries **no data** — every commitment
-/// the auditor needs is already in [`EpochCommitment`], and the
-/// auditor verifies the recurrence
-///
-/// ```text
-///   C(rand_{n+1}) ?= C(rand_n) + r_n · (C(poly_{n+1}) − C(poly_n))
-/// ```
-///
-/// on the group elements directly, sound by the PCS's binding and its
-/// linear homomorphism on commitments (paper Remark 2, "commitment-side
-/// check" path). KZH-k's commitment is a Pedersen MSM on the polynomial's
-/// evaluation vector, so the homomorphism holds for both the plain and
-/// zk variants. The struct is retained — rather than dropped entirely —
-/// so the publish API and existing call sites can still thread an
-/// `InvarianceProof` through; treat it as a marker that "this epoch
-/// transition is auditable from the published `EpochCommitment` alone".
-#[derive(Debug, CanonicalSerialize, CanonicalDeserialize)]
-pub struct InvarianceProof<E: Pairing, P: AegonPcs<E>> {
-    pub _e: PhantomData<E>,
-    // `fn() -> P` instead of plain `P` so the marker stays `Send + Sync`
-    // regardless of whether the PCS itself is. The struct is empty in
-    // the wire format anyway; this just keeps the type parameters
-    // present for downstream API compatibility (`InvarianceProof<E, P>`
-    // is still the type appearing in publish / audit signatures).
-    pub _p: PhantomData<fn() -> P>,
-}
-
-impl<E: Pairing, P: AegonPcs<E>> Default for InvarianceProof<E, P> {
-    fn default() -> Self {
-        Self {
-            _e: PhantomData,
-            _p: PhantomData,
-        }
-    }
-}
-
-impl<E: Pairing, P: AegonPcs<E>> Clone for InvarianceProof<E, P> {
-    fn clone(&self) -> Self {
-        Self::default()
-    }
-}
-
 /// The auditor's locally-tracked Fiat-Shamir state. Threaded across calls
 /// to `verify_invariance` because each transition's chain randomness is
 /// `O(prev_r, new_commitment)` and the auditor must recompute it. The
