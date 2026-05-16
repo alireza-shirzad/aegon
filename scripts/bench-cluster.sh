@@ -33,8 +33,10 @@
 #     headroom; n2-highmem-8 (64 GB) is right at the edge and may OOM
 #     during the in-process SRS gen pass.
 #   * 32 × n2-highmem-16 ≈ $38/hr. Run `down` aggressively.
-#   * No Redis: this bench measures publish-only and the open-addressing
-#     trail goes via gRPC `is_index_slot_occupied`, not Redis EXISTS.
+#   * Redis is provisioned on its own small VM. Open-addressing
+#     occupancy goes via Redis `EXISTS`; shard prefill also writes
+#     `aegon:slot:{shard_id}:{slot_idx}` keys so the coordinator sees
+#     prefilled rows as occupied. `deploy` `FLUSHALL`s before starting.
 #
 # This script is a prototyping aid, not production infrastructure.
 
@@ -52,13 +54,17 @@ SETUP_SEED="${SETUP_SEED:-42}"
 PREFILL_SEED="${PREFILL_SEED:-1}"
 SHARD_MACHINE_TYPE="${SHARD_MACHINE_TYPE:-n2-highmem-16}"
 COORD_MACHINE_TYPE="${COORD_MACHINE_TYPE:-n2-standard-4}"
+REDIS_MACHINE_TYPE="${REDIS_MACHINE_TYPE:-n2-standard-2}"
 
 NETWORK="aegon-bench-vpc"
 FIREWALL_GRPC="aegon-bench-grpc"
 FIREWALL_SSH="aegon-bench-ssh"
+FIREWALL_REDIS="aegon-bench-redis"
 SHARD_TAG="aegon-bench-shard"
 COORD_TAG="aegon-bench-coord"
+DB_TAG="aegon-bench-db"
 SHARD_PORT=50051
+REDIS_PORT=6379
 ROUTER="aegon-bench-router"
 NAT="aegon-bench-nat"
 REGION="${ZONE%-*}"
@@ -127,9 +133,15 @@ scp_from() {
 
 shard_name() { echo "${SHARD_TAG}-$1"; }
 coord_name() { echo "${COORD_TAG}"; }
+db_name()    { echo "${DB_TAG}"; }
 
 shard_internal_ip() {
   gcloud compute instances describe "$(shard_name "$1")" --zone="$ZONE" \
+    --format='value(networkInterfaces[0].networkIP)'
+}
+
+db_internal_ip() {
+  gcloud compute instances describe "$(db_name)" --zone="$ZONE" \
     --format='value(networkInterfaces[0].networkIP)'
 }
 
@@ -193,6 +205,28 @@ cmd_up() {
       --target-tags="$SHARD_TAG" >/dev/null
   fi
 
+  # ---- firewall: coordinator + shards -> redis on the DB machine ----
+  local redis_want="$COORD_TAG,$SHARD_TAG"
+  if gcloud compute firewall-rules describe "$FIREWALL_REDIS" >/dev/null 2>&1; then
+    local redis_have
+    redis_have="$(gcloud compute firewall-rules describe "$FIREWALL_REDIS" \
+      --format='value(sourceTags.list())' 2>/dev/null)"
+    if [[ "$redis_have" != "$redis_want" ]]; then
+      log "firewall $FIREWALL_REDIS: updating source-tags to '$redis_want'"
+      gcloud compute firewall-rules update "$FIREWALL_REDIS" \
+        --source-tags="$redis_want" >/dev/null
+    else
+      log "firewall $FIREWALL_REDIS already correct"
+    fi
+  else
+    log "creating firewall $FIREWALL_REDIS (coord+shards -> db:$REDIS_PORT)"
+    gcloud compute firewall-rules create "$FIREWALL_REDIS" \
+      --network="$NETWORK" \
+      --allow="tcp:$REDIS_PORT" \
+      --source-tags="$redis_want" \
+      --target-tags="$DB_TAG" >/dev/null
+  fi
+
   # ---- firewall: SSH via IAP tunnel only ----
   local ssh_want="35.235.240.0/20"
   if gcloud compute firewall-rules describe "$FIREWALL_SSH" >/dev/null 2>&1; then
@@ -245,6 +279,27 @@ cmd_up() {
       --boot-disk-size=20GB >/dev/null
   fi
 
+  # ---- database (Redis) ----
+  # Small VM — Redis is the open-addressing occupancy oracle, not a
+  # heavyweight store. Disk is sized for the prefilled keyspace: at the
+  # production target of 2^28 slot keys, each ~50 bytes serialised, the
+  # working set is ~13 GiB. 20 GB boot disk is enough headroom and lets
+  # Redis page out under memory pressure rather than OOM-killing.
+  local dname; dname="$(db_name)"
+  if gcloud compute instances describe "$dname" --zone="$ZONE" >/dev/null 2>&1; then
+    log "$dname exists, skipping"
+  else
+    log "creating $dname ($REDIS_MACHINE_TYPE) — Redis on :$REDIS_PORT"
+    gcloud compute instances create "$dname" \
+      --zone="$ZONE" \
+      --machine-type="$REDIS_MACHINE_TYPE" \
+      --network="$NETWORK" \
+      --no-address \
+      --tags="$DB_TAG" \
+      --image-family="ubuntu-2204-lts" --image-project="ubuntu-os-cloud" \
+      --boot-disk-size=20GB >/dev/null
+  fi
+
   log "instances up. waiting 30s for SSH to settle..."
   sleep 30
   log "ready. next: ./scripts/bench-cluster.sh deploy"
@@ -280,6 +335,28 @@ cmd_deploy() {
 
   local per_shard; per_shard="$(prefill_per_shard)"
   log "shards will prefill ${per_shard} entries each (total = 2^$TOTAL_PRELOAD_LOG2)"
+
+  # ---- DB tier: install (idempotent) + FLUSHALL ----
+  # Bring Redis up first because each shard PINGs it at startup (5s
+  # timeout) and exits if it can't reach. FLUSHALL ensures every deploy
+  # starts from a clean keyspace — otherwise a previous run's slot keys
+  # would be visible to open-addressing and we'd see false "occupied"
+  # for empty polynomial slots.
+  local dname; dname="$(db_name)"
+  log "[$dname] installing + (re)starting redis on :$REDIS_PORT"
+  remote "$dname" "set -e; \
+    if ! dpkg -s redis-server >/dev/null 2>&1; then \
+      sudo apt-get update -qq && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq redis-server; \
+    fi; \
+    sudo sed -i 's/^bind .*/bind 0.0.0.0/' /etc/redis/redis.conf; \
+    sudo sed -i 's/^protected-mode .*/protected-mode no/' /etc/redis/redis.conf; \
+    sudo systemctl restart redis-server; \
+    sleep 1; \
+    redis-cli -h 127.0.0.1 -p $REDIS_PORT FLUSHALL >/dev/null; \
+    redis-cli -h 127.0.0.1 -p $REDIS_PORT PING"
+
+  local db_ip; db_ip="$(db_internal_ip)"
+  log "shards + coordinator will use redis://$db_ip:$REDIS_PORT"
 
   # ---- push to every shard + start, all in parallel ----
   # Each shard generates its own SRS in-process from --setup-seed
@@ -324,6 +401,7 @@ cmd_deploy() {
           --shard-id $i \
           --prefill-count $per_shard \
           --prefill-seed $shard_prefill_seed \
+          --db-url redis://$db_ip:$REDIS_PORT \
           > /tmp/aegon-shard.log 2>&1 < /dev/null & \
         echo \$! > /tmp/aegon-shard.pid; \
         disown 2>/dev/null || true; \
@@ -362,7 +440,9 @@ cmd_bench() {
 
   local cname; cname="$(coord_name)"
   local csv; csv="$(shard_endpoints_csv)"
+  local db_ip; db_ip="$(db_internal_ip)"
   log "endpoints (first 2 shown): $(echo "$csv" | cut -d, -f1-2),..."
+  log "db: redis://$db_ip:$REDIS_PORT"
   log "[$cname] running aegon_coordinator_bench"
   remote "$cname" \
     "mkdir -p \$HOME/aegon-run \$HOME/artifacts/srs && \
@@ -374,6 +454,7 @@ cmd_bench() {
        --endpoints $csv \
        --batch-sizes $BATCH_SIZES \
        --samples-per-batch $SAMPLES_PER_BATCH \
+       --db-url redis://$db_ip:$REDIS_PORT \
        --output $REMOTE_BENCH_OUT" \
     stream
   log "retrieving $REMOTE_BENCH_OUT -> $LOCAL_BENCH_OUT"
@@ -405,8 +486,13 @@ cmd_down() {
     log "deleting $cname"
     gcloud compute instances delete "$cname" --zone="$ZONE" --quiet >/dev/null
   fi
+  local dname; dname="$(db_name)"
+  if gcloud compute instances describe "$dname" --zone="$ZONE" >/dev/null 2>&1; then
+    log "deleting $dname"
+    gcloud compute instances delete "$dname" --zone="$ZONE" --quiet >/dev/null
+  fi
 
-  for fw in "$FIREWALL_GRPC" "$FIREWALL_SSH"; do
+  for fw in "$FIREWALL_GRPC" "$FIREWALL_REDIS" "$FIREWALL_SSH"; do
     if gcloud compute firewall-rules describe "$fw" >/dev/null 2>&1; then
       log "deleting firewall $fw"
       gcloud compute firewall-rules delete "$fw" --quiet >/dev/null

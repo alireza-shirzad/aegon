@@ -469,6 +469,8 @@ where
         &mut self,
         rng: &mut R,
         count: usize,
+        db_source: &DbSource,
+        shard_id: u32,
     ) -> Result<(), AegonError> {
         if self.pending.is_some() {
             return Err(AegonError::Config(
@@ -481,6 +483,10 @@ where
             ));
         }
         let capacity = 1usize << self.log_capacity;
+        // Track unique slots we actually filled — random draws collide
+        // at large `count`, so this can be smaller than `count`.
+        let mut filled_slots: std::collections::HashSet<usize> =
+            std::collections::HashSet::with_capacity(count);
         for _ in 0..count {
             // `rng.next_u64() as usize % capacity` is biased for
             // non-power-of-two `capacity`, but `capacity` here is
@@ -490,6 +496,7 @@ where
             let h_value = E::ScalarField::rand(rng);
             self.index_poly.evaluations.insert(slot, h_label);
             self.value_poly.evaluations.insert(slot, h_value);
+            filled_slots.insert(slot);
         }
         // Recommit the populated data polynomials. Rand polys stay at
         // zero — there's been no publish, so the chain randomness is
@@ -516,6 +523,32 @@ where
                 rand_value_state: self.rand_value_state.clone(),
             },
         );
+        // If the operator wired Redis in, also publish an occupancy
+        // bit per prefilled slot. The coordinator's open-addressing
+        // checks `aegon:slot:{shard_id}:{slot}` via EXISTS; without
+        // these writes it would believe the prefilled slots are empty
+        // and silently overwrite real entries on the next publish.
+        // Value is a marker — the production schema would store the
+        // owning label bytes, but prefilled rows have no real label
+        // and the bench never exercises the recovery path that reads
+        // them. Chunked so a 2^23-per-shard prefill doesn't try to
+        // pipeline 8M ops through one MULTI/EXEC.
+        if let DbSource::Redis(url) = db_source {
+            use super::db::{key_slot, Db, DbOp};
+            let db = RedisDb::connect(url)?;
+            const CHUNK: usize = 50_000;
+            let slots: Vec<usize> = filled_slots.into_iter().collect();
+            for chunk in slots.chunks(CHUNK) {
+                let ops: Vec<DbOp> = chunk
+                    .iter()
+                    .map(|&slot| DbOp::Set {
+                        key: key_slot(shard_id, slot),
+                        value: b"prefilled".to_vec(),
+                    })
+                    .collect();
+                db.write_atomic(&ops)?;
+            }
+        }
         Ok(())
     }
 

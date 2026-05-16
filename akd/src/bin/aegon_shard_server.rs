@@ -198,7 +198,9 @@ async fn main() -> ExitCode {
                 args.prefill_seed
             );
             let mut prefill_rng = ChaCha20Rng::seed_from_u64(args.prefill_seed);
-            if let Err(e) = aegon.prefill_random(&mut prefill_rng, count) {
+            if let Err(e) =
+                aegon.prefill_random(&mut prefill_rng, count, &db_source, shard_id)
+            {
                 eprintln!("error prefilling shard: {e}");
                 return ExitCode::from(1);
             }

@@ -39,7 +39,7 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 use akd::aegon::{
-    Sha256Hash, ShardTransport, ShardedAegon, ShardedAegonConfig, SrsSource,
+    DbSource, Sha256Hash, ShardTransport, ShardedAegon, ShardedAegonConfig, SrsSource,
 };
 use akd_core::aegon_crypto::pcs::kzhk::KZHK;
 use ark_bn254::Bn254;
@@ -97,6 +97,17 @@ struct Args {
     /// Where to write the JSON timing report.
     #[arg(long)]
     output: PathBuf,
+
+    /// Optional Redis URL for coordinator-side open-addressing. When
+    /// set, occupancy checks during slot probing become `EXISTS` calls
+    /// against `aegon:slot:{shard_id}:{slot_idx}` instead of gRPC
+    /// round-trips to the owning shard — typically a 10–100x speedup
+    /// on WAN clusters. Form: `redis://host[:port][/db]`. For results
+    /// to be correct against a prefilled cluster, every shard must
+    /// have been started with the matching `--db-url` so the prefill
+    /// also populated these keys.
+    #[arg(long)]
+    db_url: Option<String>,
 }
 
 fn main() -> ExitCode {
@@ -130,11 +141,16 @@ fn main() -> ExitCode {
     if let Some(path) = &args.srs_path {
         builder = builder.srs(SrsSource::Path(path.clone()));
     }
-    // Intentionally no `.db(...)`: this bench is publish-only, no
-    // lookups, and Redis EXISTS during open-addressing would dominate
-    // the timings we're trying to measure. With no DB configured the
-    // coordinator does gRPC occupancy checks instead — same
-    // correctness, network-cost-only overhead.
+    // With `--db-url`, the coordinator uses Redis for open-addressing
+    // occupancy checks (one `EXISTS` per probe) instead of gRPC
+    // round-trips to the owning shard. On a WAN cluster this dominates
+    // the wall-clock for any non-trivial batch, so toggling DB on is
+    // typically how you get from "end-to-end network-bound timing" to
+    // "what's actually crypto-bound". Without `--db-url` the bench
+    // falls back to gRPC occupancy checks (same correctness).
+    if let Some(url) = &args.db_url {
+        builder = builder.db(DbSource::Redis(url.clone()));
+    }
     let cfg = match builder.build() {
         Ok(c) => c,
         Err(e) => {
