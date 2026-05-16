@@ -873,20 +873,30 @@ impl<E: Pairing> KZHK<E> {
             })
             .collect();
 
-        // Step 1: bucket all non-zeros across all k-1 levels.
-        // Sequential pass (cheap: ~µs per level for r at k=20). Each
-        // level's buckets become `Vec<(prefix, bases, scalars)>`,
-        // ordered by prefix so the resulting Sparse rows have a
-        // canonical iteration order.
-        let level_buckets = {
+        // Step 1: build per-level *flat* arenas. Each level gets one
+        // backing `Vec<G1Affine>` + one `Vec<ScalarField>` sized to nnz,
+        // plus a `Vec<(prefix, Range<usize>)>` describing where each
+        // cell's slice lives. The previous implementation allocated
+        // *two* Vecs per cell (~21k allocations for nnz=2546 at k=10,
+        // ~240k at nnz=63583), which dominated the per-cell wall time
+        // — per-cell µs grew superlinearly with workload, classic
+        // allocator-pressure signature. Three Vecs per level (≈27 for
+        // k=10) is bounded irrespective of nnz.
+        struct LevelArena<E: Pairing> {
+            flat_bases: Vec<E::G1Affine>,
+            flat_scalars: Vec<E::ScalarField>,
+            /// `(prefix, range_into_flat_*)` per non-empty cell, ordered
+            /// by prefix so downstream Sparse rows have canonical order.
+            cells: Vec<(usize, std::ops::Range<usize>)>,
+        }
+        let level_arenas: Vec<LevelArena<E>> = {
             let _span = tracing::info_span!(
                 "KZH::CompAux::BucketSort",
                 k = k - 1,
                 nnz = nnz
             )
             .entered();
-            let mut level_buckets: Vec<Vec<(usize, Vec<E::G1Affine>, Vec<E::ScalarField>)>> =
-                Vec::with_capacity(k - 1);
+            let mut arenas: Vec<LevelArena<E>> = Vec::with_capacity(k - 1);
             for j in 0..k - 1 {
                 let prefix_var = prefix_vars_vec[j];
                 let rem_vars = polynomial.num_vars() - prefix_var;
@@ -895,49 +905,68 @@ impl<E: Pairing> KZHK<E> {
                     .as_slice_memory_order()
                     .expect("H_t must be contiguous (standard layout)");
 
-                let mut buckets: BTreeMap<usize, (Vec<E::G1Affine>, Vec<E::ScalarField>)> =
-                    BTreeMap::new();
-                for (&global_idx, &value) in polynomial.evaluations.iter() {
-                    let prefix = if rem_vars == 0 { 0 } else { global_idx >> rem_vars };
-                    let local_idx = global_idx & mask;
-                    let entry = buckets.entry(prefix).or_default();
-                    entry.0.push(h_slice[local_idx]);
-                    entry.1.push(value);
+                // Pass 1: compute (prefix, local_idx, value) per nz.
+                let mut entries: Vec<(usize, usize, E::ScalarField)> = polynomial
+                    .evaluations
+                    .iter()
+                    .map(|(&gidx, &v)| {
+                        let prefix = if rem_vars == 0 { 0 } else { gidx >> rem_vars };
+                        let local_idx = gidx & mask;
+                        (prefix, local_idx, v)
+                    })
+                    .collect();
+
+                // Pass 2: sort by prefix → cells become contiguous.
+                entries.sort_unstable_by_key(|e| e.0);
+
+                // Pass 3: pack into flat buffers, record cell ranges.
+                let n = entries.len();
+                let mut flat_bases: Vec<E::G1Affine> = Vec::with_capacity(n);
+                let mut flat_scalars: Vec<E::ScalarField> = Vec::with_capacity(n);
+                let mut cells: Vec<(usize, std::ops::Range<usize>)> = Vec::new();
+                let mut i = 0;
+                while i < n {
+                    let p = entries[i].0;
+                    let start = flat_bases.len();
+                    while i < n && entries[i].0 == p {
+                        flat_bases.push(h_slice[entries[i].1]);
+                        flat_scalars.push(entries[i].2);
+                        i += 1;
+                    }
+                    cells.push((p, start..flat_bases.len()));
                 }
-                level_buckets.push(
-                    buckets
-                        .into_iter()
-                        .map(|(p, (b, s))| (p, b, s))
-                        .collect(),
-                );
+
+                arenas.push(LevelArena {
+                    flat_bases,
+                    flat_scalars,
+                    cells,
+                });
             }
-            level_buckets
+            arenas
         };
 
-        // Step 2: flatten to one work list across all levels.
-        // Items: `(level_j, prefix, bases, scalars)`. The MSM at each
+        // Step 2: flatten cells across levels into one work list.
+        // Items: `(level_j, prefix, range_into_arena)`. The MSM at each
         // item produces aux[level_j][prefix].
-        let flat: Vec<(usize, usize, Vec<E::G1Affine>, Vec<E::ScalarField>)> = {
+        let flat: Vec<(usize, usize, std::ops::Range<usize>)> = {
             let _span = tracing::info_span!("KZH::CompAux::Flatten").entered();
             let mut flat = Vec::new();
-            for (j, buckets) in level_buckets.into_iter().enumerate() {
-                for (prefix, bases, scalars) in buckets {
-                    flat.push((j, prefix, bases, scalars));
+            for (j, arena) in level_arenas.iter().enumerate() {
+                for (prefix, range) in &arena.cells {
+                    flat.push((j, *prefix, range.clone()));
                 }
             }
             flat
         };
 
         // Step 3: one parallel MSM sweep across all (level, prefix)
-        // pairs. No nesting — rayon's work-stealing schedules the
-        // ~(k-1)·c independent MSMs across cores cleanly.
-        //
-        // We use `naive_msm` unconditionally inside this map: most
-        // cells are size 1 (a single scalar-mul) at sparse levels;
-        // even the larger cells at shallow levels stay below the
-        // Pippenger break-even (size ~4). Avoiding `msm()` here also
-        // avoids `pool::install`, which is a synchronization point we
-        // don't want firing under outer rayon.
+        // pairs. Size-1 cells (the bulk at deeper levels) hit a fast
+        // path that does one `affine * scalar` directly — `naive_msm`'s
+        // iterator chain (zip+map+fold-with-zero) is overhead in this
+        // case. Larger cells still go through `naive_msm`; they stay
+        // below the Pippenger break-even at sparse densities, and
+        // avoiding `msm()` skips the `pool::install` sync we don't want
+        // under outer rayon.
         let projectives: Vec<E::G1> = {
             let _span = tracing::info_span!(
                 "KZH::CompAux::ParallelMSM",
@@ -945,7 +974,16 @@ impl<E: Pairing> KZHK<E> {
             )
             .entered();
             cfg_iter!(flat)
-                .map(|(_j, _prefix, bases, scalars)| naive_msm::<E::G1>(bases, scalars))
+                .map(|(j, _prefix, range)| {
+                    let arena = &level_arenas[*j];
+                    let bases = &arena.flat_bases[range.start..range.end];
+                    let scalars = &arena.flat_scalars[range.start..range.end];
+                    if bases.len() == 1 {
+                        bases[0] * scalars[0]
+                    } else {
+                        naive_msm::<E::G1>(bases, scalars)
+                    }
+                })
                 .collect()
         };
 
@@ -965,7 +1003,7 @@ impl<E: Pairing> KZHK<E> {
             let _span = tracing::info_span!("KZH::CompAux::RebuildRows").entered();
             let mut sparse_entries: Vec<BTreeMap<usize, E::G1Affine>> =
                 (0..k - 1).map(|_| BTreeMap::new()).collect();
-            for ((j, prefix, _, _), aff) in flat.iter().zip(affines.iter()) {
+            for ((j, prefix, _), aff) in flat.iter().zip(affines.iter()) {
                 sparse_entries[*j].insert(*prefix, *aff);
             }
 
