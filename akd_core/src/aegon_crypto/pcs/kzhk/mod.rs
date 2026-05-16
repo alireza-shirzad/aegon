@@ -878,43 +878,55 @@ impl<E: Pairing> KZHK<E> {
         // level's buckets become `Vec<(prefix, bases, scalars)>`,
         // ordered by prefix so the resulting Sparse rows have a
         // canonical iteration order.
-        let mut level_buckets: Vec<Vec<(usize, Vec<E::G1Affine>, Vec<E::ScalarField>)>> =
-            Vec::with_capacity(k - 1);
-        for j in 0..k - 1 {
-            let prefix_var = prefix_vars_vec[j];
-            let rem_vars = polynomial.num_vars() - prefix_var;
-            let mask = if rem_vars == 0 { 0 } else { (1usize << rem_vars) - 1 };
-            let h_slice = prover_param.get_h_tensors()[j + 1]
-                .as_slice_memory_order()
-                .expect("H_t must be contiguous (standard layout)");
+        let level_buckets = {
+            let _span = tracing::info_span!(
+                "KZH::CompAux::BucketSort",
+                k = k - 1,
+                nnz = nnz
+            )
+            .entered();
+            let mut level_buckets: Vec<Vec<(usize, Vec<E::G1Affine>, Vec<E::ScalarField>)>> =
+                Vec::with_capacity(k - 1);
+            for j in 0..k - 1 {
+                let prefix_var = prefix_vars_vec[j];
+                let rem_vars = polynomial.num_vars() - prefix_var;
+                let mask = if rem_vars == 0 { 0 } else { (1usize << rem_vars) - 1 };
+                let h_slice = prover_param.get_h_tensors()[j + 1]
+                    .as_slice_memory_order()
+                    .expect("H_t must be contiguous (standard layout)");
 
-            let mut buckets: BTreeMap<usize, (Vec<E::G1Affine>, Vec<E::ScalarField>)> =
-                BTreeMap::new();
-            for (&global_idx, &value) in polynomial.evaluations.iter() {
-                let prefix = if rem_vars == 0 { 0 } else { global_idx >> rem_vars };
-                let local_idx = global_idx & mask;
-                let entry = buckets.entry(prefix).or_default();
-                entry.0.push(h_slice[local_idx]);
-                entry.1.push(value);
+                let mut buckets: BTreeMap<usize, (Vec<E::G1Affine>, Vec<E::ScalarField>)> =
+                    BTreeMap::new();
+                for (&global_idx, &value) in polynomial.evaluations.iter() {
+                    let prefix = if rem_vars == 0 { 0 } else { global_idx >> rem_vars };
+                    let local_idx = global_idx & mask;
+                    let entry = buckets.entry(prefix).or_default();
+                    entry.0.push(h_slice[local_idx]);
+                    entry.1.push(value);
+                }
+                level_buckets.push(
+                    buckets
+                        .into_iter()
+                        .map(|(p, (b, s))| (p, b, s))
+                        .collect(),
+                );
             }
-            level_buckets.push(
-                buckets
-                    .into_iter()
-                    .map(|(p, (b, s))| (p, b, s))
-                    .collect(),
-            );
-        }
+            level_buckets
+        };
 
         // Step 2: flatten to one work list across all levels.
         // Items: `(level_j, prefix, bases, scalars)`. The MSM at each
         // item produces aux[level_j][prefix].
-        let mut flat: Vec<(usize, usize, Vec<E::G1Affine>, Vec<E::ScalarField>)> =
-            Vec::new();
-        for (j, buckets) in level_buckets.into_iter().enumerate() {
-            for (prefix, bases, scalars) in buckets {
-                flat.push((j, prefix, bases, scalars));
+        let flat: Vec<(usize, usize, Vec<E::G1Affine>, Vec<E::ScalarField>)> = {
+            let _span = tracing::info_span!("KZH::CompAux::Flatten").entered();
+            let mut flat = Vec::new();
+            for (j, buckets) in level_buckets.into_iter().enumerate() {
+                for (prefix, bases, scalars) in buckets {
+                    flat.push((j, prefix, bases, scalars));
+                }
             }
-        }
+            flat
+        };
 
         // Step 3: one parallel MSM sweep across all (level, prefix)
         // pairs. No nesting — rayon's work-stealing schedules the
@@ -926,40 +938,57 @@ impl<E: Pairing> KZHK<E> {
         // Pippenger break-even (size ~4). Avoiding `msm()` here also
         // avoids `pool::install`, which is a synchronization point we
         // don't want firing under outer rayon.
-        let projectives: Vec<E::G1> = cfg_iter!(flat)
-            .map(|(_j, _prefix, bases, scalars)| naive_msm::<E::G1>(bases, scalars))
-            .collect();
+        let projectives: Vec<E::G1> = {
+            let _span = tracing::info_span!(
+                "KZH::CompAux::ParallelMSM",
+                cells = flat.len()
+            )
+            .entered();
+            cfg_iter!(flat)
+                .map(|(_j, _prefix, bases, scalars)| naive_msm::<E::G1>(bases, scalars))
+                .collect()
+        };
 
         // Step 4: one batch normalization over every non-empty cell
         // across every level.
-        let affines = <E::G1 as CurveGroup>::normalize_batch(&projectives);
+        let affines = {
+            let _span = tracing::info_span!(
+                "KZH::CompAux::NormalizeBatch",
+                cells = projectives.len()
+            )
+            .entered();
+            <E::G1 as CurveGroup>::normalize_batch(&projectives)
+        };
 
         // Step 5: rebuild per-level rows from the flat results.
-        let mut sparse_entries: Vec<BTreeMap<usize, E::G1Affine>> =
-            (0..k - 1).map(|_| BTreeMap::new()).collect();
-        for ((j, prefix, _, _), aff) in flat.iter().zip(affines.iter()) {
-            sparse_entries[*j].insert(*prefix, *aff);
-        }
+        let d_bool: Vec<AuxRow<E>> = {
+            let _span = tracing::info_span!("KZH::CompAux::RebuildRows").entered();
+            let mut sparse_entries: Vec<BTreeMap<usize, E::G1Affine>> =
+                (0..k - 1).map(|_| BTreeMap::new()).collect();
+            for ((j, prefix, _, _), aff) in flat.iter().zip(affines.iter()) {
+                sparse_entries[*j].insert(*prefix, *aff);
+            }
 
-        let d_bool: Vec<AuxRow<E>> = sparse_entries
-            .into_iter()
-            .enumerate()
-            .map(|(j, entries)| {
-                let (dj_size, go_sparse) = level_meta[j];
-                if go_sparse {
-                    AuxRow::Sparse {
-                        len: dj_size,
-                        entries,
+            sparse_entries
+                .into_iter()
+                .enumerate()
+                .map(|(j, entries)| {
+                    let (dj_size, go_sparse) = level_meta[j];
+                    if go_sparse {
+                        AuxRow::Sparse {
+                            len: dj_size,
+                            entries,
+                        }
+                    } else {
+                        let mut dense = vec![E::G1Affine::zero(); dj_size];
+                        for (prefix, aff) in entries {
+                            dense[prefix] = aff;
+                        }
+                        AuxRow::Dense(dense)
                     }
-                } else {
-                    let mut dense = vec![E::G1Affine::zero(); dj_size];
-                    for (prefix, aff) in entries {
-                        dense[prefix] = aff;
-                    }
-                    AuxRow::Dense(dense)
-                }
-            })
-            .collect();
+                })
+                .collect()
+        };
 
         state.set_d_bool(d_bool);
         Ok(())
