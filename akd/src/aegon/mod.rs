@@ -23,6 +23,8 @@ pub mod presets;
 pub mod server;
 pub mod shard_grpc;
 pub mod sharded;
+#[cfg(feature = "tracing_instrument")]
+pub mod tracing_init;
 pub mod types;
 pub mod verify;
 

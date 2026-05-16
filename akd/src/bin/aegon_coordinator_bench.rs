@@ -111,6 +111,8 @@ struct Args {
 }
 
 fn main() -> ExitCode {
+    #[cfg(feature = "tracing_instrument")]
+    akd::aegon::tracing_init::init_tree_subscriber();
     let args = Args::parse();
 
     if !args.endpoints.len().is_power_of_two() {

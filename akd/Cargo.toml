@@ -48,8 +48,12 @@ serde_serialization = ["dep:serde", "akd_core/serde_serialization"]
 slow_internal_db = []
 # Tracing instrumentation
 tracing = ["dep:tracing"]
-# Tracing-based instrumentation
-tracing_instrument = ["tracing/attributes"]
+# Tracing-based instrumentation. Pulls in `tracing-subscriber` and
+# `tracing-tree` so the bins can install a console-rendering tree
+# subscriber at startup — gives you a nested view of phase-level spans
+# (Aegon::PublishPhase1, KZH::FMAState, ShardedAegon::*) without any
+# separate flame-graph tooling.
+tracing_instrument = ["tracing/attributes", "dep:tracing-subscriber", "dep:tracing-tree"]
 
 [dependencies]
 ## Required dependencies ##
@@ -86,6 +90,8 @@ protobuf = { version = "3", optional = true }
 rand = { version = "0.8", optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
 tracing = { version = "0.1.40", optional = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
+tracing-tree = { version = "0.4", optional = true }
 
 [dev-dependencies]
 criterion = "0.5"

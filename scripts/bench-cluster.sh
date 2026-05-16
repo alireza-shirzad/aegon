@@ -309,6 +309,15 @@ cmd_deploy() {
   require_project
   require_power_of_two "$N_SHARDS"
 
+  # Optional: `TRACING=1` builds with the `tracing_instrument` feature
+  # so the bins install a tracing-tree subscriber and emit phase spans
+  # (`Aegon::PublishPhase1`, `KZH::FMAState`, `ShardedAegon::*`, ...).
+  # Stderr only; the bench JSON is unaffected. Turn off for clean runs.
+  local cargo_features=""
+  if [[ "${TRACING:-0}" == "1" ]]; then
+    cargo_features="--features tracing_instrument"
+    log "TRACING=1: building with tracing_instrument feature (tracing-tree subscriber)"
+  fi
   local local_bin_dir="$REPO_ROOT/target/release"
   local remote_bin_dir="$local_bin_dir"
   if [[ "$(uname -s)" == "Darwin" ]]; then
@@ -322,12 +331,12 @@ cmd_deploy() {
       bash -c "set -e; \
         apt-get update >/dev/null && \
         apt-get install -y --no-install-recommends protobuf-compiler ca-certificates >/dev/null && \
-        cargo build --release -p akd --target x86_64-unknown-linux-gnu \
+        cargo build --release -p akd $cargo_features --target x86_64-unknown-linux-gnu \
           --bin aegon_shard_server --bin aegon_coordinator_bench"
     remote_bin_dir="$REPO_ROOT/target/x86_64-unknown-linux-gnu/release"
   else
     log "building release binaries (aegon_shard_server, aegon_coordinator_bench)"
-    (cd "$REPO_ROOT" && cargo build --release -p akd \
+    (cd "$REPO_ROOT" && cargo build --release -p akd $cargo_features \
       --bin aegon_shard_server --bin aegon_coordinator_bench) >/dev/null
   fi
   [[ -x "$remote_bin_dir/aegon_shard_server" ]]      || die "aegon_shard_server missing"
@@ -465,9 +474,17 @@ cmd_bench() {
 cmd_logs() {
   require_project
   local idx="${1:-0}"
+  local lines="${2:-}"
   local name; name="$(shard_name "$idx")"
-  log "[$name] tail /tmp/aegon-shard.log"
-  remote "$name" "tail -f /tmp/aegon-shard.log" stream
+  if [[ -n "$lines" ]]; then
+    # One-shot: print the last $lines and exit. Use this when you want
+    # to grep/tail/pipe; `tail -f` would block downstream filters.
+    log "[$name] tail -n $lines /tmp/aegon-shard.log"
+    remote "$name" "tail -n $lines /tmp/aegon-shard.log"
+  else
+    log "[$name] tail -f /tmp/aegon-shard.log (Ctrl-C to stop)"
+    remote "$name" "tail -f /tmp/aegon-shard.log" stream
+  fi
 }
 
 cmd_down() {

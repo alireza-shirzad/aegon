@@ -109,6 +109,8 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    #[cfg(feature = "tracing_instrument")]
+    akd::aegon::tracing_init::init_tree_subscriber();
     let args = Args::parse();
 
     if args.srs_path.is_none() && args.setup_seed.is_none() {
