@@ -57,6 +57,16 @@ pub(crate) enum DbOp {
     Set { key: Vec<u8>, value: Vec<u8> },
     /// `SADD key member` — add `member` to the set at `key`.
     SAdd { key: Vec<u8>, member: Vec<u8> },
+    /// `LPUSH key member` — prepend `member` to the head of the list
+    /// at `key`. Used by the value-history sliding window: combined
+    /// with an `LTrim 0 (N-1)` immediately after, this implements
+    /// "keep the most recent N entries" atomically inside a publish's
+    /// MULTI/EXEC.
+    LPush { key: Vec<u8>, member: Vec<u8> },
+    /// `LTRIM key start stop` — keep only `list[start..=stop]`,
+    /// discarding the rest. Negative indices count from the tail.
+    /// Paired with `LPush` to bound the value-history list length.
+    LTrim { key: Vec<u8>, start: isize, stop: isize },
 }
 
 /// Coordinator-side durable store. All writes happen via `write_atomic`
@@ -79,6 +89,11 @@ pub(crate) trait Db: Send + Sync {
     /// Members of a Redis SET. Used for recovery-time enumeration
     /// (the `aegon:labels` set).
     fn smembers(&self, key: &[u8]) -> Result<Vec<Vec<u8>>, AegonError>;
+    /// `LRANGE key start stop` — list slice. Used by `lookup_history`
+    /// to fetch the cached `aegon:value_history:{label}` window with
+    /// one round-trip. Returns each element as raw bytes (canonical-
+    /// serialized `StoredValueHistoryEntry`); caller decodes.
+    fn lrange(&self, key: &[u8], start: isize, stop: isize) -> Result<Vec<Vec<u8>>, AegonError>;
 }
 
 /// Redis-backed implementation. One connection behind a `Mutex` —
@@ -138,6 +153,12 @@ impl Db for RedisDb {
                 DbOp::SAdd { key, member } => {
                     pipe.sadd::<&[u8], &[u8]>(key, member).ignore();
                 },
+                DbOp::LPush { key, member } => {
+                    pipe.lpush::<&[u8], &[u8]>(key, member).ignore();
+                },
+                DbOp::LTrim { key, start, stop } => {
+                    pipe.ltrim::<&[u8]>(key, *start, *stop).ignore();
+                },
             }
         }
         pipe.query::<()>(&mut *conn)
@@ -177,6 +198,12 @@ impl Db for RedisDb {
         let mut conn = self.lock_conn()?;
         conn.smembers::<&[u8], Vec<Vec<u8>>>(key)
             .map_err(|e| AegonError::Database(format!("SMEMBERS: {e}")))
+    }
+
+    fn lrange(&self, key: &[u8], start: isize, stop: isize) -> Result<Vec<Vec<u8>>, AegonError> {
+        let mut conn = self.lock_conn()?;
+        conn.lrange::<&[u8], Vec<Vec<u8>>>(key, start, stop)
+            .map_err(|e| AegonError::Database(format!("LRANGE: {e}")))
     }
 }
 
@@ -234,4 +261,15 @@ pub(crate) fn key_shard_state(shard_id: u32) -> Vec<u8> {
 /// the publish carried no new labels for that shard.
 pub(crate) fn key_history_openings(epoch: u64, shard_id: u32) -> Vec<u8> {
     format!("aegon:openings:{epoch}:{shard_id}").into_bytes()
+}
+
+/// `aegon:value_history:{label}` — Redis LIST storing the last N
+/// `StoredValueHistoryEntry` records for a label, head-first (LPUSH
+/// + LTRIM 0 N-1 pattern). Each list element is the canonical-
+/// serialized entry bytes. Used by the user-facing `lookup_history`
+/// API; absent until the label's first publish.
+pub(crate) fn key_value_history(label: &[u8]) -> Vec<u8> {
+    let mut k = b"aegon:value_history:".to_vec();
+    k.extend_from_slice(label);
+    k
 }

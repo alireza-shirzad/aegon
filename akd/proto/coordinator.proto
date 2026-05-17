@@ -25,6 +25,12 @@ package aegon.coordinator.v1;
 service CoordinatorService {
   rpc LookupLabel(LookupLabelRequest) returns (LookupLabelResponse);
   rpc LookupValue(LookupValueRequest) returns (LookupValueResponse);
+  // Fetch up to HISTORY_WINDOW (currently 5) most-recent value-change
+  // records for `label`. Each record is a self-contained bundle the
+  // client verifies locally via `verify_lookup_history`. Response is
+  // empty when the label is unknown OR when the coordinator was
+  // configured with DbSource::None (no Redis backing).
+  rpc LookupHistory(LookupHistoryRequest) returns (LookupHistoryResponse);
   rpc CurrentCommitment(Empty) returns (CommitmentResponse);
 }
 
@@ -71,6 +77,22 @@ message CommitmentResponse {
   // bulletin-board commitment the client should anchor verifications
   // against. Includes the cross-shard merkle root.
   bytes commitment = 1;
+}
+
+message LookupHistoryRequest {
+  // Raw label bytes — the same identifier used at publish time.
+  bytes label = 1;
+}
+
+message LookupHistoryResponse {
+  // Canonical-serialized ShardedValueHistory. Carries the label bytes
+  // plus up to HISTORY_WINDOW entries (most-recent first). Each entry
+  // is a full self-contained bundle (pre/post shard commitments, both
+  // merkle paths, three openings, value bytes) — the client verifies
+  // each via `verify_lookup_history` and is then responsible for
+  // cross-checking the returned (prev_root, post_root) pairs against
+  // its trusted view of historical bulletin-board roots.
+  bytes history = 1;
 }
 
 message Empty {}

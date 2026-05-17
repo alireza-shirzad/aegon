@@ -189,19 +189,65 @@ pub struct HistoryOpeningEntry<E: Pairing, P: AegonPcs<E>> {
     pub value_post_proof: P::Proof,
 }
 
+/// Per-slot value-change witness emitted by a shard during
+/// `publish_phase_2`. Captures the three openings the user-facing
+/// value-history feature needs at *one* slot during *one* publish:
+///
+/// * `rand_value_pre`  — `rand_value_n(slot)` opened against the
+///   *prior* epoch's `rand_value_commitment`.
+/// * `rand_value_post` — `rand_value_{n+1}(slot)` opened against the
+///   *new* epoch's `rand_value_commitment`.
+/// * `value_post`      — `value_{n+1}(slot) = H_F(value)` opened
+///   against the new epoch's `value_commitment`.
+///
+/// Applies to **both** brand-new placements and value-updates on
+/// already-occupied slots. For brand-new placements `rand_value_pre_eval`
+/// is zero (empty slot), but the proof binds to the prior commitment
+/// regardless — same shape lets the user-history verifier handle both
+/// cases uniformly.
+///
+/// `rand_index` is intentionally omitted: index-poly state at a slot
+/// only changes on placement, not on value-only updates, so it's not
+/// needed for the user-history chain. The §6.4 audit path keeps using
+/// the richer [`HistoryOpeningEntry`] which carries the rand_index
+/// openings as well.
+#[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
+pub struct ValueChangeEntry<E: Pairing, P: AegonPcs<E>> {
+    /// Slot bits this entry's openings are at (low bit first), length
+    /// `shard_log_capacity`.
+    pub slot_bits: Vec<bool>,
+    /// `rand_value_n(slot)` at the prior-epoch rand_value commitment.
+    pub rand_value_pre_eval: E::ScalarField,
+    pub rand_value_pre_proof: P::Proof,
+    /// `rand_value_{n+1}(slot)` at the new-epoch rand_value commitment.
+    pub rand_value_post_eval: E::ScalarField,
+    pub rand_value_post_proof: P::Proof,
+    /// `value_{n+1}(slot) = H_F(value)` at the new-epoch value
+    /// commitment.
+    pub value_post_eval: E::ScalarField,
+    pub value_post_proof: P::Proof,
+}
+
 /// All §6.4 history witnesses one shard produced during one publish.
-/// Empty when the publish carried no new labels for this shard (only
-/// value-updates to already-occupied slots, which the rand-poly chain
-/// covers via standard consistency proofs).
+/// `entries` carries the full 5-opening bundle for brand-new label
+/// placements (§6.4 audit path); `value_changes` carries the 3-opening
+/// bundle for every slot whose value actually changed in this publish
+/// (the user-facing value-history feature feeds off this list). A
+/// brand-new placement contributes to *both* lists (its placement
+/// shows up in `entries` for audit and in `value_changes` for the
+/// user's history); a value-update on an already-occupied slot only
+/// shows up in `value_changes`.
 #[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
 pub struct HistoryOpenings<E: Pairing, P: AegonPcs<E>> {
     pub entries: Vec<HistoryOpeningEntry<E, P>>,
+    pub value_changes: Vec<ValueChangeEntry<E, P>>,
 }
 
 impl<E: Pairing, P: AegonPcs<E>> Default for HistoryOpenings<E, P> {
     fn default() -> Self {
         Self {
             entries: Vec::new(),
+            value_changes: Vec::new(),
         }
     }
 }

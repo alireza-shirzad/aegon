@@ -35,7 +35,7 @@ use super::audit::verify_chain;
 use super::config::{AegonConfig, VerifierContext};
 use super::db::{
     key_coord_state, key_epoch_commit, key_history_openings, key_labels_set, key_routing,
-    key_slot, key_value, Db, DbOp, DbSource, RedisDb,
+    key_slot, key_value, key_value_history, Db, DbOp, DbSource, RedisDb,
 };
 use super::error::AegonError;
 use super::hash::{bool_index_to_point, HashSuite, Sha256Hash};
@@ -535,6 +535,71 @@ pub struct ShardedValueProof<E: Pairing, P: AegonPcs<E>> {
     pub merkle_path: Vec<EpochDigest>,
     pub evaluation: E::ScalarField,
     pub proof: P::Proof,
+}
+
+/// Maximum number of value-history entries retained per label. The
+/// coordinator's value-history feature maintains a sliding window of
+/// at most this many records per label in Redis (LPUSH + LTRIM 0
+/// N-1). When a label changes value more than `HISTORY_WINDOW` times,
+/// only the most recent `HISTORY_WINDOW` records are observable via
+/// `lookup_history`.
+pub const HISTORY_WINDOW: usize = 5;
+
+/// One persisted value-history record. Each `lookup_history(label)`
+/// returns up to `HISTORY_WINDOW` of these — one per publish in which
+/// the label's value changed (placement is treated as the first
+/// value-change). Self-contained: includes the per-shard commitments
+/// at both the prior and the new epoch + their merkle paths under the
+/// sharded root, so a verifier can re-anchor every opening without
+/// any external bulletin-board lookup beyond pinning the *roots*
+/// against the user's trusted source.
+#[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
+pub struct StoredValueHistoryEntry<E: Pairing, P: AegonPcs<E>> {
+    /// Epoch at which this value-change was published. The entry's
+    /// `post_*` commitments are the per-shard commitments at this
+    /// epoch; the `prev_*` commitments are at epoch (epoch - 1).
+    pub epoch: u64,
+    /// Shard that owns the slot.
+    pub shard_id: u32,
+    /// Slot bits within the shard (low bit first).
+    pub slot_bits: Vec<bool>,
+    /// Raw value bytes that were published. The verifier hashes these
+    /// locally and checks `H_F(value_bytes) == value_post_eval`.
+    pub value_bytes: Vec<u8>,
+    /// `rand_value_n(slot)` at the prior-epoch rand_value commitment
+    /// inside `prev_shard_commit`. Zero on a brand-new placement.
+    pub rand_value_pre_eval: E::ScalarField,
+    pub rand_value_pre_proof: P::Proof,
+    /// `rand_value_{n+1}(slot)` at the new-epoch rand_value commitment.
+    pub rand_value_post_eval: E::ScalarField,
+    pub rand_value_post_proof: P::Proof,
+    /// `value_{n+1}(slot) = H_F(value)` at the new-epoch value
+    /// commitment.
+    pub value_post_eval: E::ScalarField,
+    pub value_post_proof: P::Proof,
+    /// Per-shard commitment at epoch (epoch - 1) — the leaf the
+    /// `rand_value_pre_proof` anchors against. Carries
+    /// `rand_value_commitment` (used) plus the other per-shard
+    /// commitments (unused for verification but kept so the leaf hash
+    /// reproduces).
+    pub prev_shard_commit: EpochCommitment<E, P>,
+    /// Merkle path from `prev_shard_commit` (at position `shard_id`)
+    /// up to the sharded root at epoch (epoch - 1).
+    pub prev_merkle_path: Vec<EpochDigest>,
+    /// Per-shard commitment at epoch — anchors the post-update
+    /// `rand_value` and `value` openings.
+    pub post_shard_commit: EpochCommitment<E, P>,
+    /// Merkle path from `post_shard_commit` up to the sharded root at
+    /// epoch.
+    pub post_merkle_path: Vec<EpochDigest>,
+}
+
+/// `lookup_history(label)` response: up to `HISTORY_WINDOW` entries,
+/// most-recent first (matches Redis LPUSH+LRANGE 0 N-1 ordering).
+#[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
+pub struct ShardedValueHistory<E: Pairing, P: AegonPcs<E>> {
+    pub label: Vec<u8>,
+    pub entries: Vec<StoredValueHistoryEntry<E, P>>,
 }
 
 /// One probe's worth of consistency evidence: openings of `rand_index`
@@ -1403,8 +1468,10 @@ where
         // 5. openings:{epoch}:{shard_id} — §6.4 history witnesses. One
         // key per shard whose batch carried at least one brand-new
         // label. Shards that did only value-updates produced an empty
-        // `HistoryOpenings`; persisting an empty bundle would just
-        // waste a Redis SET, so those are skipped here.
+        // `HistoryOpenings.entries`; persisting an empty bundle would
+        // just waste a Redis SET, so those are skipped here. The
+        // value_changes side may still be non-empty for those shards
+        // (handled separately below as user-facing per-label history).
         for (shard_id, history) in per_shard_history.iter().enumerate() {
             if history.entries.is_empty() {
                 continue;
@@ -1417,6 +1484,109 @@ where
                 key: key_history_openings(sharded_commit.epoch, shard_id as u32),
                 value: history_bytes,
             });
+        }
+
+        // 6. value_history:{label} — user-facing value-history sliding
+        // window. For every slot whose value changed this publish
+        // (across all shards), build a `StoredValueHistoryEntry` and
+        // LPUSH it onto that label's list, then LTRIM to keep at most
+        // `HISTORY_WINDOW` entries. Both ops sit inside the same
+        // MULTI/EXEC, so a concurrent reader sees either the full
+        // pre-publish or the full post-publish list — never a torn
+        // state.
+        //
+        // Mapping value_changes back to the label that owned the slot
+        // uses `self.routing` (built earlier this publish): every
+        // update's label has a final_assignment of `(shard_id,
+        // slot_bits)` matching exactly one ValueChangeEntry on that
+        // shard. We pre-build a `(shard_id, slot_bits) -> label` map
+        // so the inner loop is O(1).
+        let prev_commit = if sharded_commit.epoch == 0 {
+            None
+        } else {
+            self.epoch_commits.get((sharded_commit.epoch - 1) as usize).cloned()
+        };
+        let mut slot_to_label: std::collections::HashMap<(u32, Vec<bool>), Label> =
+            std::collections::HashMap::with_capacity(updates.len());
+        for (label, _value) in updates {
+            if let Some(routing) = self.routing.get(label) {
+                let (sid, sbits) = routing.final_assignment();
+                slot_to_label.insert((*sid, sbits.clone()), label.clone());
+            }
+        }
+        // Also build a (label -> value bytes) map so each entry can
+        // carry the raw value_bytes the user later hashes against
+        // value_post_eval. Updates list is already that map — just
+        // address it by label.
+        let mut label_to_value: std::collections::HashMap<&[u8], &[u8]> =
+            std::collections::HashMap::with_capacity(updates.len());
+        for (label, value) in updates {
+            label_to_value.insert(label.as_slice(), value.as_slice());
+        }
+        for (shard_id, history) in per_shard_history.iter().enumerate() {
+            if history.value_changes.is_empty() {
+                continue;
+            }
+            // Building entries needs the *prev* sharded commitment to
+            // anchor `rand_value_pre`. Skip the very first epoch's
+            // history persistence — there's no "prev" sharded root
+            // there, and by construction epoch 0 carried no value
+            // changes (it's the empty initial state).
+            let Some(prev_sharded) = prev_commit.as_ref() else {
+                continue;
+            };
+            let prev_leaf = prev_sharded.per_shard[shard_id].clone();
+            let prev_merkle_path = build_merkle_path(&prev_sharded.per_shard, shard_id);
+            let post_leaf = sharded_commit.per_shard[shard_id].clone();
+            let post_merkle_path = build_merkle_path(&sharded_commit.per_shard, shard_id);
+            for vc in &history.value_changes {
+                // Find the label that owns this (shard_id, slot_bits).
+                // Must be in `slot_to_label` because every value change
+                // came from a label in `updates`. If it's missing
+                // that's an internal-consistency bug.
+                let Some(label) = slot_to_label.get(&(shard_id as u32, vc.slot_bits.clone())) else {
+                    return Err(AegonError::Database(format!(
+                        "internal: value_change at shard {shard_id} slot {:?} has no matching label in this publish's updates",
+                        vc.slot_bits
+                    )));
+                };
+                let value_bytes = label_to_value.get(label.as_slice()).copied().unwrap_or(&[]);
+                let entry = StoredValueHistoryEntry::<E, P> {
+                    epoch: sharded_commit.epoch,
+                    shard_id: shard_id as u32,
+                    slot_bits: vc.slot_bits.clone(),
+                    value_bytes: value_bytes.to_vec(),
+                    rand_value_pre_eval: vc.rand_value_pre_eval,
+                    rand_value_pre_proof: vc.rand_value_pre_proof.clone(),
+                    rand_value_post_eval: vc.rand_value_post_eval,
+                    rand_value_post_proof: vc.rand_value_post_proof.clone(),
+                    value_post_eval: vc.value_post_eval,
+                    value_post_proof: vc.value_post_proof.clone(),
+                    prev_shard_commit: prev_leaf.clone(),
+                    prev_merkle_path: prev_merkle_path.clone(),
+                    post_shard_commit: post_leaf.clone(),
+                    post_merkle_path: post_merkle_path.clone(),
+                };
+                let mut entry_bytes = Vec::new();
+                entry
+                    .serialize_compressed(&mut entry_bytes)
+                    .map_err(|e| AegonError::Database(format!("serialize value history entry: {e}")))?;
+                let history_key = key_value_history(label);
+                ops.push(DbOp::LPush {
+                    key: history_key.clone(),
+                    member: entry_bytes,
+                });
+                // LTRIM 0 (HISTORY_WINDOW-1) keeps just the N most-
+                // recent entries. Cheap because LTRIM with an index
+                // beyond the list length is a no-op for the first
+                // (HISTORY_WINDOW-1) publishes — only kicks in once
+                // the list overflows.
+                ops.push(DbOp::LTrim {
+                    key: history_key,
+                    start: 0,
+                    stop: (HISTORY_WINDOW as isize) - 1,
+                });
+            }
         }
 
         db.write_atomic(&ops)
@@ -1548,6 +1718,57 @@ where
             merkle_path,
             evaluation,
             proof,
+        })
+    }
+
+    /// User-facing value-history fetch. Reads up to `HISTORY_WINDOW`
+    /// most-recent `(epoch, value, openings)` records for `label` from
+    /// the `aegon:value_history:{label}` Redis list, decodes each
+    /// entry, and returns them. Order is most-recent first (matches
+    /// the underlying LPUSH+LRANGE 0 N-1 semantics).
+    ///
+    /// Pure read — no shard RPCs, no PCS work on the server side.
+    /// Verification is the client's job (see `verify_lookup_history`).
+    /// Returns an empty `entries` Vec when:
+    ///   * `DbSource::None` is configured (no place to fetch from),
+    ///   * the label exists but has never been published (no LPUSH
+    ///     has run for it yet), or
+    ///   * the label is unknown.
+    /// Returning empty (rather than `UnknownLabel`) keeps the API
+    /// resilient to races where a client asks for history right after
+    /// a label was assigned but before the persist's MULTI/EXEC
+    /// landed.
+    pub fn lookup_history(
+        &self,
+        label: &Label,
+    ) -> Result<ShardedValueHistory<E, P>, AegonError> {
+        let Some(db) = &self.db else {
+            return Ok(ShardedValueHistory {
+                label: label.clone(),
+                entries: Vec::new(),
+            });
+        };
+        // Fetch the whole window in one round-trip. HISTORY_WINDOW is
+        // small enough that LRANGE 0 -1 would also be fine — we cap
+        // explicitly so a stale list that's somehow longer than the
+        // window doesn't surprise the client.
+        let raw_entries = db.lrange(
+            &key_value_history(label),
+            0,
+            (HISTORY_WINDOW as isize) - 1,
+        )?;
+        let mut entries: Vec<StoredValueHistoryEntry<E, P>> =
+            Vec::with_capacity(raw_entries.len());
+        for bytes in raw_entries {
+            let entry = StoredValueHistoryEntry::<E, P>::deserialize_compressed(&bytes[..])
+                .map_err(|e| {
+                    AegonError::Database(format!("decode value history entry: {e}"))
+                })?;
+            entries.push(entry);
+        }
+        Ok(ShardedValueHistory {
+            label: label.clone(),
+            entries,
         })
     }
 
@@ -1835,6 +2056,121 @@ where
         ));
     }
     Ok(true)
+}
+
+/// Verify a `ShardedValueHistory` bundle returned by
+/// `ShardedAegon::lookup_history`. Each entry is checked independently:
+///
+///   1. Per-shard leaf `entry.prev_shard_commit` re-hashes up to a
+///      sharded root via `entry.prev_merkle_path` (the "prev root").
+///      Per-shard leaf `entry.post_shard_commit` re-hashes up to a
+///      sharded root via `entry.post_merkle_path` (the "post root").
+///      The caller is responsible for cross-checking these two roots
+///      against whatever bulletin-board snapshot they trust for
+///      epochs `entry.epoch - 1` and `entry.epoch`. This function
+///      returns the reconstructed roots in the `Ok` path so the
+///      caller can do that without re-verifying.
+///   2. `rand_value_pre_proof` opens at `slot_bits` against
+///      `entry.prev_shard_commit.rand_value_commitment` with value
+///      `rand_value_pre_eval`.
+///   3. `rand_value_post_proof` opens at `slot_bits` against
+///      `entry.post_shard_commit.rand_value_commitment` with value
+///      `rand_value_post_eval`.
+///   4. `value_post_proof` opens at `slot_bits` against
+///      `entry.post_shard_commit.value_commitment` with value
+///      `value_post_eval`.
+///   5. `H::h_f(entry.value_bytes) == entry.value_post_eval`.
+///
+/// `Ok(verified_anchors)` is a vector of `(prev_root, post_root)`
+/// pairs parallel to `history.entries` — handy for the caller's
+/// bulletin-board cross-check step. `Err` signals a per-entry failure
+/// (caller decides whether to reject the whole bundle or keep going).
+pub fn verify_lookup_history<E, P, H>(
+    ctx: &ShardedVerifierContext<E, P>,
+    history: &ShardedValueHistory<E, P>,
+) -> Result<Vec<(EpochDigest, EpochDigest)>, AegonError>
+where
+    E: Pairing,
+    P: AegonPcs<E>,
+    H: HashSuite<E::ScalarField>,
+{
+    let mut roots: Vec<(EpochDigest, EpochDigest)> = Vec::with_capacity(history.entries.len());
+    for entry in &history.entries {
+        // Re-anchor both leaves under their respective sharded roots.
+        let prev_root = verify_merkle_path::<E, P>(
+            &entry.prev_shard_commit,
+            entry.shard_id as usize,
+            &entry.prev_merkle_path,
+        );
+        let post_root = verify_merkle_path::<E, P>(
+            &entry.post_shard_commit,
+            entry.shard_id as usize,
+            &entry.post_merkle_path,
+        );
+
+        // Per-slot point (same encoding as lookup_value).
+        let point = bool_index_to_point::<E::ScalarField>(&entry.slot_bits);
+
+        // rand_value_pre against prev rand_value commitment.
+        let mut tr_pre = IOPTranscript::<E::ScalarField>::new(b"aegon.rand_value.open");
+        let ok_pre = P::verify(
+            &ctx.inner.verifier_param,
+            &entry.prev_shard_commit.rand_value_commitment,
+            &point,
+            &entry.rand_value_pre_eval,
+            &entry.rand_value_pre_proof,
+            &mut tr_pre,
+        )?;
+        if !ok_pre {
+            return Err(AegonError::Verification(
+                "history entry rand_value_pre opening did not verify",
+            ));
+        }
+
+        // rand_value_post against post rand_value commitment.
+        let mut tr_post = IOPTranscript::<E::ScalarField>::new(b"aegon.rand_value.open");
+        let ok_post = P::verify(
+            &ctx.inner.verifier_param,
+            &entry.post_shard_commit.rand_value_commitment,
+            &point,
+            &entry.rand_value_post_eval,
+            &entry.rand_value_post_proof,
+            &mut tr_post,
+        )?;
+        if !ok_post {
+            return Err(AegonError::Verification(
+                "history entry rand_value_post opening did not verify",
+            ));
+        }
+
+        // value_post against post value commitment.
+        let mut tr_val = IOPTranscript::<E::ScalarField>::new(b"aegon.value.open");
+        let ok_val = P::verify(
+            &ctx.inner.verifier_param,
+            &entry.post_shard_commit.value_commitment,
+            &point,
+            &entry.value_post_eval,
+            &entry.value_post_proof,
+            &mut tr_val,
+        )?;
+        if !ok_val {
+            return Err(AegonError::Verification(
+                "history entry value_post opening did not verify",
+            ));
+        }
+
+        // Value bytes ↔ value_post_eval. The polynomial commitment
+        // binds H_F(value), so the verifier re-hashes whatever the
+        // server delivered and rejects on mismatch.
+        let expected_h = H::h_f(&entry.value_bytes);
+        if expected_h != entry.value_post_eval {
+            return Err(AegonError::Verification(
+                "history entry value_bytes do not hash to value_post_eval",
+            ));
+        }
+        roots.push((prev_root, post_root));
+    }
+    Ok(roots)
 }
 
 /// Backward-compat wrapper that verifies both halves of the original

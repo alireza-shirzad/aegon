@@ -39,6 +39,7 @@ use super::hash::{bool_index_to_point, bool_index_to_usize, HashSuite, Sha256Has
 use super::sharded::ShardWrite;
 use super::types::{
     AegonPcs, EpochCommitment, HistoryOpeningEntry, HistoryOpenings, Label, LookupProof, RandPair,
+    ValueChangeEntry,
     Value,
 };
 
@@ -198,6 +199,16 @@ struct PendingPublish<E: Pairing, P: AegonPcs<E>> {
     /// consumed by `publish_phase_2` to drive the §6.4 history-opening
     /// computation. Empty when the batch was value-updates only.
     new_label_slots: Vec<Vec<bool>>,
+    /// Slot bits for every **value change** in this batch — both new
+    /// placements (which always carry a non-zero value-side delta) and
+    /// value-only updates on already-occupied slots. Populated by
+    /// `publish_phase_1`, consumed by `publish_phase_2` to drive the
+    /// per-slot value-history opening computation. A slot only ever
+    /// appears once per publish (one publish carries one new value per
+    /// slot). Order matches the input batch order, which means each
+    /// slot's entry can be paired by `slot_bits` with the matching
+    /// shard-write to recover the post-update value bytes.
+    value_change_slots: Vec<Vec<bool>>,
 }
 
 impl<E, P, H> Aegon<E, P, H>
@@ -742,6 +753,11 @@ where
         let mut delta_value_poly: SparseMultilinearExtension<E::ScalarField> =
             SparseMultilinearExtension::from_evaluations(self.value_poly.num_vars, &[]);
         let mut new_label_slots: Vec<Vec<bool>> = Vec::new();
+        // Every slot whose value actually changes this publish (delta
+        // != 0). Includes brand-new placements *and* updates on
+        // already-occupied slots. Drives the per-slot value-history
+        // openings produced in phase 2.
+        let mut value_change_slots: Vec<Vec<bool>> = Vec::new();
         for ShardWrite {
             slot_bits,
             h_label,
@@ -761,6 +777,11 @@ where
             let value_delta = *h_value - old_value;
             if !value_delta.is_zero() {
                 delta_value_poly.evaluations.insert(usize_idx, value_delta);
+                // Only record a value-change history slot when the
+                // value actually moved — re-publishing an identical
+                // value is a no-op for the polynomial and shouldn't
+                // pollute the user's value-history bundle.
+                value_change_slots.push(slot_bits.clone());
             }
             self.set_value(usize_idx, *h_value);
             // Index side: only brand-new placements write h_label. The
@@ -842,6 +863,7 @@ where
             delta_index_state,
             delta_value_state,
             new_label_slots,
+            value_change_slots,
         });
 
         Ok((new_index_com, new_value_com))
@@ -890,6 +912,7 @@ where
             delta_index_state,
             delta_value_state,
             new_label_slots,
+            value_change_slots,
         } = pending;
 
         // §6.4 step 1: open `rand_index` and `rand_value` at each
@@ -1053,24 +1076,118 @@ where
         // Assemble the §6.4 history witness bundle. Per-slot evals +
         // proofs come from the two passes above, addressed by the
         // same `new_label_slots` ordering.
-        let history = HistoryOpenings {
-            entries: new_label_slots
-                .iter()
-                .enumerate()
-                .map(|(i, slot_bits)| HistoryOpeningEntry {
+        let new_label_entries: Vec<HistoryOpeningEntry<E, P>> = new_label_slots
+            .iter()
+            .enumerate()
+            .map(|(i, slot_bits)| HistoryOpeningEntry {
+                slot_bits: slot_bits.clone(),
+                rand_index_pre_eval: pre_rand_index[i].0,
+                rand_index_pre_proof: pre_rand_index[i].1.clone(),
+                rand_value_pre_eval: pre_rand_value[i].0,
+                rand_value_pre_proof: pre_rand_value[i].1.clone(),
+                rand_index_post_eval: post_rand_index[i].0,
+                rand_index_post_proof: post_rand_index[i].1.clone(),
+                rand_value_post_eval: post_rand_value[i].0,
+                rand_value_post_proof: post_rand_value[i].1.clone(),
+                value_post_eval: post_value[i].0,
+                value_post_proof: post_value[i].1.clone(),
+            })
+            .collect();
+
+        // Per-slot value-change openings (3 each). One entry per slot
+        // whose value moved this publish — covers brand-new placements
+        // (we reuse the post-update openings already computed above
+        // when the placement coincides with the slot) AND value-only
+        // updates on already-occupied slots (which require fresh
+        // openings since the §6.4 placement loop ignored them).
+        //
+        // Strategy: split `value_change_slots` into "is a new
+        // placement" (lookup by slot_bits in `new_label_slots`) vs
+        // "is value-only update". For placements, copy the openings
+        // out of the §6.4 bundle for free. For value-only updates, do
+        // three fresh `open_at_point` calls (rand_value pre/post +
+        // value post). rand_index is NOT touched here — it doesn't
+        // move on value-only updates.
+        #[cfg(feature = "tracing_instrument")]
+        let _value_change_span = tracing::debug_span!(
+            "Aegon::Phase2::ValueChangeOpenings",
+            slots = value_change_slots.len()
+        )
+        .entered();
+        // Build a quick lookup from slot_bits → index into the §6.4
+        // bundle so the new-placement branch is O(1) per slot rather
+        // than O(new_label_slots.len()).
+        let mut placement_idx: std::collections::HashMap<Vec<bool>, usize> =
+            std::collections::HashMap::with_capacity(new_label_slots.len());
+        for (i, slot) in new_label_slots.iter().enumerate() {
+            placement_idx.insert(slot.clone(), i);
+        }
+        let mut value_change_entries: Vec<ValueChangeEntry<E, P>> =
+            Vec::with_capacity(value_change_slots.len());
+        for slot_bits in &value_change_slots {
+            if let Some(&i) = placement_idx.get(slot_bits) {
+                // Brand-new placement: reuse the already-computed
+                // openings from the §6.4 pre/post passes.
+                value_change_entries.push(ValueChangeEntry {
                     slot_bits: slot_bits.clone(),
-                    rand_index_pre_eval: pre_rand_index[i].0,
-                    rand_index_pre_proof: pre_rand_index[i].1.clone(),
                     rand_value_pre_eval: pre_rand_value[i].0,
                     rand_value_pre_proof: pre_rand_value[i].1.clone(),
-                    rand_index_post_eval: post_rand_index[i].0,
-                    rand_index_post_proof: post_rand_index[i].1.clone(),
                     rand_value_post_eval: post_rand_value[i].0,
                     rand_value_post_proof: post_rand_value[i].1.clone(),
                     value_post_eval: post_value[i].0,
                     value_post_proof: post_value[i].1.clone(),
-                })
-                .collect(),
+                });
+            } else {
+                // Value-only update on a slot that was already
+                // occupied. The §6.4 placement loop skipped this slot,
+                // so open all three afresh — pre against the prior-
+                // epoch rand_value commitment+state, post against the
+                // new-epoch ones, value against the new-epoch value
+                // commitment.
+                let pre = open_at_point::<E, P>(
+                    &self.prover_param,
+                    &prev_rand_value_poly,
+                    &prev_rand_value_com,
+                    &prev_rand_value_state,
+                    slot_bits,
+                    &self.dims,
+                    b"aegon.rand_value.open",
+                )?;
+                let post = open_at_point::<E, P>(
+                    &self.prover_param,
+                    &self.rand_value_poly,
+                    &new_rand_value_com,
+                    &new_rand_value_state,
+                    slot_bits,
+                    &self.dims,
+                    b"aegon.rand_value.open",
+                )?;
+                let val = open_at_point::<E, P>(
+                    &self.prover_param,
+                    &self.value_poly,
+                    &new_value_com,
+                    &new_value_state,
+                    slot_bits,
+                    &self.dims,
+                    b"aegon.value.open",
+                )?;
+                value_change_entries.push(ValueChangeEntry {
+                    slot_bits: slot_bits.clone(),
+                    rand_value_pre_eval: pre.0,
+                    rand_value_pre_proof: pre.1,
+                    rand_value_post_eval: post.0,
+                    rand_value_post_proof: post.1,
+                    value_post_eval: val.0,
+                    value_post_proof: val.1,
+                });
+            }
+        }
+        #[cfg(feature = "tracing_instrument")]
+        drop(_value_change_span);
+
+        let history = HistoryOpenings {
+            entries: new_label_entries,
+            value_changes: value_change_entries,
         };
 
         // Commit the new epoch to live state and history.

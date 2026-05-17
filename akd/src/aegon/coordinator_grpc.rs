@@ -28,8 +28,9 @@ use tonic::{Request, Response, Status};
 use super::error::AegonError;
 use super::hash::{HashSuite, Sha256Hash};
 use super::sharded::{
-    verify_lookup_label, verify_lookup_value, LabelSlot, ShardedAegon, ShardedEpochCommitment,
-    ShardedLabelProof, ShardedValueProof, ShardedVerifierContext,
+    verify_lookup_history, verify_lookup_label, verify_lookup_value, LabelSlot, ShardedAegon,
+    ShardedEpochCommitment, ShardedLabelProof, ShardedValueHistory, ShardedValueProof,
+    ShardedVerifierContext,
 };
 use super::types::{AegonPcs, EpochCommitment, Label, Value};
 
@@ -43,8 +44,8 @@ pub mod proto {
 use proto::coordinator_service_client::CoordinatorServiceClient;
 use proto::coordinator_service_server::{CoordinatorService, CoordinatorServiceServer};
 use proto::{
-    CommitmentResponse, Empty, LookupLabelRequest, LookupLabelResponse, LookupValueRequest,
-    LookupValueResponse,
+    CommitmentResponse, Empty, LookupHistoryRequest, LookupHistoryResponse, LookupLabelRequest,
+    LookupLabelResponse, LookupValueRequest, LookupValueResponse,
 };
 use tokio::runtime::Runtime;
 use tokio::sync::Mutex as AsyncMutex;
@@ -290,6 +291,30 @@ where
         }))
     }
 
+    async fn lookup_history(
+        &self,
+        req: Request<LookupHistoryRequest>,
+    ) -> Result<Response<LookupHistoryResponse>, Status> {
+        let label = req.into_inner().label;
+        // `ShardedAegon::lookup_history` is a pure Redis read — no
+        // shard RPCs — so it doesn't strictly need `spawn_blocking`.
+        // But the Redis client this codebase uses is sync
+        // (`redis::Connection` behind a `std::sync::Mutex`), so we
+        // still keep tonic's async worker thread unblocked by
+        // dispatching the read onto a blocking pool thread.
+        let state = Arc::clone(&self.state);
+        let history_result = tokio::task::spawn_blocking(move || {
+            let state = state.blocking_read();
+            state.lookup_history(&label)
+        })
+        .await
+        .map_err(|e| Status::internal(format!("lookup_history join: {e}")))?;
+        let history = history_result.map_err(err_to_status)?;
+        Ok(Response::new(LookupHistoryResponse {
+            history: encode(&history).map_err(err_to_status)?,
+        }))
+    }
+
     async fn current_commitment(
         &self,
         _req: Request<Empty>,
@@ -527,4 +552,55 @@ where
         }
         Ok(proof)
     }
+
+    /// Fetch this label's value-history bundle from the coordinator
+    /// and verify every entry locally. Up to `HISTORY_WINDOW`
+    /// most-recent entries are returned, most-recent first.
+    ///
+    /// What the client verifies per-entry:
+    ///   * Two merkle paths re-anchor the per-shard leaves under
+    ///     reconstructed sharded roots — the function returns those
+    ///     roots so the caller can cross-check them against whatever
+    ///     historical bulletin-board snapshot they trust.
+    ///   * Three PCS openings (`rand_value_pre`, `rand_value_post`,
+    ///     `value_post`) check out against the corresponding per-
+    ///     shard commitments inside the leaves.
+    ///   * `H_F(value_bytes) == value_post_eval`, so the inline
+    ///     value bytes match the polynomial commitment's bound hash.
+    ///
+    /// Caller responsibility: cross-check the returned sharded roots
+    /// against the bulletin board. This API doesn't pin them — the
+    /// trust anchor lives outside the coordinator.
+    pub fn lookup_history(
+        &self,
+        label: &Label,
+    ) -> Result<
+        (ShardedValueHistory<E, P>, Vec<(EpochDigestForHistory, EpochDigestForHistory)>),
+        AegonError,
+    > {
+        let req = LookupHistoryRequest {
+            label: label.clone(),
+        };
+        let resp = self.runtime.block_on(async {
+            self.client
+                .lock()
+                .await
+                .lookup_history(req)
+                .await
+                .map_err(|s| AegonError::Config(format!("grpc lookup_history: {s}")))
+        })?;
+        let inner = resp.into_inner();
+        let history: ShardedValueHistory<E, P> = decode(&inner.history)?;
+        // Verify every entry. `verify_lookup_history` returns the
+        // reconstructed (prev_root, post_root) for each entry — those
+        // are the values the caller cross-checks against the
+        // bulletin board.
+        let roots = verify_lookup_history::<E, P, H>(&self.verifier_ctx, &history)?;
+        Ok((history, roots))
+    }
 }
+
+/// Alias so the public `lookup_history` return type doesn't pull a
+/// `sharded::EpochDigest` import into every downstream module that
+/// only wants to use the client. Same underlying `[u8; 32]` hash.
+pub type EpochDigestForHistory = super::sharded::EpochDigest;
