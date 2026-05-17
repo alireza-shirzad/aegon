@@ -15,6 +15,7 @@
 pub mod audit;
 pub mod config;
 pub mod consistency;
+pub mod coordinator_grpc;
 pub mod db;
 pub mod error;
 pub(crate) mod fs;
@@ -37,11 +38,12 @@ pub use hash::{HashSuite, Sha256Hash};
 pub use presets::optimal_kzh_k;
 pub use server::Aegon;
 pub use sharded::{
-    probe_at, rederive_sharded_fs_scalars, verify_merkle_path, verify_sharded_consistency,
-    verify_sharded_invariance, verify_sharded_lookup, EpochDigest, ShardTransport,
-    ShardedAegon, ShardedAegonConfig, ShardedAegonConfigBuilder, ShardedConsistencyProof,
-    ShardedEpochCommitment, ShardedLookupProof, ShardedProbe,
-    ShardedRandPair, ShardedVerifierContext, SrsSource,
+    probe_at, rederive_sharded_fs_scalars, verify_lookup_label, verify_lookup_value,
+    verify_merkle_path, verify_sharded_consistency, verify_sharded_invariance,
+    verify_sharded_lookup, EpochDigest, LabelSlot, ShardTransport, ShardedAegon,
+    ShardedAegonConfig, ShardedAegonConfigBuilder, ShardedConsistencyProof,
+    ShardedEpochCommitment, ShardedLabelProof, ShardedLookupProof, ShardedProbe,
+    ShardedRandPair, ShardedValueProof, ShardedVerifierContext, SrsSource,
 };
 pub use types::{
     AegonPcs, AuditState, ConsistencyProof, EpochCommitment, HistoryOpeningEntry, HistoryOpenings,

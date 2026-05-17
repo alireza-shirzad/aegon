@@ -1,0 +1,76 @@
+syntax = "proto3";
+
+package aegon.coordinator.v1;
+
+// User-facing surface exposed by the Aegon coordinator. Mirrors the
+// split lookup design on the Rust side
+// (`ShardedAegon::lookup_label` + `ShardedAegon::lookup_value`):
+//
+//   * `LookupLabel` proves a label is canonically placed at a
+//     specific `(shard_id, slot_bits)`. The client caches that slot
+//     and uses it for `LookupValue` calls forever after.
+//
+//   * `LookupValue` proves the current `value_poly` opens to some
+//     `H_F(value)` at that slot. Value bytes ride a side channel —
+//     either a separate KV fetch by label or returned in the response
+//     when the coordinator's KV-by-slot index is populated.
+//
+//   * `CurrentCommitment` returns the current `ShardedEpochCommitment`
+//     so a client that just connected can pin its verification root
+//     without waiting for an epoch transition.
+//
+// All payloads are arkworks-canonical-serialized bytes (uncompressed
+// — the wire encoding matches the shard service, which switched off
+// the compressed path to dodge per-point Tonelli–Shanks on decode).
+service CoordinatorService {
+  rpc LookupLabel(LookupLabelRequest) returns (LookupLabelResponse);
+  rpc LookupValue(LookupValueRequest) returns (LookupValueResponse);
+  rpc CurrentCommitment(Empty) returns (CommitmentResponse);
+}
+
+message LookupLabelRequest {
+  // Raw label bytes — the same bytes that were used at publish time.
+  // The coordinator hashes them locally via the configured HashSuite
+  // and walks `H(ctr, label)` to recover the open-addressing trail.
+  bytes label = 1;
+}
+
+message LookupLabelResponse {
+  // Canonical-serialized LabelSlot — the canonical (shard_id,
+  // slot_bits) the label is placed at. The client should cache this
+  // after verifying the proof, and pass it back as `slot` in every
+  // subsequent `LookupValue` request.
+  bytes slot = 1;
+  // Canonical-serialized ShardedLabelProof — open-addressing trail
+  // of probe openings against the current epoch's per-shard
+  // index_commitment.
+  bytes proof = 2;
+}
+
+message LookupValueRequest {
+  // Canonical-serialized LabelSlot the client cached from a prior
+  // (verified) `LookupLabel` call. The coordinator opens value_poly
+  // at this slot on the relevant shard.
+  bytes slot = 1;
+}
+
+message LookupValueResponse {
+  // Canonical-serialized ShardedValueProof — value-poly opening +
+  // merkle anchor for the slot's shard against the current epoch.
+  bytes proof = 1;
+  // Raw value bytes, fetched from the coordinator's KV side channel.
+  // Empty when the coordinator was configured with `DbSource::None`
+  // (in-process / test mode) — the client is expected to obtain the
+  // value bytes some other way and verify the proof's `evaluation`
+  // matches `H_F(value)` themselves.
+  bytes value = 2;
+}
+
+message CommitmentResponse {
+  // Canonical-serialized ShardedEpochCommitment — the current
+  // bulletin-board commitment the client should anchor verifications
+  // against. Includes the cross-shard merkle root.
+  bytes commitment = 1;
+}
+
+message Empty {}

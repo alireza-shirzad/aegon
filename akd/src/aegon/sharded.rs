@@ -454,13 +454,30 @@ impl<E: Pairing, P: AegonPcs<E>> Clone for ShardedEpochCommitment<E, P> {
 /// that `merkle_path` reconstructs the epoch root from `leaf`, and that
 /// the PCS `proof` verifies `evaluation` against `leaf.index_commitment`
 /// at the slot.
-#[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
+#[derive(Debug, CanonicalSerialize, CanonicalDeserialize)]
 pub struct ShardedProbe<E: Pairing, P: AegonPcs<E>> {
     pub shard_id: u32,
     pub leaf: EpochCommitment<E, P>,
     pub merkle_path: Vec<EpochDigest>,
     pub evaluation: E::ScalarField,
     pub proof: P::Proof,
+}
+
+// Manual `Clone` impl: `#[derive(Clone)]` would generate
+// `where E: Clone, P: Clone`, but `E: Pairing` / `P: AegonPcs<E>`
+// don't carry `Clone`. The fields *are* all clonable on their own
+// (P::Proof: Clone via the PCS trait, ScalarField: Clone via Field,
+// EpochCommitment has a manual Clone impl), so we just spell it out.
+impl<E: Pairing, P: AegonPcs<E>> Clone for ShardedProbe<E, P> {
+    fn clone(&self) -> Self {
+        Self {
+            shard_id: self.shard_id,
+            leaf: self.leaf.clone(),
+            merkle_path: self.merkle_path.clone(),
+            evaluation: self.evaluation,
+            proof: self.proof.clone(),
+        }
+    }
 }
 
 /// Lookup proof emitted by [`ShardedAegon::lookup`]. Carries one
@@ -475,6 +492,49 @@ pub struct ShardedLookupProof<E: Pairing, P: AegonPcs<E>> {
     /// and merkle anchor are reused from the final probe (saves a copy).
     pub value_evaluation: E::ScalarField,
     pub value_proof: P::Proof,
+}
+
+/// Where in the cluster a label has been canonically placed —
+/// `(shard, per-shard slot bits)`. Returned by `lookup_label` and
+/// reconstructed by `verify_lookup_label`. The client caches this
+/// once and uses it for any number of subsequent `lookup_value` calls
+/// without having to re-prove residency.
+#[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize, PartialEq, Eq)]
+pub struct LabelSlot {
+    pub shard_id: u32,
+    pub slot_bits: Vec<bool>,
+}
+
+/// Proof that a label resides at a specific `(shard, slot)`. This is
+/// the open-addressing half of the original combined `lookup` proof —
+/// one probe per `ctr ∈ 0..=ctr0`, ending at the canonical slot. The
+/// verifier walks the trail, re-derives each `(shard, slot)` from
+/// `H(ctr, label)`, anchors each leaf under the epoch root, verifies
+/// each `index_poly` opening, and checks the open-addressing
+/// constraints (earlier slots are non-empty + non-`H_F(label)`, final
+/// slot equals `H_F(label)`).
+#[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
+pub struct ShardedLabelProof<E: Pairing, P: AegonPcs<E>> {
+    pub ctr0: u64,
+    pub probes: Vec<ShardedProbe<E, P>>,
+}
+
+/// Proof that `value_poly` opens to `evaluation` at the given slot.
+/// Decoupled from any specific label: a client who already cached
+/// the `LabelSlot` from a prior `lookup_label` can call
+/// `lookup_value(slot)` indefinitely as the value updates.
+///
+/// The raw value bytes are out-of-band — the verifier obtains them
+/// from the side-channel (Redis, the publisher, wherever) and
+/// confirms `evaluation == H_F(value)`.
+#[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
+pub struct ShardedValueProof<E: Pairing, P: AegonPcs<E>> {
+    pub shard_id: u32,
+    pub slot_bits: Vec<bool>,
+    pub leaf: EpochCommitment<E, P>,
+    pub merkle_path: Vec<EpochDigest>,
+    pub evaluation: E::ScalarField,
+    pub proof: P::Proof,
 }
 
 /// One probe's worth of consistency evidence: openings of `rand_index`
@@ -1403,20 +1463,22 @@ where
         })
     }
 
-    /// Produce a sharded lookup proof for `label`, plus the raw value
-    /// bytes from the coordinator's KV store (if one is configured).
+    /// First half of the split lookup design: prove that `label` is
+    /// canonically placed at a specific `(shard_id, slot_bits)`.
     ///
-    /// When the config is built with [`DbSource::None`] (the in-process
-    /// tests' default), the returned value vector is empty and the
-    /// caller must hand the verifier the value it already knows
-    /// out-of-band. With [`DbSource::Redis`], the coordinator fetches
-    /// the value from Redis here and returns it alongside the proof —
-    /// the verifier still re-hashes it, the DB is just a retrieval
-    /// side-channel.
-    pub fn lookup(
+    /// Walks the open-addressing trail in `self.routing`, opens
+    /// `index_poly` at each probe against the corresponding shard's
+    /// current commitment, and packages everything into a
+    /// `ShardedLabelProof`. Returns the canonical `LabelSlot` so the
+    /// caller can cache it for future `lookup_value` calls without
+    /// re-proving residency.
+    ///
+    /// Does **not** touch `value_poly` and does **not** fetch any
+    /// side-channel value bytes — that's `lookup_value`'s job.
+    pub fn lookup_label(
         &self,
         label: &Label,
-    ) -> Result<(Value, ShardedLookupProof<E, P>), AegonError> {
+    ) -> Result<(LabelSlot, ShardedLabelProof<E, P>), AegonError> {
         let routing = self
             .routing
             .get(label)
@@ -1425,7 +1487,8 @@ where
 
         let mut probes: Vec<ShardedProbe<E, P>> = Vec::with_capacity(routing.trail.len());
         for (shard_id, slot_bits) in &routing.trail {
-            let (evaluation, proof) = self.shards[*shard_id as usize].open_index_at_slot(slot_bits)?;
+            let (evaluation, proof) =
+                self.shards[*shard_id as usize].open_index_at_slot(slot_bits)?;
             let leaf = current.per_shard[*shard_id as usize].clone();
             let merkle_path = build_merkle_path(&current.per_shard, *shard_id as usize);
             probes.push(ShardedProbe {
@@ -1438,9 +1501,71 @@ where
         }
 
         let (final_shard, final_slot) = routing.final_assignment();
-        let (value_evaluation, value_proof) =
-            self.shards[*final_shard as usize].open_value_at_slot(final_slot)?;
+        let slot = LabelSlot {
+            shard_id: *final_shard,
+            slot_bits: final_slot.clone(),
+        };
+        Ok((
+            slot,
+            ShardedLabelProof {
+                ctr0: routing.ctr0(),
+                probes,
+            },
+        ))
+    }
 
+    /// Second half of the split lookup design: open `value_poly` at a
+    /// cached `(shard, slot)` and return just the value-side proof.
+    ///
+    /// Inputs are unchecked at this layer — the caller is expected to
+    /// have obtained `slot` from a verified `lookup_label` (or to be
+    /// using it within the trust boundary, like the bench harness).
+    /// Verifier-side validation lives in `verify_lookup_value`.
+    ///
+    /// No side-channel value bytes are fetched here either: the
+    /// polynomial commitment binds `H_F(value)`, the raw bytes ride a
+    /// separate channel, and the verifier hashes them locally.
+    pub fn lookup_value(
+        &self,
+        slot: &LabelSlot,
+    ) -> Result<ShardedValueProof<E, P>, AegonError> {
+        if (slot.shard_id as usize) >= self.shards.len() {
+            return Err(AegonError::Config(format!(
+                "lookup_value: shard_id {} out of range (have {} shards)",
+                slot.shard_id,
+                self.shards.len()
+            )));
+        }
+        let current = self.current_commitment();
+        let leaf = current.per_shard[slot.shard_id as usize].clone();
+        let merkle_path = build_merkle_path(&current.per_shard, slot.shard_id as usize);
+        let (evaluation, proof) =
+            self.shards[slot.shard_id as usize].open_value_at_slot(&slot.slot_bits)?;
+        Ok(ShardedValueProof {
+            shard_id: slot.shard_id,
+            slot_bits: slot.slot_bits.clone(),
+            leaf,
+            merkle_path,
+            evaluation,
+            proof,
+        })
+    }
+
+    /// Backward-compat wrapper that does both halves in one call and
+    /// also pulls the raw value bytes from the coordinator's KV store
+    /// (or returns an empty `Value` when `DbSource::None`). Composes
+    /// `lookup_label` and `lookup_value` so the splits and the
+    /// combined call always agree.
+    ///
+    /// New code should prefer the split methods directly: clients
+    /// typically only need to look up a label once and want to call
+    /// `lookup_value` many times against the cached slot.
+    pub fn lookup(
+        &self,
+        label: &Label,
+    ) -> Result<(Value, ShardedLookupProof<E, P>), AegonError> {
+        let (slot, label_proof) = self.lookup_label(label)?;
+        let value_proof = self.lookup_value(&slot)?;
         let value: Value = match &self.db {
             Some(db) => db.get(&key_value(label))?.ok_or_else(|| {
                 AegonError::Database(format!(
@@ -1449,14 +1574,13 @@ where
             })?,
             None => Vec::new(),
         };
-
         Ok((
             value,
             ShardedLookupProof {
-                ctr0: routing.ctr0(),
-                probes,
-                value_evaluation,
-                value_proof,
+                ctr0: label_proof.ctr0,
+                probes: label_proof.probes,
+                value_evaluation: value_proof.evaluation,
+                value_proof: value_proof.proof,
             },
         ))
     }
@@ -1539,13 +1663,23 @@ where
 ///     intermediate probe (the slot is occupied by some other label);
 ///   * `evaluation == H_f(label)` at the final probe;
 ///   * the value opening verifies and equals `H_f(value)`.
-pub fn verify_sharded_lookup<E, P, H>(
+/// Verify the open-addressing chain proves `label` lives at the
+/// returned `LabelSlot`. This is the first half of the split lookup:
+/// it does **not** touch `value_poly` or any value bytes — it only
+/// confirms that the label is canonically placed where the server
+/// claims, and surfaces that slot for the client to cache and reuse
+/// across future `lookup_value` calls.
+///
+/// Returns the canonical `LabelSlot` (derived from re-running the
+/// open-addressing trail against `H(ctr, label)` for the verified
+/// `ctr0`) so the client doesn't have to trust the server for the
+/// slot — it falls out of the verified chain.
+pub fn verify_lookup_label<E, P, H>(
     ctx: &ShardedVerifierContext<E, P>,
     commit: &ShardedEpochCommitment<E, P>,
     label: &Label,
-    value: &Value,
-    proof: &ShardedLookupProof<E, P>,
-) -> Result<bool, AegonError>
+    proof: &ShardedLabelProof<E, P>,
+) -> Result<LabelSlot, AegonError>
 where
     E: Pairing,
     P: AegonPcs<E>,
@@ -1559,9 +1693,12 @@ where
     }
 
     let h_label = H::h_f(label);
+    let mut final_slot: Option<(u32, Vec<bool>)> = None;
 
     for (ctr_us, probe) in proof.probes.iter().enumerate() {
         let ctr = ctr_us as u64;
+        // Re-derive (shard_id, slot_bits) from H(ctr, label) — the
+        // server can't lie about which slot any given ctr probes.
         let (expected_shard, slot_bits) =
             probe_at::<H, E::ScalarField>(ctr, label, ctx.log_n_shards, ctx.shard_log_capacity());
         if expected_shard != probe.shard_id {
@@ -1569,7 +1706,7 @@ where
                 "probe shard_id does not match H(ctr, label)",
             ));
         }
-        // Merkle anchor.
+        // Merkle anchor: this probe's leaf must hash up to `commit.merkle_root`.
         let reconstructed = verify_merkle_path::<E, P>(
             &probe.leaf,
             probe.shard_id as usize,
@@ -1592,9 +1729,14 @@ where
             &mut tr,
         )?;
         if !ok {
-            return Ok(false);
+            return Err(AegonError::Verification(
+                "probe opening did not verify against index commitment",
+            ));
         }
-        // Open-addressing constraints.
+        // Open-addressing constraints (paper §6.1, Fig. 4):
+        //   * earlier probes must be non-empty and not the label's own hash,
+        //     otherwise the server could have stopped at a smaller `ctr`;
+        //   * the final probe must hold exactly `H_F(label)`.
         if ctr < proof.ctr0 {
             if probe.evaluation.is_zero() {
                 return Err(AegonError::Verification(
@@ -1606,41 +1748,135 @@ where
                     "earlier probe slot holds H_F(label): label was already assigned at a smaller counter",
                 ));
             }
-        } else if probe.evaluation != h_label {
-            return Err(AegonError::Verification(
-                "final probe slot does not hold H_F(label)",
-            ));
+        } else {
+            if probe.evaluation != h_label {
+                return Err(AegonError::Verification(
+                    "final probe slot does not hold H_F(label)",
+                ));
+            }
+            final_slot = Some((probe.shard_id, slot_bits));
         }
     }
 
-    // Value opening anchored at the same shard/leaf as the final probe.
-    let final_probe = proof.probes.last().expect("ctr0 + 1 >= 1 probes");
-    let (_, final_slot) = probe_at::<H, E::ScalarField>(
-        proof.ctr0,
-        label,
-        ctx.log_n_shards,
-        ctx.shard_log_capacity(),
+    let (shard_id, slot_bits) = final_slot.ok_or(AegonError::Verification(
+        "verify_lookup_label: empty probe trail (ctr0 underflow)",
+    ))?;
+    Ok(LabelSlot { shard_id, slot_bits })
+}
+
+/// Verify the value at a cached `LabelSlot` opens to `value`'s hash.
+///
+/// The second half of the split lookup. Unlike `verify_lookup_label`,
+/// this verifier does **not** know the label — it works purely on the
+/// slot, the value bytes, and the value-side proof. That decoupling
+/// is the whole point: a client caches a `LabelSlot` once and uses it
+/// against value openings forever after, even if the deployment-level
+/// label namespace changes shape.
+///
+/// `slot` must agree with the proof's `(shard_id, slot_bits)` — we
+/// re-check that here to prevent a server (or a sloppy client) from
+/// answering at a different slot than was requested.
+///
+/// The hash suite `H` is needed so the verifier can re-hash the
+/// out-of-band value bytes and confirm they match the polynomial
+/// commitment's bound evaluation `H_F(value)`.
+pub fn verify_lookup_value<E, P, H>(
+    ctx: &ShardedVerifierContext<E, P>,
+    commit: &ShardedEpochCommitment<E, P>,
+    slot: &LabelSlot,
+    value: &Value,
+    proof: &ShardedValueProof<E, P>,
+) -> Result<bool, AegonError>
+where
+    E: Pairing,
+    P: AegonPcs<E>,
+    H: HashSuite<E::ScalarField>,
+{
+    // Mismatch between the requested slot and the proof's slot is a
+    // hard error — protects against a server that opens at a different
+    // slot than the client asked about.
+    if proof.shard_id != slot.shard_id || proof.slot_bits != slot.slot_bits {
+        return Err(AegonError::Verification(
+            "value proof slot does not match requested slot",
+        ));
+    }
+    // Merkle anchor: the proof's leaf must hash up to `commit.merkle_root`.
+    let reconstructed = verify_merkle_path::<E, P>(
+        &proof.leaf,
+        proof.shard_id as usize,
+        &proof.merkle_path,
     );
-    let value_point = bool_index_to_point::<E::ScalarField>(&final_slot);
+    if reconstructed != commit.merkle_root {
+        return Err(AegonError::Verification(
+            "value proof merkle path does not reconstruct epoch root",
+        ));
+    }
+    // PCS opening against the shard's value commitment at the slot.
+    let value_point = bool_index_to_point::<E::ScalarField>(&proof.slot_bits);
     let mut tr = IOPTranscript::<E::ScalarField>::new(b"aegon.value.open");
     let ok = P::verify(
         &ctx.inner.verifier_param,
-        &final_probe.leaf.value_commitment,
+        &proof.leaf.value_commitment,
         &value_point,
-        &proof.value_evaluation,
-        &proof.value_proof,
+        &proof.evaluation,
+        &proof.proof,
         &mut tr,
     )?;
     if !ok {
         return Ok(false);
     }
+    // The polynomial commitment binds `H_F(value)`. The verifier
+    // re-hashes the out-of-band value bytes and checks that the hash
+    // matches the opened evaluation.
     let expected_value = H::h_f(value);
-    if proof.value_evaluation != expected_value {
+    if proof.evaluation != expected_value {
         return Err(AegonError::Verification(
             "value opening does not match H_F(value)",
         ));
     }
+    Ok(true)
+}
 
+/// Backward-compat wrapper that verifies both halves of the original
+/// combined `lookup` proof in one call. New code should call
+/// `verify_lookup_label` + `verify_lookup_value` separately so a
+/// client can stash the slot after the first label verification.
+pub fn verify_sharded_lookup<E, P, H>(
+    ctx: &ShardedVerifierContext<E, P>,
+    commit: &ShardedEpochCommitment<E, P>,
+    label: &Label,
+    value: &Value,
+    proof: &ShardedLookupProof<E, P>,
+) -> Result<bool, AegonError>
+where
+    E: Pairing,
+    P: AegonPcs<E>,
+    H: HashSuite<E::ScalarField>,
+{
+    // Split the combined proof into its two halves and run each
+    // verifier. The value-side leaf is implicitly the final probe's
+    // leaf (which is exactly what the splitter would have stored), so
+    // we lift it out and rebuild a `ShardedValueProof` on the fly.
+    let label_proof = ShardedLabelProof {
+        ctr0: proof.ctr0,
+        probes: proof.probes.clone(),
+    };
+    let slot = verify_lookup_label::<E, P, H>(ctx, commit, label, &label_proof)?;
+
+    let final_probe = proof.probes.last().expect("ctr0 + 1 >= 1 probes");
+    let value_proof = ShardedValueProof {
+        shard_id: slot.shard_id,
+        slot_bits: slot.slot_bits.clone(),
+        leaf: final_probe.leaf.clone(),
+        merkle_path: final_probe.merkle_path.clone(),
+        evaluation: proof.value_evaluation,
+        proof: proof.value_proof.clone(),
+    };
+    if !verify_lookup_value::<E, P, H>(ctx, commit, &slot, value, &value_proof)? {
+        return Ok(false);
+    }
+    // `verify_lookup_value` already checks `H_F(value) == evaluation`,
+    // so the combined wrapper has nothing left to add.
     Ok(true)
 }
 
