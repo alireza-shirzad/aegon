@@ -55,15 +55,24 @@ use proto::{
 
 // ---------- wire encoding helpers --------------------------------------
 
+// Use uncompressed (un)serialization on the gRPC wire. Compressed
+// format halves payload size but each G1Affine decode pays a Tonelli–
+// Shanks square root in Fp (~5 µs/pt on Bn254); for a 10k-update
+// publish the coordinator decodes ~1.8M points, which alone burned
+// ~2 s of single-thread CPU per shard (×4 shards via rayon ≈ 2 s wall).
+// Uncompressed is a straight memcpy and skips the curve-membership
+// check, since both sides of the wire run our own binaries and we
+// trust the points.
 fn encode<T: CanonicalSerialize>(t: &T) -> Result<Vec<u8>, AegonError> {
-    let mut buf = Vec::new();
-    t.serialize_compressed(&mut buf)
+    let mut buf = Vec::with_capacity(t.uncompressed_size());
+    t.serialize_uncompressed(&mut buf)
         .map_err(|e| AegonError::Config(format!("encode: {e}")))?;
     Ok(buf)
 }
 
 fn decode<T: CanonicalDeserialize>(bytes: &[u8]) -> Result<T, AegonError> {
-    T::deserialize_compressed(bytes).map_err(|e| AegonError::Config(format!("decode: {e}")))
+    T::deserialize_uncompressed_unchecked(bytes)
+        .map_err(|e| AegonError::Config(format!("decode: {e}")))
 }
 
 fn err_to_status(e: AegonError) -> Status {

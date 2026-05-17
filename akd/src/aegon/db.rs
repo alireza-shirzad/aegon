@@ -71,6 +71,11 @@ pub(crate) trait Db: Send + Sync {
     /// Existence check — same network cost as `get` but skips the
     /// payload.
     fn exists(&self, key: &[u8]) -> Result<bool, AegonError>;
+    /// Pipelined batch existence check. One TCP round-trip for every
+    /// key in `keys`, returning a `Vec<bool>` parallel to the input.
+    /// Used by the publish-path open-addressing loop where per-key
+    /// `exists` round-trips dominate at large batch sizes.
+    fn exists_many(&self, keys: &[Vec<u8>]) -> Result<Vec<bool>, AegonError>;
     /// Members of a Redis SET. Used for recovery-time enumeration
     /// (the `aegon:labels` set).
     fn smembers(&self, key: &[u8]) -> Result<Vec<Vec<u8>>, AegonError>;
@@ -149,6 +154,23 @@ impl Db for RedisDb {
         let mut conn = self.lock_conn()?;
         conn.exists::<&[u8], bool>(key)
             .map_err(|e| AegonError::Database(format!("EXISTS: {e}")))
+    }
+
+    fn exists_many(&self, keys: &[Vec<u8>]) -> Result<Vec<bool>, AegonError> {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut conn = self.lock_conn()?;
+        // Non-atomic pipeline: each EXISTS is independent, so we don't
+        // need MULTI/EXEC's all-or-nothing semantics — we just want one
+        // TCP round-trip instead of N. `redis::pipe()` defaults to
+        // non-atomic; `.atomic()` opt-in wraps in MULTI/EXEC.
+        let mut pipe = redis::pipe();
+        for k in keys {
+            pipe.exists::<&[u8]>(k);
+        }
+        pipe.query::<Vec<bool>>(&mut *conn)
+            .map_err(|e| AegonError::Database(format!("pipelined EXISTS ({} keys): {e}", keys.len())))
     }
 
     fn smembers(&self, key: &[u8]) -> Result<Vec<Vec<u8>>, AegonError> {

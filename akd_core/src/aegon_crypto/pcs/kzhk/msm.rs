@@ -15,9 +15,9 @@ use ark_ec::scalar_mul::variable_base::VariableBaseMSM;
 /// Input size strictly below this threshold runs through `naive_msm`.
 /// Override by running [`calibrate::calibrate`] and replacing this constant.
 ///
-/// Calibrated on bn254 G1 on a 16-thread machine: at `n=2` naive (177 µs)
-/// still beats Pippenger (215 µs); at `n=4` Pippenger (251 µs) overtakes
-/// naive (343 µs).
+/// Calibrated on bn254 G1, n2-standard-4 (4 vCPUs): at n=2 naive (234 µs)
+/// still beats Pippenger@1t (338 µs); at n=4 Pippenger@1t (407 µs)
+/// overtakes naive (466 µs).
 pub const NAIVE_THRESHOLD: usize = 4;
 
 /// Size-range → rayon thread-count table used when `bases.len() >= NAIVE_THRESHOLD`.
@@ -26,23 +26,22 @@ pub const NAIVE_THRESHOLD: usize = 4;
 /// cover `[NAIVE_THRESHOLD, usize::MAX)` without gaps or overlap; the last
 /// entry should extend to `usize::MAX`.
 ///
-/// Calibrated on bn254 G1, 16-thread machine. Each benchmarked size's
-/// preferred thread count is held until the next benchmarked size (no
-/// gap-fallback to 1 thread). Small-n thread counts (≤ 32) are noise-dominated;
-/// the moderate-to-large rows reflect the meaningful regime.
+/// Calibrated on bn254 G1, n2-standard-4 (4 vCPUs). Each benchmarked size's
+/// preferred thread count is held until the next benchmarked size — so the
+/// table is gap-free; the `print_as_constants()` output is post-processed
+/// to extend ranges across un-benchmarked sizes.
+///
+/// Notable: on this hardware the "sweet spot" for moderate MSMs (n=128..2048)
+/// is 2 threads, not 4 — rayon's split-and-join overhead eats the per-task
+/// gains until inputs get large enough (n≥8192) to amortise across 4 workers.
 pub const THREAD_TABLE: &[(usize, usize, usize)] = &[
-    (0, 2, 9),
-    (2, 4, 7),
-    (4, 8, 3),
-    (8, 16, 4),
-    (16, 32, 5),
-    (32, 512, 4),
-    (512, 1024, 8),
-    (1024, 4096, 15),
-    (4096, 8192, 14),
-    (8192, 16384, 16),
-    (16384, 32768, 14),
-    (32768, usize::MAX, 16),
+    (0, 8, 1),
+    (8, 16, 3),
+    (16, 64, 2),
+    (64, 128, 3),
+    (128, 4096, 2),
+    (4096, 8192, 3),
+    (8192, usize::MAX, 4),
 ];
 
 /// Look up the preferred thread count for an MSM of size `n`.
@@ -231,12 +230,22 @@ pub mod calibrate {
             naive_threshold = *sizes.last().unwrap();
         }
 
-        // Collapse adjacent sizes with the same winning thread count into ranges.
+        // Collapse adjacent sizes with the same winning thread count
+        // into ranges. When the thread count changes from one
+        // benchmarked size to the next, extend the previous row up to
+        // (but not including) the new size — otherwise the un-
+        // benchmarked sizes between two consecutive benchmarks would
+        // fall through `threads_for_size`'s default-1 branch even
+        // though we have a perfectly good neighbour-derived answer.
         let mut thread_table: Vec<(usize, usize, usize)> = Vec::new();
         for (n, t) in &per_size {
             match thread_table.last_mut() {
                 Some(last) if last.2 == *t => last.1 = *n + 1,
-                _ => thread_table.push((*n, *n + 1, *t)),
+                Some(last) => {
+                    last.1 = *n;
+                    thread_table.push((*n, *n + 1, *t));
+                },
+                None => thread_table.push((*n, *n + 1, *t)),
             }
         }
         // Extend the first row down to 0 and the last row to usize::MAX so the

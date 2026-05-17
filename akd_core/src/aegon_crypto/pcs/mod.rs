@@ -9,6 +9,7 @@ use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::rand::Rng;
 use errors::PCSError;
 use std::{borrow::Borrow, default, fmt::Debug, hash::Hash};
+use crate::aegon_crypto::poly::DenseOrSparseMLERef;
 use crate::aegon_crypto::transcript::IOPTranscript;
 
 /// This trait defines APIs for polynomial commitment schemes.
@@ -110,10 +111,15 @@ pub trait PolynomialCommitmentScheme<E: Pairing> {
         unimplemented!("PCS::fma_state has no default — implement the homomorphism for your State")
     }
 
+    /// Open `polynomial` at `point`. Takes the polynomial by borrowed
+    /// reference via [`DenseOrSparseMLERef`] so the trait doesn't force a
+    /// `BTreeMap` deep-clone at every call site — the sparse-poly clone
+    /// to satisfy `&DenseOrSparseMLE::Sparse(poly.clone())` previously
+    /// dominated the publish-phase opening time.
     fn open(
         prover_param: impl Borrow<Self::ProverParam>,
         commitment: &Self::Commitment,
-        polynomial: &Self::Polynomial,
+        polynomial: DenseOrSparseMLERef<'_, E::ScalarField>,
         point: &Self::Point,
         state: &Self::State,
         _transcript: &mut IOPTranscript<E::ScalarField>,
@@ -122,7 +128,7 @@ pub trait PolynomialCommitmentScheme<E: Pairing> {
     fn multi_open(
         _prover_param: impl Borrow<Self::ProverParam>,
         commitment: &Self::Commitment,
-        _polynomials: &[&Self::Polynomial],
+        _polynomials: &[DenseOrSparseMLERef<'_, E::ScalarField>],
         _point: &Self::Point,
         _states: &[Self::State],
         _transcript: &mut IOPTranscript<E::ScalarField>,

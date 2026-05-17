@@ -353,39 +353,83 @@ impl<E: Pairing> AuxRow<E> {
             other.len()
         );
         let is_one = scalar.is_one();
-        let add_at = |this: &mut AuxRow<E>, i: usize, delta: E::G1| {
-            match this {
-                AuxRow::Dense(v) => {
-                    v[i] = (v[i] + delta).into_affine();
-                },
-                AuxRow::Sparse { entries, .. } => {
-                    let cur = entries.get(&i).copied().unwrap_or_else(E::G1Affine::zero);
-                    let sum = (cur + delta).into_affine();
-                    if sum.is_zero() {
-                        entries.remove(&i);
-                    } else {
-                        entries.insert(i, sum);
-                    }
-                },
-            }
-        };
-        match other {
-            AuxRow::Dense(other_vec) => {
-                for (i, &p) in other_vec.iter().enumerate() {
+
+        // Step 1 (parallel, dominant cost): for each non-zero cell of
+        // `other`, compute `scalar · other[i]` in projective form. Each
+        // Bn254 G1 scalar mul is ~110 µs; with N cores rayon gives
+        // ~N× speedup. This phase carries ~90 % of the function's cost.
+        let deltas: Vec<(usize, E::G1)> = match other {
+            AuxRow::Dense(other_vec) => cfg_iter!(other_vec)
+                .enumerate()
+                .filter_map(|(i, p)| {
                     if p.is_zero() {
-                        continue;
+                        None
+                    } else {
+                        let d: E::G1 = if is_one { p.into_group() } else { p.mul(scalar) };
+                        Some((i, d))
                     }
-                    let delta: E::G1 = if is_one { p.into_group() } else { p.mul(scalar) };
-                    add_at(self, i, delta);
+                })
+                .collect(),
+            AuxRow::Sparse { entries: other_entries, .. } => {
+                // BTreeMap has no par_iter; materialize support into a Vec
+                // once so the scalar muls can fan out across cores.
+                let materialized: Vec<(usize, E::G1Affine)> =
+                    other_entries.iter().map(|(&i, &p)| (i, p)).collect();
+                cfg_into_iter!(materialized)
+                    .filter_map(|(i, p)| {
+                        if p.is_zero() {
+                            None
+                        } else {
+                            let d: E::G1 =
+                                if is_one { p.into_group() } else { p.mul(scalar) };
+                            Some((i, d))
+                        }
+                    })
+                    .collect()
+            },
+        };
+
+        // Step 2 (sequential, cheap): add `self[i]` into each delta. Each
+        // mixed add is ~5 µs; for ~10k cells this is well under the
+        // step-1 wall time even single-threaded.
+        let projs: Vec<(usize, E::G1)> = match self {
+            AuxRow::Dense(v) => deltas
+                .into_iter()
+                .map(|(i, d)| (i, v[i] + d))
+                .collect(),
+            AuxRow::Sparse { entries, .. } => deltas
+                .into_iter()
+                .map(|(i, d)| {
+                    let cur = entries
+                        .get(&i)
+                        .copied()
+                        .unwrap_or_else(E::G1Affine::zero);
+                    (i, cur + d)
+                })
+                .collect(),
+        };
+
+        // Step 3: batched affine normalization. One field inversion +
+        // 3M mults via Montgomery's trick instead of M inversions —
+        // each inversion is ~10× a mult, so for M ≈ 10k this collapses
+        // ~100 ms of per-cell `into_affine` into a few ms.
+        let projs_only: Vec<E::G1> = projs.iter().map(|(_, p)| *p).collect();
+        let affines = E::G1::normalize_batch(&projs_only);
+
+        // Step 4 (sequential): scatter results into self.
+        match self {
+            AuxRow::Dense(v) => {
+                for ((i, _), &a) in projs.iter().zip(affines.iter()) {
+                    v[*i] = a;
                 }
             },
-            AuxRow::Sparse { entries: other_entries, .. } => {
-                for (&i, &p) in other_entries {
-                    if p.is_zero() {
-                        continue;
+            AuxRow::Sparse { entries, .. } => {
+                for ((i, _), &a) in projs.iter().zip(affines.iter()) {
+                    if a.is_zero() {
+                        entries.remove(i);
+                    } else {
+                        entries.insert(*i, a);
                     }
-                    let delta: E::G1 = if is_one { p.into_group() } else { p.mul(scalar) };
-                    add_at(self, i, delta);
                 }
             },
         }

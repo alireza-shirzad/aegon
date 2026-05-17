@@ -28,7 +28,7 @@ use ark_poly::SparseMultilinearExtension;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::rand::Rng;
 use akd_core::aegon_crypto::pcs::PCSGlobalParam;
-use akd_core::aegon_crypto::poly::DenseOrSparseMLE;
+use akd_core::aegon_crypto::poly::{DenseOrSparseMLE, DenseOrSparseMLERef};
 use akd_core::aegon_crypto::transcript::IOPTranscript;
 
 use super::config::{AegonConfig, VerifierContext};
@@ -1250,7 +1250,7 @@ where
             let (proof, _) = P::open(
                 &self.prover_param,
                 &self.index_commitment,
-                &DenseOrSparseMLE::Sparse(self.index_poly.clone()),
+                DenseOrSparseMLERef::Sparse(&self.index_poly),
                 &probe_point,
                 &self.index_state,
                 &mut tr,
@@ -1270,7 +1270,7 @@ where
         let (value_proof, _) = P::open(
             &self.prover_param,
             &self.value_commitment,
-            &DenseOrSparseMLE::Sparse(self.value_poly.clone()),
+            DenseOrSparseMLERef::Sparse(&self.value_poly),
             &value_point,
             &self.value_state,
             &mut tr,
@@ -1379,7 +1379,7 @@ where
     let (proof, _) = P::open(
         pp,
         com,
-        &DenseOrSparseMLE::Sparse(poly.clone()),
+        DenseOrSparseMLERef::Sparse(poly),
         &point,
         state,
         &mut tr,
@@ -1473,7 +1473,7 @@ where
     let (proof_s0, eval_s0) = P::open(
         pp,
         com_s0,
-        &DenseOrSparseMLE::Sparse(poly_s0.clone()),
+        DenseOrSparseMLERef::Sparse(poly_s0),
         point,
         state_s0,
         &mut tr0,
@@ -1482,7 +1482,7 @@ where
     let (proof_s1, eval_s1) = P::open(
         pp,
         com_s1,
-        &DenseOrSparseMLE::Sparse(poly_s1.clone()),
+        DenseOrSparseMLERef::Sparse(poly_s1),
         point,
         state_s1,
         &mut tr1,

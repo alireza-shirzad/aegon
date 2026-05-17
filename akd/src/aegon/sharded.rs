@@ -984,7 +984,21 @@ where
         let mut in_batch_claimed: Vec<HashSet<usize>> = (0..n).map(|_| HashSet::new()).collect();
         let mut new_placements: Vec<NewPlacement> = Vec::new();
 
-        for (label, value) in updates {
+        // Pass 1: route value-only updates (existing labels) directly,
+        // and stash brand-new labels for round-based occupancy probing.
+        // `update_idx` carries the original ordering so the in-batch
+        // collision semantics match the sequential implementation.
+        struct NewLabel<'a, F> {
+            update_idx: usize,
+            label: &'a [u8],
+            h_label: F,
+            h_value: F,
+            ctr: u64,
+            trail: Vec<(u32, Vec<bool>)>,
+        }
+        let mut new_labels: Vec<NewLabel<'_, E::ScalarField>> = Vec::new();
+
+        for (idx, (label, value)) in updates.iter().enumerate() {
             let h_value = H::h_f(value);
             if let Some(routing) = self.routing.get(label) {
                 let (sid, slot_bits) = routing.final_assignment().clone();
@@ -994,21 +1008,131 @@ where
                     h_value,
                 });
             } else {
-                let h_label = H::h_f(label);
-                let trail = self.assign_trail(label, &mut in_batch_claimed)?;
+                new_labels.push(NewLabel {
+                    update_idx: idx,
+                    label: label.as_slice(),
+                    h_label: H::h_f(label),
+                    h_value,
+                    ctr: 0,
+                    trail: Vec::new(),
+                });
+            }
+        }
+
+        // Pass 2 — assign new labels via open-addressing.
+        //
+        // The Redis path runs in rounds: each round issues one pipelined
+        // EXISTS that covers every still-in-flight label at its current
+        // probe ctr (one TCP round-trip per round, not per probe). Then
+        // we resolve placements in original-input order — necessary to
+        // preserve the sequential implementation's "earlier label wins
+        // an in-batch collision" semantics — and advance any losers to
+        // ctr+1 for the next round. At low load factor (the common
+        // case) almost everyone places on round 0 and the whole pass
+        // collapses to a single round-trip.
+        //
+        // The DbSource::None branch keeps the original per-label
+        // `assign_trail` for the in-process tests where there is no
+        // Redis and occupancy is checked against the shard's in-memory
+        // set instead.
+        let total_capacity = 1u64 << self.log_capacity();
+        if let Some(db) = self.db.as_ref() {
+            let log_n_shards = self.log_n_shards;
+            let shard_log_capacity = self.shard_log_capacity();
+            let shard_dims = self.shard_dims.clone();
+            while !new_labels.is_empty() {
+                // Compute (shard_id, slot_bits, slot_idx, key) for each
+                // in-flight label at its current ctr — pure CPU, no I/O.
+                let probes: Vec<(u32, Vec<bool>, usize, Vec<u8>)> = new_labels
+                    .iter()
+                    .map(|nl| {
+                        let (shard_id, slot_bits) = probe_at::<H, E::ScalarField>(
+                            nl.ctr,
+                            nl.label,
+                            log_n_shards,
+                            shard_log_capacity,
+                        );
+                        let slot_idx = bool_index_to_usize_dims(&slot_bits, &shard_dims);
+                        let key = key_slot(shard_id, slot_idx);
+                        (shard_id, slot_bits, slot_idx, key)
+                    })
+                    .collect();
+
+                // One TCP round-trip for the whole round.
+                let keys: Vec<Vec<u8>> =
+                    probes.iter().map(|(_, _, _, k)| k.clone()).collect();
+                let occupied_prev = db.exists_many(&keys)?;
+
+                // Resolve in input order so in-batch collisions are
+                // broken consistently with the sequential reference.
+                let mut next_round: Vec<NewLabel<'_, E::ScalarField>> = Vec::new();
+                let drained: Vec<NewLabel<'_, E::ScalarField>> =
+                    std::mem::take(&mut new_labels);
+                // Pair each new label with its probe + Redis answer,
+                // then sort by original update index. Sort is stable on
+                // small Vecs (rayon not needed) and almost always a
+                // no-op on round 0.
+                let mut zipped: Vec<(
+                    NewLabel<'_, E::ScalarField>,
+                    (u32, Vec<bool>, usize, Vec<u8>),
+                    bool,
+                )> = drained
+                    .into_iter()
+                    .zip(probes.into_iter())
+                    .zip(occupied_prev.into_iter())
+                    .map(|((nl, probe), occ)| (nl, probe, occ))
+                    .collect();
+                zipped.sort_by_key(|(nl, _, _)| nl.update_idx);
+                for (mut nl, (shard_id, slot_bits, slot_idx, _key), occ_prev) in zipped {
+                    nl.trail.push((shard_id, slot_bits.clone()));
+                    let occupied_in_batch =
+                        in_batch_claimed[shard_id as usize].contains(&slot_idx);
+                    if !occ_prev && !occupied_in_batch {
+                        in_batch_claimed[shard_id as usize].insert(slot_idx);
+                        sub_batches[shard_id as usize].push(ShardWrite {
+                            slot_bits,
+                            h_label: Some(nl.h_label),
+                            h_value: nl.h_value,
+                        });
+                        new_placements.push(NewPlacement {
+                            label: nl.label.to_vec(),
+                            shard_id,
+                            slot_idx,
+                        });
+                        self.routing
+                            .insert(nl.label.to_vec(), LabelRouting { trail: nl.trail });
+                    } else {
+                        nl.ctr += 1;
+                        if nl.ctr >= total_capacity {
+                            return Err(AegonError::DictionaryFull {
+                                capacity: total_capacity as usize,
+                            });
+                        }
+                        next_round.push(nl);
+                    }
+                }
+                new_labels = next_round;
+            }
+        } else {
+            // No-DB fallback: per-label sequential probing against the
+            // shard's in-memory occupancy set, matching the original
+            // implementation. Round-based pipelining doesn't apply here
+            // since there's no network round-trip to amortise.
+            for nl in new_labels {
+                let trail = self.assign_trail(nl.label, &mut in_batch_claimed)?;
                 let (sid, slot_bits) = trail.final_assignment().clone();
                 let slot_idx = bool_index_to_usize_dims(&slot_bits, &self.shard_dims);
                 sub_batches[sid as usize].push(ShardWrite {
                     slot_bits,
-                    h_label: Some(h_label),
-                    h_value,
+                    h_label: Some(nl.h_label),
+                    h_value: nl.h_value,
                 });
                 new_placements.push(NewPlacement {
-                    label: label.clone(),
+                    label: nl.label.to_vec(),
                     shard_id: sid,
                     slot_idx,
                 });
-                self.routing.insert(label.clone(), trail);
+                self.routing.insert(nl.label.to_vec(), trail);
             }
         }
         Ok((sub_batches, new_placements))

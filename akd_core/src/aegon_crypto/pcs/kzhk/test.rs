@@ -30,7 +30,7 @@ fn test_single_helper(
     let (proof, value) = KZHK::<E>::open(
         &ck,
         &com,
-        &poly,
+        poly.as_ref(),
         &point,
         &state,
         &mut prover_transcript,

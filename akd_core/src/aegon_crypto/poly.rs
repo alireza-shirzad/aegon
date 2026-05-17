@@ -16,9 +16,50 @@ pub enum DenseOrSparseMLE<F: Field> {
     Dense(DenseMultilinearExtension<F>),
     Sparse(SparseMultilinearExtension<F>),
 }
+
+/// Borrowing counterpart to [`DenseOrSparseMLE`] used on the open path.
+///
+/// `DenseOrSparseMLE::Sparse(SparseMLE)` takes the polynomial by value,
+/// which forces every `P::open(&DenseOrSparseMLE::Sparse(poly.clone()),
+/// ...)` call site to deep-clone the underlying `BTreeMap` just to wrap
+/// it in the enum. At publish-time that clone dominated the opening
+/// phase (5 opens × labels × full-poly clone). This variant lets the
+/// trait method take a borrowed view instead.
+///
+/// Copy because it's two pointers' worth — no allocation, no clone.
+#[derive(Copy, Clone)]
+pub enum DenseOrSparseMLERef<'a, F: Field> {
+    Dense(&'a DenseMultilinearExtension<F>),
+    Sparse(&'a SparseMultilinearExtension<F>),
+}
+
+impl<'a, F: Field> From<&'a DenseOrSparseMLE<F>> for DenseOrSparseMLERef<'a, F> {
+    fn from(owned: &'a DenseOrSparseMLE<F>) -> Self {
+        match owned {
+            DenseOrSparseMLE::Dense(d) => DenseOrSparseMLERef::Dense(d),
+            DenseOrSparseMLE::Sparse(s) => DenseOrSparseMLERef::Sparse(s),
+        }
+    }
+}
+
+impl<'a, F: Field> DenseOrSparseMLERef<'a, F> {
+    pub fn num_vars(&self) -> usize {
+        match self {
+            DenseOrSparseMLERef::Dense(d) => d.num_vars,
+            DenseOrSparseMLERef::Sparse(s) => s.num_vars,
+        }
+    }
+}
+
 impl<F: Field> DenseOrSparseMLE<F> {
     pub fn rand(num_vars: usize, rng: &mut impl Rng) -> Self {
         DenseOrSparseMLE::Sparse(SparseMultilinearExtension::rand(num_vars, rng))
+    }
+
+    /// Cheap reborrow into a [`DenseOrSparseMLERef`] for passing to
+    /// `P::open` without consuming `self`.
+    pub fn as_ref(&self) -> DenseOrSparseMLERef<'_, F> {
+        DenseOrSparseMLERef::from(self)
     }
 
     pub fn to_dense(&self) -> DenseMultilinearExtension<F> {

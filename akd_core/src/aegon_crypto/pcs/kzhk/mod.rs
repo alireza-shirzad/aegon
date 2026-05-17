@@ -45,7 +45,7 @@ use crate::aegon_crypto::{
         },
         PCSGlobalParam,
     },
-    poly::DenseOrSparseMLE,
+    poly::{DenseOrSparseMLE, DenseOrSparseMLERef},
     PCSError, PolynomialCommitmentScheme, StructuredReferenceString,
 };
 use ark_ec::{pairing::Pairing, AffineRepr, CurveGroup, VariableBaseMSM};
@@ -259,7 +259,7 @@ where
     fn open(
         prover_param: impl Borrow<Self::ProverParam>,
         commitment: &Self::Commitment,
-        polynomial: &Self::Polynomial,
+        polynomial: DenseOrSparseMLERef<'_, E::ScalarField>,
         point: &Self::Point,
         state: &Self::State,
         transcript: &mut IOPTranscript<E::ScalarField>,
@@ -279,7 +279,7 @@ where
     fn multi_open(
         prover_param: impl Borrow<Self::ProverParam>,
         commitment: &Self::Commitment,
-        polynomials: &[&Self::Polynomial],
+        polynomials: &[DenseOrSparseMLERef<'_, E::ScalarField>],
         point: &Self::Point,
         states: &[Self::State],
         transcript: &mut IOPTranscript<E::ScalarField>,
@@ -409,23 +409,23 @@ impl<E: Pairing> KZHK<E> {
     fn open_non_zk(
         prover_param: impl Borrow<KZHKProverParam<E>>,
         _commitment: &KZHKCommitment<E>,
-        polynomial: &DenseOrSparseMLE<E::ScalarField>,
+        polynomial: DenseOrSparseMLERef<'_, E::ScalarField>,
         point: &[E::ScalarField],
         state: &KZHKState<E>,
     ) -> Result<(KZHKOpeningProof<E>, E::ScalarField), PCSError> {
         //TODO: Make the iters here parallel
         let is_boolean_point = point.iter().all(|&x| x.is_zero() || x.is_one());
         let result = match (is_boolean_point, polynomial) {
-            (true, DenseOrSparseMLE::Dense(poly)) => {
+            (true, DenseOrSparseMLERef::Dense(poly)) => {
                 Self::open_dense_bool_inner(prover_param, poly, point, state)
             },
-            (true, DenseOrSparseMLE::Sparse(poly)) => {
+            (true, DenseOrSparseMLERef::Sparse(poly)) => {
                 Self::open_sparse_bool_inner(prover_param, poly, point, state)
             },
-            (false, DenseOrSparseMLE::Dense(poly)) => {
+            (false, DenseOrSparseMLERef::Dense(poly)) => {
                 Self::open_dense_non_bool_inner(prover_param, poly, point, state)
             },
-            (false, DenseOrSparseMLE::Sparse(poly)) => {
+            (false, DenseOrSparseMLERef::Sparse(poly)) => {
                 Self::open_sparse_non_bool_inner(prover_param, poly, point, state)
             },
         };
@@ -442,7 +442,7 @@ impl<E: Pairing> KZHK<E> {
     fn open_zk(
         prover_param: impl Borrow<KZHKProverParam<E>>,
         commitment: &KZHKCommitment<E>,
-        polynomial: &DenseOrSparseMLE<E::ScalarField>,
+        polynomial: DenseOrSparseMLERef<'_, E::ScalarField>,
         point: &[E::ScalarField],
         state: &KZHKState<E>,
         transcript: &mut IOPTranscript<E::ScalarField>,
@@ -460,7 +460,7 @@ impl<E: Pairing> KZHK<E> {
         let rho = *r_state.get_tau();
         Self::update_state(prover_param, &r_poly_wrapped, &r_hide, &mut r_state)?;
         let (r_opening, y_r) =
-            Self::open_non_zk(prover_param, &r_hide, &r_poly_wrapped, point, &r_state)?;
+            Self::open_non_zk(prover_param, &r_hide, r_poly_wrapped.as_ref(), point, &r_state)?;
         // Fiat-Shamir: derive alpha from the prover's first-round messages.
         // Verifier replays the same appends in the same order — see
         // `verify_zk`. Once both sides commit to (C, point, y, R_hide)
@@ -503,7 +503,7 @@ impl<E: Pairing> KZHK<E> {
     fn multi_open_non_zk(
         prover_param: impl Borrow<KZHKProverParam<E>>,
         commitment: &KZHKCommitment<E>,
-        polynomials: &[&DenseOrSparseMLE<E::ScalarField>],
+        polynomials: &[DenseOrSparseMLERef<'_, E::ScalarField>],
         point: &Vec<E::ScalarField>,
         states: &[KZHKState<E>],
         _transcript: &mut IOPTranscript<E::ScalarField>,
@@ -511,13 +511,13 @@ impl<E: Pairing> KZHK<E> {
         let num_vars = point.len();
         let mut aggr_state: KZHKState<E> = KZHKState::default();
         let (agg_poly, aggr_state) = match polynomials[0] {
-            DenseOrSparseMLE::Dense(_) => {
+            DenseOrSparseMLERef::Dense(_) => {
                 let mut aggr_poly = DenseMultilinearExtension::from_evaluations_vec(
                     num_vars,
                     vec![E::ScalarField::zero(); 1usize << num_vars],
                 );
                 for (poly, state) in polynomials.iter().zip(states.iter()) {
-                    if let DenseOrSparseMLE::Dense(dense_poly) = poly {
+                    if let DenseOrSparseMLERef::Dense(dense_poly) = *poly {
                         aggr_poly += dense_poly;
                         aggr_state = aggr_state + state.clone();
                     } else {
@@ -526,11 +526,11 @@ impl<E: Pairing> KZHK<E> {
                 }
                 (DenseOrSparseMLE::Dense(aggr_poly), aggr_state)
             },
-            DenseOrSparseMLE::Sparse(_) => {
+            DenseOrSparseMLERef::Sparse(_) => {
                 let mut aggr_poly =
                     SparseMultilinearExtension::from_evaluations(num_vars, Vec::new());
                 for (poly, state) in polynomials.iter().zip(states.iter()) {
-                    if let DenseOrSparseMLE::Sparse(sparse_poly) = poly {
+                    if let DenseOrSparseMLERef::Sparse(sparse_poly) = *poly {
                         aggr_poly += sparse_poly;
                         aggr_state = aggr_state + state.clone();
                     } else {
@@ -541,7 +541,7 @@ impl<E: Pairing> KZHK<E> {
                 (DenseOrSparseMLE::Sparse(aggr_poly), aggr_state)
             },
         };
-        Self::open_non_zk(prover_param, commitment, &agg_poly, point, &aggr_state)
+        Self::open_non_zk(prover_param, commitment, agg_poly.as_ref(), point, &aggr_state)
     }
 
     /// zk verifier (Appendix D): reconstructs the non-hiding commitment
@@ -959,18 +959,106 @@ impl<E: Pairing> KZHK<E> {
             flat
         };
 
-        // Step 3: parallel sweep across all (level, prefix) pairs.
-        // We keep `naive_msm` (with a size-1 fast path) for all cells
-        // here even though Pippenger would in theory be faster at
-        // sizes >= 4. Attempting to call `msm_unchecked` from inside
-        // this outer `par_iter` blew the rayon worker stack on the
-        // prefill workload — nested rayon scheduling appears to
-        // accumulate frames in a way that's hard to bound. The
-        // Pippenger payoff for the workload we care about isn't worth
-        // a brittle integration; if we revisit, the cleaner path is
-        // to run a *sequential* outer loop here and let `msm` use its
-        // own thread pool internally for each cell.
-        let projectives: Vec<E::G1> = {
+        // Cell-size profiling for the ParallelMSM workload. Emits one
+        // info event per CompAux call with the histogram + percentiles
+        // of MSM input sizes — exposes whether the workload is
+        // dominated by tiny cells (where naive wins), medium cells
+        // (where Pippenger might help if we could dodge nested-rayon),
+        // or one giant cell that serialises the tail. Cheap: just a
+        // sort + bucket count over `flat`, runs once per call.
+        {
+            let mut sizes: Vec<usize> = flat
+                .iter()
+                .map(|(_, _, r)| r.end - r.start)
+                .collect();
+            sizes.sort_unstable();
+            let n = sizes.len();
+            let sum: usize = sizes.iter().sum();
+            let max = sizes.last().copied().unwrap_or(0);
+            let p50 = if n > 0 { sizes[n / 2] } else { 0 };
+            let p90 = if n > 0 { sizes[(n * 9) / 10] } else { 0 };
+            let p99 = if n > 0 { sizes[(n * 99) / 100] } else { 0 };
+            let mut h = [0usize; 8]; // 1, 2, 3-4, 5-8, 9-16, 17-32, 33-64, 65+
+            for &s in &sizes {
+                let b = match s {
+                    0..=1 => 0,
+                    2 => 1,
+                    3..=4 => 2,
+                    5..=8 => 3,
+                    9..=16 => 4,
+                    17..=32 => 5,
+                    33..=64 => 6,
+                    _ => 7,
+                };
+                h[b] += 1;
+            }
+            tracing::info!(
+                target: "akd_core::aegon_crypto::pcs::kzhk",
+                cells = n,
+                sum_size = sum,
+                max_size = max,
+                p50 = p50,
+                p90 = p90,
+                p99 = p99,
+                h1 = h[0],
+                h2 = h[1],
+                h3_4 = h[2],
+                h5_8 = h[3],
+                h9_16 = h[4],
+                h17_32 = h[5],
+                h33_64 = h[6],
+                h65p = h[7],
+                "ParallelMSM cell-size profile"
+            );
+        }
+
+        // Step 3: hybrid-dispatch sweep across all (level, prefix)
+        // pairs.
+        //
+        // Cell-size profiling on the publish workload (see profile
+        // emitted just above) shows the distribution is heavily
+        // long-tailed: ~83% of cells are size 1, p99 is ~14, but max
+        // can run to several hundred — a few fat cells contain most of
+        // the actual scalar-mul work. A uniform `naive_msm` over all
+        // cells (the previous strategy) leaves performance on the
+        // table at the fat tail; uniform Pippenger via `msm()` from
+        // inside the outer `par_iter` blew the rayon worker stack on
+        // the prefill workload because nested rayon pools accumulate
+        // frames.
+        //
+        // Resolution: split the work by cell size, using the strategy
+        // that wins per regime, and avoid nesting rayon pools.
+        //
+        //   Phase A — small cells (size < SEQ_PIPP_THRESHOLD).
+        //     Run them in parallel via `cfg_iter!` + `naive_msm`.
+        //     `naive_msm` has near-zero per-call overhead, the cells
+        //     are tiny, and rayon's outer parallelism is the only
+        //     parallelism source — exactly the regime where the
+        //     previous design was already optimal.
+        //
+        //   Phase B — large cells (size ≥ SEQ_PIPP_THRESHOLD).
+        //     Loop *sequentially* and call `msm()` per cell. Each
+        //     `msm()` is free to spin up its own rayon pool (Pippenger
+        //     against `THREAD_TABLE` width) because we're not inside
+        //     a `par_iter` anymore — no nested-rayon stack accumulation.
+        //     For these cells Pippenger is much faster than naive
+        //     (per calibration: ~3-9× at sizes 32-256+), and the cell
+        //     count is small (typically ≤ 100 on the publish path),
+        //     so the sequential outer is fine.
+        //
+        // Threshold = 32 was picked from the calibration table:
+        // sequential `msm()` only beats per-cell-of-the-parallel-pool
+        // (naive_cost / num_cores) once n ≳ 32 on n2-standard-4. Below
+        // 32, the parallel-naive path's amortised cost is smaller than
+        // a single Pippenger call even though Pippenger is faster
+        // per-call than naive.
+        const SEQ_PIPP_THRESHOLD: usize = 32;
+
+        // Phase A: parallel naive over the small cells. The closure
+        // emits `E::G1::zero()` as a placeholder for large cells so
+        // we keep one flat output buffer aligned with `flat`. The
+        // sequential phase below overwrites those placeholders.
+        let mut projectives: Vec<E::G1> = {
             let _span = tracing::info_span!(
                 "KZH::CompAux::ParallelMSM",
                 cells = flat.len()
@@ -981,14 +1069,52 @@ impl<E: Pairing> KZHK<E> {
                     let arena = &level_arenas[*j];
                     let bases = &arena.flat_bases[range.start..range.end];
                     let scalars = &arena.flat_scalars[range.start..range.end];
-                    if bases.len() == 1 {
+                    let n = bases.len();
+                    if n == 0 {
+                        E::G1::zero()
+                    } else if n == 1 {
                         bases[0] * scalars[0]
-                    } else {
+                    } else if n < SEQ_PIPP_THRESHOLD {
                         naive_msm::<E::G1>(bases, scalars)
+                    } else {
+                        // Big cell — leave a placeholder. Calling
+                        // `msm()` here would nest rayon pools inside
+                        // the outer `par_iter` and overflow worker
+                        // stacks (this is the historical failure
+                        // mode that forced uniform-naive in the first
+                        // place).
+                        E::G1::zero()
                     }
                 })
                 .collect()
         };
+
+        // Phase B: sequential Pippenger over the large cells. We're
+        // outside any `par_iter` here, so each `msm()` call may safely
+        // install its own thread pool. The sequential outer loop
+        // means at most one Pippenger pool is active at a time —
+        // bounded stack usage, no nesting.
+        {
+            let large_count = flat
+                .iter()
+                .filter(|(_, _, r)| r.end - r.start >= SEQ_PIPP_THRESHOLD)
+                .count();
+            let _span = tracing::info_span!(
+                "KZH::CompAux::SequentialPippenger",
+                cells = large_count
+            )
+            .entered();
+            for (i, (j, _prefix, range)) in flat.iter().enumerate() {
+                let len = range.end - range.start;
+                if len < SEQ_PIPP_THRESHOLD {
+                    continue;
+                }
+                let arena = &level_arenas[*j];
+                let bases = &arena.flat_bases[range.start..range.end];
+                let scalars = &arena.flat_scalars[range.start..range.end];
+                projectives[i] = msm::<E::G1>(bases, scalars);
+            }
+        }
 
         // Step 4: one batch normalization over every non-empty cell
         // across every level.
