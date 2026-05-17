@@ -959,14 +959,17 @@ impl<E: Pairing> KZHK<E> {
             flat
         };
 
-        // Step 3: one parallel MSM sweep across all (level, prefix)
-        // pairs. Size-1 cells (the bulk at deeper levels) hit a fast
-        // path that does one `affine * scalar` directly — `naive_msm`'s
-        // iterator chain (zip+map+fold-with-zero) is overhead in this
-        // case. Larger cells still go through `naive_msm`; they stay
-        // below the Pippenger break-even at sparse densities, and
-        // avoiding `msm()` skips the `pool::install` sync we don't want
-        // under outer rayon.
+        // Step 3: parallel sweep across all (level, prefix) pairs.
+        // We keep `naive_msm` (with a size-1 fast path) for all cells
+        // here even though Pippenger would in theory be faster at
+        // sizes >= 4. Attempting to call `msm_unchecked` from inside
+        // this outer `par_iter` blew the rayon worker stack on the
+        // prefill workload — nested rayon scheduling appears to
+        // accumulate frames in a way that's hard to bound. The
+        // Pippenger payoff for the workload we care about isn't worth
+        // a brittle integration; if we revisit, the cleaner path is
+        // to run a *sequential* outer loop here and let `msm` use its
+        // own thread pool internally for each cell.
         let projectives: Vec<E::G1> = {
             let _span = tracing::info_span!(
                 "KZH::CompAux::ParallelMSM",

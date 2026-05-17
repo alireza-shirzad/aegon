@@ -305,6 +305,49 @@ cmd_up() {
   log "ready. next: ./scripts/bench-cluster.sh deploy"
 }
 
+# Kill any running shard server on $name and start a fresh one with the
+# given prefill count. Assumes the binary already exists at
+# $REMOTE_BIN_DIR/aegon_shard_server (this is what makes `restart-shards`
+# cheap relative to `deploy` — no rebuild, no scp).
+#
+# PID-file restart pattern (see cluster.sh for the rationale on avoiding
+# `pkill -f`). We deliberately do NOT use `setsid` here: it forks when
+# the caller is a session leader, so $! would point at a short-lived
+# intermediate rather than the shard server, and the next restart's
+# PID-file kill would no-op (leaving the old server holding port 50051).
+# Plain `nohup ... &` keeps $! aligned with the actual shard server. The
+# SSH-session hang that setsid was trying to solve is handled by
+# `fire-and-forget` instead.
+restart_shard() {
+  local name="$1"
+  local i="$2"
+  local per_shard="$3"
+  local db_ip="$4"
+  local shard_prefill_seed=$((PREFILL_SEED + i))
+  log "[$name] starting shard server (shard_id=$i, prefill_count=$per_shard, prefill_seed=$shard_prefill_seed)"
+  remote "$name" "if [ -f /tmp/aegon-shard.pid ]; then \
+      kill \$(cat /tmp/aegon-shard.pid) 2>/dev/null || true; \
+    fi; \
+    pkill -x aegon_shard_ser 2>/dev/null || true; \
+    sleep 2; \
+    mkdir -p \$HOME/aegon-run \$HOME/artifacts/srs && \
+    cd \$HOME/aegon-run && \
+    nohup $REMOTE_BIN_DIR/aegon_shard_server \
+      --bind 0.0.0.0:$SHARD_PORT \
+      --shard-log-capacity $SHARD_LOG_CAPACITY \
+      --kzh-k $KZH_K \
+      --setup-seed $SETUP_SEED \
+      --shard-id $i \
+      --prefill-count $per_shard \
+      --prefill-seed $shard_prefill_seed \
+      --db-url redis://$db_ip:$REDIS_PORT \
+      > /tmp/aegon-shard.log 2>&1 < /dev/null & \
+    echo \$! > /tmp/aegon-shard.pid; \
+    disown 2>/dev/null || true; \
+    exit 0" \
+    fire-and-forget
+}
+
 cmd_deploy() {
   require_project
   require_power_of_two "$N_SHARDS"
@@ -379,43 +422,13 @@ cmd_deploy() {
   local -a deploy_pids=()
   for ((i = 0; i < N_SHARDS; i++)); do
     local name; name="$(shard_name "$i")"
-    local shard_prefill_seed=$((PREFILL_SEED + i))
     (
       log "[$name] uploading aegon_shard_server"
       scp_to "$name" "$remote_bin_dir/aegon_shard_server"
       remote "$name" "sudo mkdir -p $REMOTE_BIN_DIR && \
         sudo mv /tmp/aegon_shard_server $REMOTE_BIN_DIR/ && \
         sudo chmod +x $REMOTE_BIN_DIR/aegon_shard_server"
-      log "[$name] starting shard server (shard_id=$i, prefill_count=$per_shard, prefill_seed=$shard_prefill_seed)"
-      # PID-file restart pattern (see cluster.sh for the rationale on
-      # avoiding `pkill -f`). We deliberately do NOT use `setsid` here:
-      # it forks when the caller is a session leader, so $! would point
-      # at a short-lived intermediate rather than the shard server, and
-      # the next deploy's PID-file kill would no-op (leaving the old
-      # server holding port 50051). Plain `nohup ... &` keeps $! aligned
-      # with the actual shard server. The SSH-session hang that setsid
-      # was trying to solve is handled by `fire-and-forget` instead.
-      remote "$name" "if [ -f /tmp/aegon-shard.pid ]; then \
-          kill \$(cat /tmp/aegon-shard.pid) 2>/dev/null || true; \
-        fi; \
-        pkill -x aegon_shard_ser 2>/dev/null || true; \
-        sleep 2; \
-        mkdir -p \$HOME/aegon-run \$HOME/artifacts/srs && \
-        cd \$HOME/aegon-run && \
-        nohup $REMOTE_BIN_DIR/aegon_shard_server \
-          --bind 0.0.0.0:$SHARD_PORT \
-          --shard-log-capacity $SHARD_LOG_CAPACITY \
-          --kzh-k $KZH_K \
-          --setup-seed $SETUP_SEED \
-          --shard-id $i \
-          --prefill-count $per_shard \
-          --prefill-seed $shard_prefill_seed \
-          --db-url redis://$db_ip:$REDIS_PORT \
-          > /tmp/aegon-shard.log 2>&1 < /dev/null & \
-        echo \$! > /tmp/aegon-shard.pid; \
-        disown 2>/dev/null || true; \
-        exit 0" \
-        fire-and-forget
+      restart_shard "$name" "$i" "$per_shard" "$db_ip"
       log "[$name] deploy done"
     ) &
     deploy_pids+=("$!")
@@ -441,6 +454,49 @@ cmd_deploy() {
   log "at log_cap=$SHARD_LOG_CAPACITY this takes a while — check progress with"
   log "  ./scripts/bench-cluster.sh logs 0"
   log "wait for 'aegon_shard_server listening on ...' on every shard before running bench."
+}
+
+# Restart every shard server with a fresh --prefill-count, reusing the
+# already-uploaded binary and the on-disk SRS cache at
+# $HOME/artifacts/srs/. Also FLUSHALLs Redis so the previous prefill's
+# occupancy keys and shard checkpoints don't leak into the new run.
+#
+# Use this inside a (prefill, batch) sweep instead of `deploy`: it
+# skips the cargo build, the scp uploads, and the redis re-install,
+# collapsing per-prefill cycle from ~9 min to ~30 s. The cluster must
+# already be `up` and `deploy`-ed once.
+cmd_restart_shards() {
+  require_project
+  require_power_of_two "$N_SHARDS"
+
+  local per_shard; per_shard="$(prefill_per_shard)"
+  log "shards will prefill ${per_shard} entries each (total = 2^$TOTAL_PRELOAD_LOG2)"
+
+  local dname; dname="$(db_name)"
+  log "[$dname] FLUSHALL"
+  remote "$dname" "redis-cli -h 127.0.0.1 -p $REDIS_PORT FLUSHALL >/dev/null && \
+                   redis-cli -h 127.0.0.1 -p $REDIS_PORT PING >/dev/null"
+
+  local db_ip; db_ip="$(db_internal_ip)"
+
+  local -a pids=()
+  for ((i = 0; i < N_SHARDS; i++)); do
+    local name; name="$(shard_name "$i")"
+    (
+      restart_shard "$name" "$i" "$per_shard" "$db_ip"
+      log "[$name] restart done"
+    ) &
+    pids+=("$!")
+  done
+  log "waiting on ${#pids[@]} per-shard restarts (parallel)..."
+  local failed=0
+  for pid in "${pids[@]}"; do
+    wait "$pid" || failed=$((failed + 1))
+  done
+  if (( failed > 0 )); then
+    die "$failed shard restart(s) failed — inspect output above and run 'logs <i>' to debug"
+  fi
+  log "all shards restarted. wait for 'aegon_shard_server listening on ...' on each."
 }
 
 cmd_bench() {
@@ -536,12 +592,15 @@ usage() {
   cat <<EOF
 usage: $0 <subcommand>
 
-  up        Provision VPC, firewall, $N_SHARDS shards + coordinator
-  deploy    Build binaries, push to every node, start shard servers
-            (each does in-process SRS gen + --prefill-count locally)
-  bench     Run aegon_coordinator_bench on the coordinator, fetch JSON
-  logs N    Tail the shard log on $SHARD_TAG-N
-  down      Delete every instance + the VPC
+  up               Provision VPC, firewall, $N_SHARDS shards + coordinator
+  deploy           Build binaries, push to every node, start shard servers
+                   (each does in-process SRS gen + --prefill-count locally)
+  restart-shards   Restart all shards with a fresh --prefill-count using
+                   already-uploaded binaries + on-disk SRS cache + FLUSHALL.
+                   Cheap per-call (~30 s) — use in (prefill,batch) sweeps.
+  bench            Run aegon_coordinator_bench on the coordinator, fetch JSON
+  logs N           Tail the shard log on $SHARD_TAG-N
+  down             Delete every instance + the VPC
 
 Required env: PROJECT=<gcp-project-id>
 Optional env: ZONE, N_SHARDS, SHARD_LOG_CAPACITY, KZH_K,
@@ -558,11 +617,12 @@ main() {
   local sub="${1:-}"
   shift || true
   case "$sub" in
-    up)     cmd_up ;;
-    deploy) cmd_deploy ;;
-    bench)  cmd_bench ;;
-    logs)   cmd_logs "$@" ;;
-    down)   cmd_down ;;
+    up)             cmd_up ;;
+    deploy)         cmd_deploy ;;
+    restart-shards) cmd_restart_shards ;;
+    bench)          cmd_bench ;;
+    logs)           cmd_logs "$@" ;;
+    down)           cmd_down ;;
     ""|-h|--help|help) usage ;;
     *) usage; die "unknown subcommand: $sub" ;;
   esac
