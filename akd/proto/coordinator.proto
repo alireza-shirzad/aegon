@@ -29,8 +29,17 @@ service CoordinatorService {
   // records for `label`. Each record is a self-contained bundle the
   // client verifies locally via `verify_lookup_history`. Response is
   // empty when the label is unknown OR when the coordinator was
-  // configured with DbSource::None (no Redis backing).
+  // configured with DbSource::None (no DB backing).
   rpc LookupHistory(LookupHistoryRequest) returns (LookupHistoryResponse);
+  // Label-side mirror of LookupHistory. Returns the (single)
+  // placement record for `label` plus a freshness attestation
+  // against the live rand_index_poly. The client verifies via
+  // `verify_lookup_label_history`. Asymmetric with LookupHistory:
+  // labels are placed exactly once, so the placement record is
+  // singular (not a list) and immutable; the freshness opening is
+  // recomputed by the owning shard on every call.
+  rpc LookupLabelHistory(LookupLabelHistoryRequest)
+      returns (LookupLabelHistoryResponse);
   rpc CurrentCommitment(Empty) returns (CommitmentResponse);
 }
 
@@ -92,6 +101,21 @@ message LookupHistoryResponse {
   // each via `verify_lookup_history` and is then responsible for
   // cross-checking the returned (prev_root, post_root) pairs against
   // its trusted view of historical bulletin-board roots.
+  bytes history = 1;
+}
+
+message LookupLabelHistoryRequest {
+  bytes label = 1;
+}
+
+message LookupLabelHistoryResponse {
+  // Canonical-serialized ShardedLabelHistory. Carries the label
+  // bytes, an optional placement record (present iff the label is
+  // known), and an optional freshness attestation (present iff
+  // placement is present). The client verifies via
+  // `verify_lookup_label_history` and cross-checks the returned
+  // (placement_root, live_root) against its trusted bulletin-board
+  // view for the placement epoch and the live epoch.
   bytes history = 1;
 }
 

@@ -157,7 +157,7 @@ pub struct ConsistencyProof<E: Pairing, P: AegonPcs<E>> {
 /// brand-new slot was empty at the prior epoch). `value` is bound
 /// directly; the index-side data value is the canonical
 /// `H_F(label)` which the verifier reconstructs from the label bytes
-/// stored in Redis under `aegon:value:` and `aegon:routing:`.
+/// stored in the DB under `aegon:value:` and `aegon:routing:`.
 #[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
 pub struct HistoryOpeningEntry<E: Pairing, P: AegonPcs<E>> {
     /// The slot bits this entry's openings are at. Same encoding as

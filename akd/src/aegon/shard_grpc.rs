@@ -141,6 +141,13 @@ where
         slot_bits: &[bool],
     ) -> Result<(E::ScalarField, P::Proof), AegonError>;
 
+    /// Open the live `rand_index_poly` at `slot_bits`. Label-side
+    /// mirror; used by `ShardedAegon::lookup_label_history`.
+    fn open_rand_index_at_slot_current(
+        &self,
+        slot_bits: &[bool],
+    ) -> Result<(E::ScalarField, P::Proof), AegonError>;
+
     fn current_commitment(&self) -> EpochCommitment<E, P>;
 
     /// Per-shard verifier context. Only really needed at coordinator
@@ -227,6 +234,13 @@ where
         Aegon::open_rand_value_at_slot_current(self, slot_bits)
     }
 
+    fn open_rand_index_at_slot_current(
+        &self,
+        slot_bits: &[bool],
+    ) -> Result<(E::ScalarField, P::Proof), AegonError> {
+        Aegon::open_rand_index_at_slot_current(self, slot_bits)
+    }
+
     fn current_commitment(&self) -> EpochCommitment<E, P> {
         Aegon::current_commitment(self)
     }
@@ -281,10 +295,11 @@ where
     H: HashSuite<E::ScalarField>,
 {
     aegon: Arc<AsyncRwLock<Aegon<E, P, H>>>,
-    /// Optional Redis client. When set, the shard writes its
+    /// Optional DB client (Redis or RocksDB, depending on
+    /// `DbSource`). When set, the shard writes its
     /// [`AegonCheckpoint`] to `aegon:shard:{shard_id}:state` after
     /// every successful `publish_phase_2`. Powers shard-restart
-    /// recovery (`aegon_shard_server --db-url`).
+    /// recovery (`aegon_shard_server --db-url` or `--db-path`).
     db: Option<Arc<dyn Db>>,
     shard_id: u32,
 }
@@ -319,10 +334,11 @@ where
         }
     }
 
-    /// Same as `new`, but also wires up the Redis-backed durability
+    /// Same as `new`, but also wires up the DB-backed durability
     /// barrier — every successful `publish_phase_2` writes the new
-    /// `AegonCheckpoint` to `aegon:shard:{shard_id}:state`. The shard
-    /// server binary calls this when started with `--db-url`.
+    /// `AegonCheckpoint` to `aegon:shard:{shard_id}:state`. The
+    /// shard server binary calls this when started with `--db-url`
+    /// (Redis) or `--db-path` (RocksDB).
     pub fn new_with_checkpoint(
         aegon: Aegon<E, P, H>,
         db_source: DbSource,
@@ -550,6 +566,21 @@ where
         let aegon = self.aegon.read().await;
         let (eval, proof) = aegon
             .open_rand_value_at_slot_current(&slot)
+            .map_err(err_to_status)?;
+        Ok(Response::new(OpenResponse {
+            evaluation: encode(&eval).map_err(err_to_status)?,
+            proof: encode(&proof).map_err(err_to_status)?,
+        }))
+    }
+
+    async fn open_rand_index_at_slot_current(
+        &self,
+        req: Request<SlotRequest>,
+    ) -> Result<Response<OpenResponse>, Status> {
+        let slot: Vec<bool> = decode(&req.into_inner().slot_bits).map_err(err_to_status)?;
+        let aegon = self.aegon.read().await;
+        let (eval, proof) = aegon
+            .open_rand_index_at_slot_current(&slot)
             .map_err(err_to_status)?;
         Ok(Response::new(OpenResponse {
             evaluation: encode(&eval).map_err(err_to_status)?,
@@ -938,6 +969,27 @@ where
                     .lock()
                     .await
                     .open_rand_value_at_slot_current(req)
+                    .await
+            }
+        })?;
+        let inner = resp.into_inner();
+        Ok((decode(&inner.evaluation)?, decode(&inner.proof)?))
+    }
+
+    fn open_rand_index_at_slot_current(
+        &self,
+        slot_bits: &[bool],
+    ) -> Result<(E::ScalarField, P::Proof), AegonError> {
+        let req = SlotRequest {
+            slot_bits: encode(&slot_bits.to_vec())?,
+        };
+        let resp = self.with_retry(move |client| {
+            let req = req.clone();
+            async move {
+                client
+                    .lock()
+                    .await
+                    .open_rand_index_at_slot_current(req)
                     .await
             }
         })?;

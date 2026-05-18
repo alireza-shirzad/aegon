@@ -59,7 +59,8 @@ use std::time::{Duration, Instant};
 use akd::aegon::coordinator_grpc::{
     proto::{
         coordinator_service_client::CoordinatorServiceClient, Empty, LookupHistoryRequest,
-        LookupHistoryResponse, LookupLabelRequest, LookupLabelResponse, LookupValueRequest,
+        LookupHistoryResponse, LookupLabelHistoryRequest, LookupLabelHistoryResponse,
+        LookupLabelRequest, LookupLabelResponse, LookupValueRequest,
         LookupValueResponse,
     },
     CoordinatorServer,
@@ -602,6 +603,42 @@ fn main() -> ExitCode {
                 return ExitCode::from(1);
             }
 
+            // (g) Server-direct lookup_label_history. Same
+            // blocking_read pattern. Returns the placement record +
+            // a live opening of rand_index_poly at the slot; under
+            // the system's current invariants (labels placed
+            // exactly once) the response will always be Some(...)
+            // for any label we've published in this bench.
+            let t = Instant::now();
+            let server_label_history_result = {
+                let s = shared.blocking_read();
+                s.lookup_label_history(&label)
+            };
+            let server_label_history_ns = t.elapsed().as_nanos() as u64;
+            let label_history = match server_label_history_result {
+                Ok(h) => h,
+                Err(e) => {
+                    eprintln!(
+                        "error: server-direct lookup_label_history at level {target}: {e}"
+                    );
+                    return ExitCode::from(1);
+                },
+            };
+
+            // (h) Client lookup_label_history via raw tonic RPC.
+            let label_history_req = LookupLabelHistoryRequest {
+                label: label.clone(),
+            };
+            let t = Instant::now();
+            let mut rc_lh = raw_client.clone();
+            let client_label_history_result = driver_rt
+                .block_on(async move { rc_lh.lookup_label_history(label_history_req).await });
+            let client_label_history_ns = t.elapsed().as_nanos() as u64;
+            if let Err(e) = client_label_history_result {
+                eprintln!("error: raw RPC lookup_label_history at level {target}: {e}");
+                return ExitCode::from(1);
+            }
+
             // ---- wire-size + application-size accounting ------------
             // Reproduce the responses the gRPC server would send (the
             // server's `encode` helper is private, but it's just
@@ -660,6 +697,22 @@ fn main() -> ExitCode {
             let history_wire_bytes = history_resp.encoded_len();
             let history_entries = history.entries.len();
 
+            // Label-history wire size. Asymmetric with value-
+            // history: at most one placement record + at most one
+            // freshness opening, so the bundle is always smaller
+            // than a 5-entry value-history. We still encode it for
+            // a fair size comparison.
+            let mut label_history_bytes: Vec<u8> =
+                Vec::with_capacity(label_history.uncompressed_size());
+            if let Err(e) = label_history.serialize_uncompressed(&mut label_history_bytes) {
+                eprintln!("error: serialize label_history: {e}");
+                return ExitCode::from(1);
+            }
+            let label_history_resp = LookupLabelHistoryResponse {
+                history: label_history_bytes.clone(),
+            };
+            let label_history_wire_bytes = label_history_resp.encoded_len();
+
             // "proof overhead" per the user's spec: the gap between
             // the bytes shipped to the client and the underlying
             // application-level payload (label for the label call,
@@ -677,27 +730,31 @@ fn main() -> ExitCode {
                 history_wire_bytes.saturating_sub(history_payload_bytes);
 
             samples_json.push(format!(
-                "        {{\n          \"sample_idx\": {sample_idx},\n          \"label_idx\": {idx},\n          \"server_lookup_label_ns\": {server_label_ns},\n          \"server_lookup_value_ns\": {server_value_ns},\n          \"server_lookup_history_ns\": {server_history_ns},\n          \"client_lookup_label_ns\": {client_label_ns},\n          \"client_lookup_value_ns\": {client_value_ns},\n          \"client_lookup_history_ns\": {client_history_ns},\n          \"label_size_bytes\": {label_size_bytes},\n          \"value_size_bytes\": {value_size_bytes},\n          \"history_entries\": {history_entries},\n          \"label_wire_bytes\": {label_wire_bytes},\n          \"value_wire_bytes_empty_value\": {value_wire_bytes_empty},\n          \"value_wire_bytes_with_value\": {value_wire_bytes_with_value},\n          \"history_wire_bytes\": {history_wire_bytes},\n          \"label_proof_field_bytes\": {label_proof_field},\n          \"value_proof_field_bytes\": {value_proof_field},\n          \"history_proof_field_bytes\": {history_proof_field},\n          \"label_slot_field_bytes\": {label_slot_field},\n          \"label_proof_overhead_bytes\": {label_proof_overhead_bytes},\n          \"value_proof_overhead_bytes\": {value_proof_overhead_bytes},\n          \"history_proof_overhead_bytes\": {history_proof_overhead_bytes}\n        }}",
+                "        {{\n          \"sample_idx\": {sample_idx},\n          \"label_idx\": {idx},\n          \"server_lookup_label_ns\": {server_label_ns},\n          \"server_lookup_value_ns\": {server_value_ns},\n          \"server_lookup_history_ns\": {server_history_ns},\n          \"server_lookup_label_history_ns\": {server_label_history_ns},\n          \"client_lookup_label_ns\": {client_label_ns},\n          \"client_lookup_value_ns\": {client_value_ns},\n          \"client_lookup_history_ns\": {client_history_ns},\n          \"client_lookup_label_history_ns\": {client_label_history_ns},\n          \"label_size_bytes\": {label_size_bytes},\n          \"value_size_bytes\": {value_size_bytes},\n          \"history_entries\": {history_entries},\n          \"label_wire_bytes\": {label_wire_bytes},\n          \"value_wire_bytes_empty_value\": {value_wire_bytes_empty},\n          \"value_wire_bytes_with_value\": {value_wire_bytes_with_value},\n          \"history_wire_bytes\": {history_wire_bytes},\n          \"label_history_wire_bytes\": {label_history_wire_bytes},\n          \"label_proof_field_bytes\": {label_proof_field},\n          \"value_proof_field_bytes\": {value_proof_field},\n          \"history_proof_field_bytes\": {history_proof_field},\n          \"label_history_proof_field_bytes\": {label_history_proof_field},\n          \"label_slot_field_bytes\": {label_slot_field},\n          \"label_proof_overhead_bytes\": {label_proof_overhead_bytes},\n          \"value_proof_overhead_bytes\": {value_proof_overhead_bytes},\n          \"history_proof_overhead_bytes\": {history_proof_overhead_bytes}\n        }}",
                 label_proof_field = label_proof_bytes.len(),
                 value_proof_field = value_proof_bytes.len(),
                 history_proof_field = history_bytes.len(),
+                label_history_proof_field = label_history_bytes.len(),
                 label_slot_field = slot_bytes.len(),
             ));
 
             if sample_idx == 0 || (sample_idx + 1) % 10 == 0 {
                 eprintln!(
-                    "  sample {}: server_label={:.2}ms server_value={:.2}ms server_history={:.2}ms client_label={:.2}ms client_value={:.2}ms client_history={:.2}ms label_wire={}B value_wire={}B history_wire={}B (entries={})",
+                    "  sample {}: server_label={:.2}ms server_value={:.2}ms server_history={:.2}ms server_label_history={:.2}ms client_label={:.2}ms client_value={:.2}ms client_history={:.2}ms client_label_history={:.2}ms label_wire={}B value_wire={}B history_wire={}B (entries={}) label_history_wire={}B",
                     sample_idx,
                     server_label_ns as f64 / 1e6,
                     server_value_ns as f64 / 1e6,
                     server_history_ns as f64 / 1e6,
+                    server_label_history_ns as f64 / 1e6,
                     client_label_ns as f64 / 1e6,
                     client_value_ns as f64 / 1e6,
                     client_history_ns as f64 / 1e6,
+                    client_label_history_ns as f64 / 1e6,
                     label_wire_bytes,
                     value_wire_bytes_with_value,
                     history_wire_bytes,
                     history_entries,
+                    label_history_wire_bytes,
                 );
             }
         }

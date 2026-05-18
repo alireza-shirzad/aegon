@@ -2,16 +2,23 @@
 //!
 //! Originally just a side-channel for `(label → value)` bytes so the
 //! coordinator could return the value alongside a lookup proof. With
-//! the Redis-anchored-state refactor, this is now the durability layer
+//! the DB-anchored-state refactor, this is now the durability layer
 //! for the **entire** coordinator view — slot occupancy, per-label
 //! routing, the coordinator's FS chain state, the epoch-commit log,
 //! and (written by each shard server, read by it on restart) per-shard
 //! polynomial checkpoints.
 //!
-//! The verifier never trusts what comes back from Redis. It always
-//! re-hashes the bytes and checks the proof binds. Redis is just the
-//! place the coordinator keeps "what was true at end of epoch N" so it
-//! can answer probes without an RPC and resume from a cold start.
+//! Two backends are supported behind the `Db` trait: `RedisDb` (a
+//! network-attached Redis instance, shareable across processes) and
+//! `RocksDb` (a process-local embedded LSM, single-writer). One is
+//! selected at config time via [`DbSource`]; the rest of the code
+//! never touches either implementation directly.
+//!
+//! The verifier never trusts what comes back from the DB. It always
+//! re-hashes the bytes and checks the proof binds. The DB is just
+//! the place the coordinator keeps "what was true at end of epoch N"
+//! so it can answer probes without an RPC and resume from a cold
+//! start.
 //!
 //! Key namespace (all binary-safe, all prefixed `aegon:`):
 //!
@@ -20,7 +27,7 @@
 //! | `aegon:value:` + label                         | raw value bytes                                        |
 //! | `aegon:routing:` + label                       | `CanonicalSerialize`d `LabelRouting`                   |
 //! | `aegon:slot:{shard_id}:{slot_idx}`             | label bytes (also serves as occupancy bit)             |
-//! | `aegon:labels`                                 | Redis SET of every known label (for recovery scans)    |
+//! | `aegon:labels`                                 | SET of every known label (for recovery scans)          |
 //! | `aegon:coord:state`                            | serialized `CoordState { epoch, r_index, r_value }`    |
 //! | `aegon:coord:epoch_commit:{epoch}`             | serialized `ShardedEpochCommitment`                    |
 //! | `aegon:shard:{shard_id}:state`                 | serialized shard polynomial+commitment checkpoint      |
@@ -57,7 +64,8 @@ pub enum DbSource {
     Rocks(std::path::PathBuf),
 }
 
-/// One step of an atomic write batch (a MULTI/EXEC inside RedisDb).
+/// One step of an atomic write batch — one MULTI/EXEC inside
+/// `RedisDb`, one WriteBatch inside `RocksDb`.
 /// New variants get added as the schema grows; the impl pipelines
 /// them into a single round-trip.
 #[derive(Debug)]
@@ -120,29 +128,31 @@ pub(crate) enum DbOp {
 //      future per-user policies (VIP labels pinned, etc.) without
 //      touching the RocksDB layer.
 //
-// Until any of that lands, the in-RAM Redis impl is the only one
-// shipped, and there's nothing to cache because Redis already holds
-// everything in RAM by design.
+// Until any of that lands, neither backend has a tunable cache:
+// Redis keeps everything in RAM by design, and RocksDB ships with
+// just block-cache defaults — both work fine for the bench-scale
+// workloads we run today.
 //
 /// Coordinator-side durable store. All writes happen via `write_atomic`
-/// (one MULTI/EXEC per publish); reads are point lookups + a couple of
-/// recovery-time enumeration helpers.
+/// (one atomic batch per publish — Redis MULTI/EXEC or RocksDB
+/// WriteBatch depending on the configured backend); reads are point
+/// lookups + a couple of recovery-time enumeration helpers.
 pub(crate) trait Db: Send + Sync {
-    /// Apply every op in a single MULTI/EXEC. On Redis errors, none of
-    /// the ops are applied.
+    /// Apply every op in one atomic batch. On any error, none of the
+    /// ops are applied.
     fn write_atomic(&self, ops: &[DbOp]) -> Result<(), AegonError>;
     /// Single-key read. `None` if the key doesn't exist.
     fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, AegonError>;
-    /// Existence check — same network cost as `get` but skips the
-    /// payload.
+    /// Existence check — same cost as `get` but skips the payload.
     fn exists(&self, key: &[u8]) -> Result<bool, AegonError>;
-    /// Pipelined batch existence check. One TCP round-trip for every
-    /// key in `keys`, returning a `Vec<bool>` parallel to the input.
-    /// Used by the publish-path open-addressing loop where per-key
-    /// `exists` round-trips dominate at large batch sizes.
+    /// Pipelined batch existence check. One round-trip / batch lookup
+    /// for every key in `keys`, returning a `Vec<bool>` parallel to
+    /// the input. Used by the publish-path open-addressing loop
+    /// where per-key `exists` round-trips dominate at large batch
+    /// sizes.
     fn exists_many(&self, keys: &[Vec<u8>]) -> Result<Vec<bool>, AegonError>;
-    /// Members of a Redis SET. Used for recovery-time enumeration
-    /// (the `aegon:labels` set).
+    /// Members of a SET-typed key. Used for recovery-time
+    /// enumeration (the `aegon:labels` set).
     fn smembers(&self, key: &[u8]) -> Result<Vec<Vec<u8>>, AegonError>;
     /// `LRANGE key start stop` — list slice. Used by `lookup_history`
     /// to fetch the cached `aegon:value_history:{label}` window with
@@ -588,9 +598,9 @@ pub(crate) fn key_slot(shard_id: u32, slot_idx: usize) -> Vec<u8> {
     format!("aegon:slot:{shard_id}:{slot_idx}").into_bytes()
 }
 
-/// `aegon:labels` Redis SET of every label ever published. Used by
-/// recovery to enumerate `(label, routing, value)` triples without
-/// relying on `SCAN MATCH` against binary keys.
+/// `aegon:labels` — SET-typed key of every label ever published.
+/// Used by recovery to enumerate `(label, routing, value)` triples
+/// without relying on `SCAN MATCH` against binary keys.
 pub(crate) fn key_labels_set() -> &'static [u8] {
     b"aegon:labels"
 }
@@ -619,13 +629,27 @@ pub(crate) fn key_history_openings(epoch: u64, shard_id: u32) -> Vec<u8> {
     format!("aegon:openings:{epoch}:{shard_id}").into_bytes()
 }
 
-/// `aegon:value_history:{label}` — Redis LIST storing the last N
-/// `StoredValueHistoryEntry` records for a label, head-first (LPUSH
-/// + LTRIM 0 N-1 pattern). Each list element is the canonical-
-/// serialized entry bytes. Used by the user-facing `lookup_history`
-/// API; absent until the label's first publish.
+/// `aegon:value_history:{label}` — LIST-typed key storing the last
+/// N `StoredValueHistoryEntry` records for a label, head-first
+/// (LPUSH + LTRIM 0 N-1 pattern; both Redis and RocksDB backends
+/// implement these semantics under the `Db` trait). Each list
+/// element is the canonical-serialized entry bytes. Used by the
+/// user-facing `lookup_history` API; absent until the label's first
+/// publish.
 pub(crate) fn key_value_history(label: &[u8]) -> Vec<u8> {
     let mut k = b"aegon:value_history:".to_vec();
+    k.extend_from_slice(label);
+    k
+}
+
+/// `aegon:label_placement:{label}` — single-value key storing the
+/// canonical-serialized `StoredLabelPlacement` for a label. Written
+/// exactly once, at the publish that first places the label; never
+/// updated again (labels can't move in the current system). Read
+/// by the user-facing `lookup_label_history` API; absent until the
+/// label's placement publish.
+pub(crate) fn key_label_placement(label: &[u8]) -> Vec<u8> {
+    let mut k = b"aegon:label_placement:".to_vec();
     k.extend_from_slice(label);
     k
 }

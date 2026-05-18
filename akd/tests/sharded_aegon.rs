@@ -357,7 +357,7 @@ fn print_rss(stage: &str) {
 
 #[test]
 fn rocks_backend_publish_lookup_history_round_trip() {
-    use akd::aegon::{verify_lookup_history, DbSource};
+    use akd::aegon::{verify_lookup_history, verify_lookup_label_history, DbSource};
 
     // Unique tempdir so concurrent test runs don't collide. Cleaned
     // up at the end; on panic Linux's /tmp will eventually GC it.
@@ -472,6 +472,69 @@ fn rocks_backend_publish_lookup_history_round_trip() {
             msg.contains("freshness")
                 && (msg.contains("did not verify") || msg.contains("differs")),
             "expected freshness rejection, got: {msg}"
+        );
+    }
+
+    // Label-history round-trip. The placement record is written
+    // once per label at the publish that first places it; reading
+    // it back + verifying it should anchor under the live sharded
+    // root (because no later publish touched bob's or alice's slot
+    // via `index_poly`). For alice specifically, the v2 publish
+    // touched her slot's `value_poly` but NOT her slot's
+    // `index_poly` — placement was already recorded at v1 — so
+    // `rand_index` at her slot is invariant between v1 and v2 and
+    // the freshness equality check passes.
+    let alice_lhist = server
+        .lookup_label_history(&b"alice".to_vec())
+        .expect("alice label history");
+    assert!(
+        alice_lhist.placement.is_some(),
+        "alice has a placement record"
+    );
+    assert!(
+        alice_lhist.freshness.is_some(),
+        "alice has a live freshness opening"
+    );
+    let bob_lhist = server
+        .lookup_label_history(&b"bob".to_vec())
+        .expect("bob label history");
+    assert!(bob_lhist.placement.is_some(), "bob has a placement record");
+
+    let alice_lhist_verified =
+        verify_lookup_label_history::<Bn254, Pcs, Sha256Hash>(&ctx, &alice_lhist)
+            .expect("verify alice label history");
+    let bob_lhist_verified =
+        verify_lookup_label_history::<Bn254, Pcs, Sha256Hash>(&ctx, &bob_lhist)
+            .expect("verify bob label history");
+    // Both bundles must anchor the live opening under the current
+    // sharded root (i.e. neither label has been displaced).
+    assert_eq!(
+        alice_lhist_verified.live_root,
+        Some(current_root),
+        "alice label freshness anchors under live root"
+    );
+    assert_eq!(
+        bob_lhist_verified.live_root,
+        Some(current_root),
+        "bob label freshness anchors under live root"
+    );
+
+    // Tamper case for label history: flip the live opening's
+    // evaluation and confirm verification rejects with the "no
+    // change since placement" error path.
+    {
+        let mut tampered = bob_lhist.clone();
+        let fr = tampered
+            .freshness
+            .as_mut()
+            .expect("bob freshness present pre-tamper");
+        fr.rand_index_current_eval += <Bn254 as Pairing>::ScalarField::from(1u64);
+        let err = verify_lookup_label_history::<Bn254, Pcs, Sha256Hash>(&ctx, &tampered)
+            .expect_err("tampered label freshness must be rejected");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("label history") && (msg.contains("did not verify") || msg.contains("differs")),
+            "expected label-history rejection, got: {msg}"
         );
     }
 

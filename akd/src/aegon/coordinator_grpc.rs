@@ -28,9 +28,9 @@ use tonic::{Request, Response, Status};
 use super::error::AegonError;
 use super::hash::{HashSuite, Sha256Hash};
 use super::sharded::{
-    verify_lookup_history, verify_lookup_label, verify_lookup_value, LabelSlot, ShardedAegon,
-    ShardedEpochCommitment, ShardedLabelProof, ShardedValueHistory, ShardedValueProof,
-    ShardedVerifierContext,
+    verify_lookup_history, verify_lookup_label, verify_lookup_label_history, verify_lookup_value,
+    LabelSlot, ShardedAegon, ShardedEpochCommitment, ShardedLabelHistory, ShardedLabelProof,
+    ShardedValueHistory, ShardedValueProof, ShardedVerifierContext,
 };
 use super::types::{AegonPcs, EpochCommitment, Label, Value};
 
@@ -44,8 +44,9 @@ pub mod proto {
 use proto::coordinator_service_client::CoordinatorServiceClient;
 use proto::coordinator_service_server::{CoordinatorService, CoordinatorServiceServer};
 use proto::{
-    CommitmentResponse, Empty, LookupHistoryRequest, LookupHistoryResponse, LookupLabelRequest,
-    LookupLabelResponse, LookupValueRequest, LookupValueResponse,
+    CommitmentResponse, Empty, LookupHistoryRequest, LookupHistoryResponse,
+    LookupLabelHistoryRequest, LookupLabelHistoryResponse, LookupLabelRequest, LookupLabelResponse,
+    LookupValueRequest, LookupValueResponse,
 };
 use tokio::runtime::Runtime;
 use tokio::sync::Mutex as AsyncMutex;
@@ -282,7 +283,7 @@ where
         // index it built locally from its own `lookup_label`
         // history).
         //
-        // A future Redis schema extension (`aegon:value_by_slot:{s}:{i}`)
+        // A future DB schema extension (`aegon:value_by_slot:{s}:{i}`)
         // would let this RPC also return the value bytes; the proto
         // already has the field.
         Ok(Response::new(LookupValueResponse {
@@ -296,12 +297,14 @@ where
         req: Request<LookupHistoryRequest>,
     ) -> Result<Response<LookupHistoryResponse>, Status> {
         let label = req.into_inner().label;
-        // `ShardedAegon::lookup_history` is a pure Redis read — no
+        // `ShardedAegon::lookup_history` is a pure DB read — no
         // shard RPCs — so it doesn't strictly need `spawn_blocking`.
-        // But the Redis client this codebase uses is sync
-        // (`redis::Connection` behind a `std::sync::Mutex`), so we
-        // still keep tonic's async worker thread unblocked by
-        // dispatching the read onto a blocking pool thread.
+        // But the DB clients this codebase uses are sync (the
+        // `redis` crate behind a `std::sync::Mutex` for Redis;
+        // `rocksdb::DB` for RocksDB — both block the calling
+        // thread), so we still keep tonic's async worker thread
+        // unblocked by dispatching the read onto a blocking pool
+        // thread.
         let state = Arc::clone(&self.state);
         let history_result = tokio::task::spawn_blocking(move || {
             let state = state.blocking_read();
@@ -311,6 +314,29 @@ where
         .map_err(|e| Status::internal(format!("lookup_history join: {e}")))?;
         let history = history_result.map_err(err_to_status)?;
         Ok(Response::new(LookupHistoryResponse {
+            history: encode(&history).map_err(err_to_status)?,
+        }))
+    }
+
+    async fn lookup_label_history(
+        &self,
+        req: Request<LookupLabelHistoryRequest>,
+    ) -> Result<Response<LookupLabelHistoryResponse>, Status> {
+        let label = req.into_inner().label;
+        // Unlike value-history, this RPC does a shard gRPC call
+        // (open_rand_index_at_slot_current) under the hood — so the
+        // spawn_blocking here is doing real work, not just dodging
+        // a sync redis client. Same pattern as `lookup_label` and
+        // `lookup_value`.
+        let state = Arc::clone(&self.state);
+        let history_result = tokio::task::spawn_blocking(move || {
+            let state = state.blocking_read();
+            state.lookup_label_history(&label)
+        })
+        .await
+        .map_err(|e| Status::internal(format!("lookup_label_history join: {e}")))?;
+        let history = history_result.map_err(err_to_status)?;
+        Ok(Response::new(LookupLabelHistoryResponse {
             history: encode(&history).map_err(err_to_status)?,
         }))
     }
@@ -599,6 +625,42 @@ where
         let inner = resp.into_inner();
         let history: ShardedValueHistory<E, P> = decode(&inner.history)?;
         let verified = verify_lookup_history::<E, P, H>(&self.verifier_ctx, &history)?;
+        Ok((history, verified))
+    }
+
+    /// Fetch this label's placement record + freshness attestation
+    /// from the coordinator and verify both locally. The label-side
+    /// mirror of `lookup_history`.
+    ///
+    /// Returns `(history, verified)`. `history` carries the raw
+    /// bundle (placement record + live opening). `verified` carries
+    /// the two reconstructed sharded roots — `placement_root` (at
+    /// the placement epoch) and `live_root` (at right now) — the
+    /// caller cross-checks against the trusted bulletin board.
+    ///
+    /// `history.placement == None` (and `verified.placement_root ==
+    /// None`) when the label is unknown or its placement record
+    /// hasn't landed yet (racy pre-persist window). No error in
+    /// either case — matches the value-side semantics.
+    pub fn lookup_label_history(
+        &self,
+        label: &Label,
+    ) -> Result<(ShardedLabelHistory<E, P>, super::sharded::VerifiedLookupLabelHistory), AegonError>
+    {
+        let req = LookupLabelHistoryRequest {
+            label: label.clone(),
+        };
+        let resp = self.runtime.block_on(async {
+            self.client
+                .lock()
+                .await
+                .lookup_label_history(req)
+                .await
+                .map_err(|s| AegonError::Config(format!("grpc lookup_label_history: {s}")))
+        })?;
+        let inner = resp.into_inner();
+        let history: ShardedLabelHistory<E, P> = decode(&inner.history)?;
+        let verified = verify_lookup_label_history::<E, P, H>(&self.verifier_ctx, &history)?;
         Ok((history, verified))
     }
 }

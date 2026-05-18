@@ -37,6 +37,9 @@ service ShardService {
   // evaluation lets the verifier check that no publish has touched
   // this slot since the most recent history entry's epoch.
   rpc OpenRandValueAtSlotCurrent(SlotRequest) returns (OpenResponse);
+  // Label-side mirror: opens the live rand_index polynomial at a
+  // slot. Used by `lookup_label_history`'s freshness attestation.
+  rpc OpenRandIndexAtSlotCurrent(SlotRequest) returns (OpenResponse);
 
   // Initial commitment — used by the coordinator at setup time to
   // build the epoch-0 Merkle root.

@@ -122,8 +122,8 @@ where
 /// Self-contained snapshot of an [`Aegon`]'s live state — everything
 /// needed to reconstruct the shard after a restart, given the same
 /// `(prover_param, verifier_param)` (which come from the SRS file).
-/// Used by the gRPC `ShardServer` to persist its state into Redis at
-/// the end of every publish, and on startup to restore.
+/// Used by the gRPC `ShardServer` to persist its state into the DB
+/// at the end of every publish, and on startup to restore.
 ///
 /// What's intentionally **not** in the checkpoint:
 /// - `prover_param` / `verifier_param` — deterministic from the SRS;
@@ -620,7 +620,7 @@ where
         );
         // Discard the §6.4 history openings: this convenience wrapper
         // is the non-sharded path, where there's no coordinator-side
-        // Redis to persist them to. Sharded callers go through
+        // DB to persist them to. Sharded callers go through
         // `ShardedAegon::publish`, which threads the openings into
         // `persist_publish_to_db`.
         let (commit, _history) = self.publish_phase_2(new_r_index, new_r_value)?;
@@ -1342,6 +1342,29 @@ where
             slot_bits,
             &self.dims,
             b"aegon.rand_value.open",
+        )
+    }
+
+    /// Open the live `rand_index_poly` at `slot_bits`. Label-side
+    /// mirror of [`open_rand_value_at_slot_current`]. Used by
+    /// `lookup_label_history` to ship the verifier a "no change
+    /// since placement" attestation: under the system's current
+    /// invariant that labels are placed exactly once, the returned
+    /// evaluation should always equal `rand_index_eval` of the
+    /// stored placement record — any mismatch implies a publish
+    /// has written `index_poly` at this slot since placement.
+    pub fn open_rand_index_at_slot_current(
+        &self,
+        slot_bits: &[bool],
+    ) -> Result<(E::ScalarField, P::Proof), AegonError> {
+        open_at_point::<E, P>(
+            &self.prover_param,
+            &self.rand_index_poly,
+            &self.rand_index_commitment,
+            &self.rand_index_state,
+            slot_bits,
+            &self.dims,
+            b"aegon.rand_index.open",
         )
     }
 

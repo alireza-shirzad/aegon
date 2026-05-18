@@ -34,8 +34,8 @@ use sha2::{Digest, Sha256};
 use super::audit::verify_chain;
 use super::config::{AegonConfig, VerifierContext};
 use super::db::{
-    key_coord_state, key_epoch_commit, key_history_openings, key_labels_set, key_routing,
-    key_slot, key_value, key_value_history, Db, DbOp, DbSource, RedisDb,
+    key_coord_state, key_epoch_commit, key_history_openings, key_label_placement, key_labels_set,
+    key_routing, key_slot, key_value, key_value_history, Db, DbOp, DbSource, RedisDb,
 };
 use super::error::AegonError;
 use super::hash::{bool_index_to_point, HashSuite, Sha256Hash};
@@ -301,8 +301,9 @@ impl<E: Pairing, P: AegonPcs<E>> ShardedAegonConfigBuilder<E, P> {
     }
 
     /// Coordinator-side label→value KV store. Defaults to
-    /// [`DbSource::None`] — set to [`DbSource::Redis`] in cluster
-    /// deployments so `lookup` can return the raw value bytes.
+    /// [`DbSource::None`] — set to [`DbSource::Redis`] or
+    /// [`DbSource::Rocks`] in cluster deployments so `lookup` can
+    /// return the raw value bytes.
     pub fn db(mut self, v: DbSource) -> Self {
         self.db = v;
         self
@@ -407,7 +408,7 @@ pub type SubBatch<F> = Vec<ShardWrite<F>>;
 /// Record of one **newly-placed** label in a publish — i.e., a label
 /// that was not in `self.routing` before this call. Returned by
 /// `plan_phase_1_batches` alongside the per-shard sub-batches so the
-/// post-publish Redis durability barrier can write fresh `aegon:slot:*`
+/// post-publish DB durability barrier can write fresh `aegon:slot:*`
 /// and `aegon:routing:*` keys without scanning the routing table.
 ///
 /// (Existing labels — being value-updated — don't need fresh routing /
@@ -419,7 +420,7 @@ pub(crate) struct NewPlacement {
     pub(crate) slot_idx: usize,
 }
 
-/// Coordinator state recovered from Redis on restart. Built by
+/// Coordinator state recovered from the DB on restart. Built by
 /// `ShardedAegon::try_recover_from_db` and consumed in `setup`.
 struct RecoveredState<E: Pairing, P: AegonPcs<E>> {
     epoch: u64,
@@ -525,7 +526,7 @@ pub struct ShardedLabelProof<E: Pairing, P: AegonPcs<E>> {
 /// `lookup_value(slot)` indefinitely as the value updates.
 ///
 /// The raw value bytes are out-of-band — the verifier obtains them
-/// from the side-channel (Redis, the publisher, wherever) and
+/// from the side-channel (the DB, the publisher, wherever) and
 /// confirms `evaluation == H_F(value)`.
 #[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
 pub struct ShardedValueProof<E: Pairing, P: AegonPcs<E>> {
@@ -539,10 +540,11 @@ pub struct ShardedValueProof<E: Pairing, P: AegonPcs<E>> {
 
 /// Maximum number of value-history entries retained per label. The
 /// coordinator's value-history feature maintains a sliding window of
-/// at most this many records per label in Redis (LPUSH + LTRIM 0
-/// N-1). When a label changes value more than `HISTORY_WINDOW` times,
-/// only the most recent `HISTORY_WINDOW` records are observable via
-/// `lookup_history`.
+/// at most this many records per label in the DB (LPUSH + LTRIM 0
+/// N-1 semantics; both Redis and RocksDB backends implement these
+/// via the `Db` trait). When a label changes value more than
+/// `HISTORY_WINDOW` times, only the most recent `HISTORY_WINDOW`
+/// records are observable via `lookup_history`.
 pub const HISTORY_WINDOW: usize = 5;
 
 /// One persisted value-history record. Each `lookup_history(label)`
@@ -595,12 +597,13 @@ pub struct StoredValueHistoryEntry<E: Pairing, P: AegonPcs<E>> {
 }
 
 /// `lookup_history(label)` response: up to `HISTORY_WINDOW` entries,
-/// most-recent first (matches Redis LPUSH+LRANGE 0 N-1 ordering).
+/// most-recent first (matches the LPUSH+LRANGE 0 N-1 head-first
+/// ordering both backends implement under the `Db` trait).
 ///
 /// `freshness` (when present) attests "no publish has touched this
 /// slot since `entries[0].epoch`". It is freshly computed by the
 /// owning shard at lookup time — the only part of this bundle that
-/// is **not** a pure Redis/Rocks read.
+/// is **not** a pure DB read.
 #[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
 pub struct ShardedValueHistory<E: Pairing, P: AegonPcs<E>> {
     pub label: Vec<u8>,
@@ -609,6 +612,87 @@ pub struct ShardedValueHistory<E: Pairing, P: AegonPcs<E>> {
     /// slot, anchored under the live sharded root. `None` iff
     /// `entries.is_empty()` (nothing to attest freshness against).
     pub freshness: Option<FreshnessAttestation<E, P>>,
+}
+
+/// One placement record. Written once per label at the moment the
+/// label is first added to the dictionary; read back during
+/// `lookup_label_history`. Self-contained: includes the per-shard
+/// commitment at the placement epoch + its merkle path under the
+/// sharded root, so the verifier can re-anchor the opening without
+/// any external bulletin-board lookup beyond pinning the placement
+/// root against their trusted source.
+///
+/// Why just one stored opening (vs. value-history's three per
+/// entry): labels are placed exactly once and never mutate
+/// (no rename, no delete in the current system). So the only
+/// non-trivial check is "the slot's `rand_index` hasn't been
+/// disturbed since placement" — which `lookup_label_history` answers
+/// by sending this stored placement opening plus a freshly-computed
+/// opening of the live `rand_index_poly`. The verifier compares
+/// evaluations; if they match, no publish has touched this slot
+/// since the placement epoch.
+#[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
+pub struct StoredLabelPlacement<E: Pairing, P: AegonPcs<E>> {
+    /// Epoch at which this label was placed.
+    pub epoch: u64,
+    /// Shard that owns the slot.
+    pub shard_id: u32,
+    /// Slot bits within the shard (low bit first).
+    pub slot_bits: Vec<bool>,
+    /// `rand_index_{epoch}(slot)` opened against this shard's
+    /// `placement_shard_commit.rand_index_commitment`. Equals
+    /// `r_index_{epoch-1} · H_F(label)` on a fresh placement (the
+    /// pre-placement value is zero because the slot was empty).
+    pub rand_index_eval: E::ScalarField,
+    pub rand_index_proof: P::Proof,
+    /// Per-shard `EpochCommitment` at the placement epoch — anchors
+    /// the placement opening.
+    pub placement_shard_commit: EpochCommitment<E, P>,
+    /// Merkle path from `placement_shard_commit` (at position
+    /// `shard_id`) up to the sharded root at the placement epoch.
+    pub placement_merkle_path: Vec<EpochDigest>,
+}
+
+/// `lookup_label_history(label)` response. The label-side analog of
+/// [`ShardedValueHistory`].
+///
+/// Asymmetry with `ShardedValueHistory`: labels are placed exactly
+/// once, so there's no sliding window of past changes — instead,
+/// just the placement record (frozen at placement time) plus a
+/// freshness attestation (freshly computed by the owning shard on
+/// every call). Together with a separate `lookup_label(label)`
+/// (which proves "label is currently at slot S in the live
+/// state"), the verifier learns: "this label has been bound to
+/// slot S since placement at epoch E" — i.e., the slot has not
+/// been disturbed by any subsequent publish, no other label has
+/// displaced it, no migration has occurred.
+#[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
+pub struct ShardedLabelHistory<E: Pairing, P: AegonPcs<E>> {
+    pub label: Vec<u8>,
+    /// `None` iff the label is unknown to the coordinator
+    /// (placement record has never been written for it).
+    pub placement: Option<StoredLabelPlacement<E, P>>,
+    /// Live `rand_index(slot)` opening + anchoring under the live
+    /// sharded root. `None` iff `placement` is `None`.
+    pub freshness: Option<FreshnessAttestationLabel<E, P>>,
+}
+
+/// Label-side mirror of [`FreshnessAttestation`]. Same shape, but
+/// opens the live `rand_index_poly` against the live shard's
+/// `rand_index_commitment` (rather than `rand_value`).
+#[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
+pub struct FreshnessAttestationLabel<E: Pairing, P: AegonPcs<E>> {
+    pub shard_id: u32,
+    pub slot_bits: Vec<bool>,
+    /// `rand_index_live(slot)` — the live shard's rand_index poly
+    /// evaluated at the slot.
+    pub rand_index_current_eval: E::ScalarField,
+    pub rand_index_current_proof: P::Proof,
+    /// Live per-shard `EpochCommitment` for `shard_id`.
+    pub shard_commit: EpochCommitment<E, P>,
+    /// Merkle path from `shard_commit` (at position `shard_id`) up
+    /// to the live sharded root.
+    pub merkle_path: Vec<EpochDigest>,
 }
 
 /// "No-change since the most recent history entry" attestation.
@@ -707,7 +791,7 @@ impl<E: Pairing, P: AegonPcs<E>> ShardedVerifierContext<E, P> {
 /// home.
 ///
 /// Derives `CanonicalSerialize` so the coordinator can persist its
-/// routing table to Redis and rebuild on restart.
+/// routing table to the DB and rebuild on restart.
 #[derive(Clone, CanonicalSerialize, CanonicalDeserialize)]
 pub(crate) struct LabelRouting {
     pub(crate) trail: Vec<(u32, Vec<bool>)>,
@@ -942,11 +1026,11 @@ where
         }
     }
 
-    /// Read the coordinator's durable state from Redis if any was
+    /// Read the coordinator's durable state from the DB if any was
     /// previously persisted. Returns `None` on a fresh DB (no
     /// `aegon:coord:state` key), `Some(RecoveredState)` on a restart,
     /// `Err` if a key exists but a downstream get/deserialize fails
-    /// — that means Redis is half-written or corrupt and the caller
+    /// — that means the DB is half-written or corrupt and the caller
     /// should refuse to come up, not silently start over.
     fn try_recover_from_db(
         db: &dyn Db,
@@ -973,7 +1057,7 @@ where
             let key = key_epoch_commit(e);
             let bytes = db.get(&key)?.ok_or_else(|| {
                 AegonError::Database(format!(
-                    "epoch commitment for epoch {e} missing from Redis"
+                    "epoch commitment for epoch {e} missing from the DB"
                 ))
             })?;
             let commit = ShardedEpochCommitment::<E, P>::deserialize_compressed(&bytes[..])
@@ -1080,7 +1164,7 @@ where
     ///   6. [`finalize_epoch`](Self::finalize_epoch) + [`mirror_to_db`](Self::mirror_to_db)
     ///      — coordinator advances `(r_index, r_value, epoch)`, builds
     ///      the Merkle root, and mirrors raw `(label, value)` bytes
-    ///      into Redis for the lookup path.
+    ///      into the DB for the lookup path.
     #[cfg_attr(
         feature = "tracing_instrument",
         tracing::instrument(
@@ -1270,7 +1354,7 @@ where
                 let mut next_round: Vec<NewLabel<'_, E::ScalarField>> = Vec::new();
                 let drained: Vec<NewLabel<'_, E::ScalarField>> =
                     std::mem::take(&mut new_labels);
-                // Pair each new label with its probe + Redis answer,
+                // Pair each new label with its probe + DB answer,
                 // then sort by original update index. Sort is stable on
                 // small Vecs (rayon not needed) and almost always a
                 // no-op on round 0.
@@ -1446,7 +1530,9 @@ where
 
     /// Durability barrier for one publish: write every key the
     /// coordinator (and a future restarted coordinator) needs to
-    /// reconstruct its view, atomically via Redis MULTI/EXEC.
+    /// reconstruct its view, atomically via the `Db` trait's
+    /// `write_atomic` (Redis MULTI/EXEC or RocksDB WriteBatch
+    /// depending on the configured backend).
     ///
     /// One `aegon:value:{label}` and one `SADD aegon:labels {label}`
     /// per update (value-update or new). For brand-new labels, also
@@ -1456,7 +1542,7 @@ where
     /// sharded epoch commitment).
     ///
     /// The polynomial commitment binds `H_F(value)` at the right slot
-    /// already — Redis is only the side-channel that lets `lookup`
+    /// already — the DB is only the side-channel that lets `lookup`
     /// return the value alongside the proof, and the durability layer
     /// for crash recovery; the verifier still re-hashes everything it
     /// receives. No-op when no DB was configured (`DbSource::None`).
@@ -1546,7 +1632,7 @@ where
         // key per shard whose batch carried at least one brand-new
         // label. Shards that did only value-updates produced an empty
         // `HistoryOpenings.entries`; persisting an empty bundle would
-        // just waste a Redis SET, so those are skipped here. The
+        // just waste a DB write, so those are skipped here. The
         // value_changes side may still be non-empty for those shards
         // (handled separately below as user-facing per-label history).
         for (shard_id, history) in per_shard_history.iter().enumerate() {
@@ -1649,10 +1735,10 @@ where
                 // points, and compressed reads pay a Tonelli-Shanks
                 // sqrt per point on the lookup_history path
                 // (~25 µs/point ≈ 1 ms/entry, dominating that RPC).
-                // Uncompressed roughly doubles per-entry Redis bytes
+                // Uncompressed roughly doubles per-entry DB bytes
                 // (~15 KB → ~30 KB at production proof shapes) but
                 // cuts deserialize cost ~10×. The gRPC wire to the
-                // client still uses compressed encoding — only Redis
+                // client still uses compressed encoding — only DB
                 // storage changes. See the matching
                 // `deserialize_uncompressed_unchecked` in
                 // `lookup_history`.
@@ -1677,6 +1763,57 @@ where
             }
         }
 
+        // 7. label_placement:{label} — exactly one record per
+        // newly-placed label. Asymmetric with value_history: labels
+        // are placed once and never mutate, so we use a single Set
+        // (not LPush/LTrim) and we extract the openings from the
+        // §6.4 `entries` bundle (already produced by
+        // publish_phase_2) rather than building fresh openings —
+        // every placement already paid for a `rand_index_post` open
+        // in the §6.4 path. We just lift it into the user-facing
+        // placement record + add the anchoring shard commit/path.
+        //
+        // The `(shard_id, slot_bits) -> HistoryOpeningEntry` map is
+        // built from `per_shard_history[shard_id].entries`; each
+        // entry's `slot_bits` uniquely identifies the placement
+        // within that shard's batch.
+        for placement in new_placements {
+            let shard_id = placement.shard_id;
+            let entries = &per_shard_history[shard_id as usize].entries;
+            let entry = entries
+                .iter()
+                .find(|e| {
+                    bool_index_to_usize_dims(&e.slot_bits, &self.shard_dims) == placement.slot_idx
+                })
+                .ok_or_else(|| {
+                    AegonError::Database(format!(
+                        "internal: no §6.4 history entry for placement at shard {shard_id} slot_idx {}",
+                        placement.slot_idx
+                    ))
+                })?;
+            let post_leaf = sharded_commit.per_shard[shard_id as usize].clone();
+            let post_merkle_path = build_merkle_path(&sharded_commit.per_shard, shard_id as usize);
+            let stored = StoredLabelPlacement::<E, P> {
+                epoch: sharded_commit.epoch,
+                shard_id,
+                slot_bits: entry.slot_bits.clone(),
+                rand_index_eval: entry.rand_index_post_eval,
+                rand_index_proof: entry.rand_index_post_proof.clone(),
+                placement_shard_commit: post_leaf,
+                placement_merkle_path: post_merkle_path,
+            };
+            let mut bytes = Vec::new();
+            // Same uncompressed-on-disk rationale as the value-
+            // history side: trades ~2× bytes for ~10× faster reads.
+            stored
+                .serialize_uncompressed(&mut bytes)
+                .map_err(|e| AegonError::Database(format!("serialize label placement: {e}")))?;
+            ops.push(DbOp::Set {
+                key: key_label_placement(&placement.label),
+                value: bytes,
+            });
+        }
+
         db.write_atomic(&ops)
     }
 
@@ -1698,10 +1835,10 @@ where
             trail.push((shard_id, slot_bits.clone()));
 
             let slot_idx = bool_index_to_usize_dims(&slot_bits, &self.shard_dims);
-            // Occupancy check: when a DB is configured, ask Redis (one
-            // EXISTS — no gRPC). Otherwise fall back to the shard
-            // (in-process test path). Redis is authoritative once it's
-            // configured because `persist_publish_to_db` writes
+            // Occupancy check: when a DB is configured, ask the DB
+            // (one EXISTS — no gRPC). Otherwise fall back to the shard
+            // (in-process test path). The DB is authoritative once
+            // it's configured because `persist_publish_to_db` writes
             // `aegon:slot:*` in the same atomic txn as the shard
             // commitments are finalized, so the two never disagree
             // unless we're mid-recovery.
@@ -1818,7 +1955,7 @@ where
 
     /// User-facing value-history fetch. Reads up to `HISTORY_WINDOW`
     /// most-recent `(epoch, value, openings)` records for `label` from
-    /// the `aegon:value_history:{label}` Redis list, decodes each
+    /// the `aegon:value_history:{label}` DB list, decodes each
     /// entry, and returns them. Order is most-recent first (matches
     /// the underlying LPUSH+LRANGE 0 N-1 semantics).
     ///
@@ -1861,7 +1998,7 @@ where
             // group-element subgroup check on each curve point — safe
             // here because we wrote these bytes ourselves at the most
             // recent publish_phase_2 and the entries never leave our
-            // own Redis until being returned to the verifier (who
+            // own DB until being returned to the verifier (who
             // re-verifies the openings cryptographically anyway).
             let entry =
                 StoredValueHistoryEntry::<E, P>::deserialize_uncompressed_unchecked(&bytes[..])
@@ -1908,6 +2045,92 @@ where
         Ok(ShardedValueHistory {
             label: label.clone(),
             entries,
+            freshness,
+        })
+    }
+
+    /// User-facing label-history fetch. Label-side mirror of
+    /// `lookup_history`. Returns the (single) placement record for
+    /// `label` plus a freshly-computed freshness attestation. The
+    /// verifier (`verify_lookup_label_history`) checks that:
+    ///
+    ///   * The stored placement opening verifies under
+    ///     `placement_shard_commit.rand_index_commitment`.
+    ///   * The live opening verifies under
+    ///     `shard_commit.rand_index_commitment`.
+    ///   * The two evaluations are equal — i.e. no publish has
+    ///     written `index_poly` at this slot since the placement
+    ///     epoch (rand_index is invariant off the touched slots
+    ///     under chain-blinding).
+    ///   * Both merkle paths re-anchor to roots the caller
+    ///     separately trusts (the placement-epoch root and the
+    ///     live root).
+    ///
+    /// Together with a separate `lookup_label(label)` (which proves
+    /// "this label is at this slot in the live state"), the bundle
+    /// proves "this label has been bound to this slot since
+    /// `placement.epoch`".
+    ///
+    /// Returns `placement = None, freshness = None` when:
+    ///   * `DbSource::None` is configured (no place to fetch from),
+    ///   * the label exists but has never been published (placement
+    ///     record has not landed yet — racy window), or
+    ///   * the label is unknown.
+    /// Returning empty (rather than `UnknownLabel`) keeps the API
+    /// symmetric with `lookup_history`.
+    pub fn lookup_label_history(
+        &self,
+        label: &Label,
+    ) -> Result<ShardedLabelHistory<E, P>, AegonError> {
+        let Some(db) = &self.db else {
+            return Ok(ShardedLabelHistory {
+                label: label.clone(),
+                placement: None,
+                freshness: None,
+            });
+        };
+        let raw = db.get(&key_label_placement(label))?;
+        let Some(bytes) = raw else {
+            return Ok(ShardedLabelHistory {
+                label: label.clone(),
+                placement: None,
+                freshness: None,
+            });
+        };
+        // Matches the `serialize_uncompressed` write side in
+        // `persist_publish_to_db`. See the parallel comment on
+        // `lookup_history`'s decode loop for the `_unchecked`
+        // rationale.
+        let placement =
+            StoredLabelPlacement::<E, P>::deserialize_uncompressed_unchecked(&bytes[..]).map_err(
+                |e| AegonError::Database(format!("decode label placement: {e}")),
+            )?;
+        let shard_id = placement.shard_id;
+        if (shard_id as usize) >= self.shards.len() {
+            return Err(AegonError::Config(format!(
+                "lookup_label_history: placement shard_id {shard_id} out of range \
+                 (have {} shards)",
+                self.shards.len()
+            )));
+        }
+        // Live opening — the single piece of non-DB work this RPC
+        // does. One shard gRPC + one PCS open of rand_index_poly.
+        let current = self.current_commitment();
+        let (eval, proof) = self.shards[shard_id as usize]
+            .open_rand_index_at_slot_current(&placement.slot_bits)?;
+        let merkle_path = build_merkle_path(&current.per_shard, shard_id as usize);
+        let shard_commit = current.per_shard[shard_id as usize].clone();
+        let freshness = Some(FreshnessAttestationLabel {
+            shard_id,
+            slot_bits: placement.slot_bits.clone(),
+            rand_index_current_eval: eval,
+            rand_index_current_proof: proof,
+            shard_commit,
+            merkle_path,
+        });
+        Ok(ShardedLabelHistory {
+            label: label.clone(),
+            placement: Some(placement),
             freshness,
         })
     }
@@ -2384,6 +2607,139 @@ where
         entry_roots: roots,
         live_root,
     })
+}
+
+/// Output of [`verify_lookup_label_history`].
+///
+/// `placement_root` reconstructs the sharded root at
+/// `placement.epoch` from the placement record's merkle path —
+/// pair it with whatever the caller trusts as the bulletin-board
+/// snapshot for that epoch. `live_root` is the analogous
+/// reconstruction from the freshness attestation; pair it with the
+/// coordinator's `current_commitment().merkle_root`.
+///
+/// Both are `None` exactly when the bundle is empty (no placement
+/// record stored, e.g. label unknown or pre-publish race).
+#[derive(Clone, Debug)]
+pub struct VerifiedLookupLabelHistory {
+    pub placement_root: Option<EpochDigest>,
+    pub live_root: Option<EpochDigest>,
+}
+
+/// Verify a `ShardedLabelHistory` bundle returned by
+/// `ShardedAegon::lookup_label_history`. Label-side mirror of
+/// `verify_lookup_history`, but simpler:
+///
+///   1. The stored `rand_index` opening verifies under
+///      `placement.placement_shard_commit.rand_index_commitment`.
+///   2. The live `rand_index` opening verifies under
+///      `freshness.shard_commit.rand_index_commitment`.
+///   3. Both evaluations agree — "no publish has touched this slot
+///      since the placement epoch". `rand_index` at a slot is
+///      invariant under any publish whose `delta_index_poly` is
+///      zero at that slot, so equality ⇒ no `index_poly` write at
+///      this slot since placement.
+///   4. Both merkle paths anchor against their respective sharded
+///      roots, which we return for the caller's bulletin-board
+///      cross-check.
+///
+/// Returns empty (all `None`) when the bundle has no placement
+/// record (label unknown / racy pre-persist window).
+pub fn verify_lookup_label_history<E, P, H>(
+    ctx: &ShardedVerifierContext<E, P>,
+    history: &ShardedLabelHistory<E, P>,
+) -> Result<VerifiedLookupLabelHistory, AegonError>
+where
+    E: Pairing,
+    P: AegonPcs<E>,
+    H: HashSuite<E::ScalarField>,
+{
+    match (&history.placement, &history.freshness) {
+        (None, None) => Ok(VerifiedLookupLabelHistory {
+            placement_root: None,
+            live_root: None,
+        }),
+        (None, Some(_)) => Err(AegonError::Verification(
+            "label history has a freshness attestation but no placement record",
+        )),
+        (Some(_), None) => Err(AegonError::Verification(
+            "label history has a placement record but no freshness attestation",
+        )),
+        (Some(p), Some(fr)) => {
+            if p.shard_id != fr.shard_id || p.slot_bits != fr.slot_bits {
+                return Err(AegonError::Verification(
+                    "label history freshness references a different (shard, slot) than the placement",
+                ));
+            }
+            // Re-anchor both leaves under their respective roots.
+            let placement_root = verify_merkle_path::<E, P>(
+                &p.placement_shard_commit,
+                p.shard_id as usize,
+                &p.placement_merkle_path,
+            );
+            let live_root = verify_merkle_path::<E, P>(
+                &fr.shard_commit,
+                fr.shard_id as usize,
+                &fr.merkle_path,
+            );
+
+            let point = bool_index_to_point::<E::ScalarField>(&p.slot_bits);
+
+            // (1) Placement rand_index opening.
+            let mut tr_placement = IOPTranscript::<E::ScalarField>::new(b"aegon.rand_index.open");
+            let ok_placement = P::verify(
+                &ctx.inner.verifier_param,
+                &p.placement_shard_commit.rand_index_commitment,
+                &point,
+                &p.rand_index_eval,
+                &p.rand_index_proof,
+                &mut tr_placement,
+            )?;
+            if !ok_placement {
+                return Err(AegonError::Verification(
+                    "label history placement rand_index opening did not verify",
+                ));
+            }
+
+            // (2) Live rand_index opening.
+            let mut tr_live = IOPTranscript::<E::ScalarField>::new(b"aegon.rand_index.open");
+            let ok_live = P::verify(
+                &ctx.inner.verifier_param,
+                &fr.shard_commit.rand_index_commitment,
+                &point,
+                &fr.rand_index_current_eval,
+                &fr.rand_index_current_proof,
+                &mut tr_live,
+            )?;
+            if !ok_live {
+                return Err(AegonError::Verification(
+                    "label history freshness rand_index opening did not verify",
+                ));
+            }
+
+            // (3) No-change-since-placement: rand_index(slot) is
+            // invariant under any publish that does not write
+            // index_poly at the slot. Labels are placed exactly
+            // once, so equality here is the cryptographic witness
+            // that the label is still bound to this slot.
+            if p.rand_index_eval != fr.rand_index_current_eval {
+                return Err(AegonError::Verification(
+                    "label history freshness check failed: live rand_index differs from placement rand_index — a publish has written index_poly at this slot since placement (label has been displaced or otherwise mutated)",
+                ));
+            }
+
+            // Sanity: H is unused in this verifier (no value-bytes
+            // hashing to do — `index_poly`'s data value is bound by
+            // the lookup_label proof, not by us). Reference H to
+            // keep the type parameter live for the call site.
+            let _ = std::marker::PhantomData::<H>;
+
+            Ok(VerifiedLookupLabelHistory {
+                placement_root: Some(placement_root),
+                live_root: Some(live_root),
+            })
+        },
+    }
 }
 
 /// Backward-compat wrapper that verifies both halves of the original
