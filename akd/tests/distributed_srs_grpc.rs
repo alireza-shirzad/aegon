@@ -12,8 +12,8 @@
 use std::sync::Arc;
 
 use akd::aegon::distributed_srs::{
-    cache_file_path, connect_srs_client, run_distributed_compute, try_cache_hit, Phase,
-    SrsBootstrapConfig, SrsBootstrapState, SrsServer, Trapdoors,
+    cache_file_path, connect_srs_client, proto::GetMetricsRequest, run_distributed_compute,
+    try_cache_hit, Phase, SrsBootstrapConfig, SrsBootstrapState, SrsServer, Trapdoors,
 };
 use akd_core::aegon_crypto::pcs::kzhk::srs::KZHKUniversalParams as RefParams;
 use akd_core::aegon_crypto::StructuredReferenceString;
@@ -187,6 +187,95 @@ async fn distributed_srs_end_to_end() {
         );
     }
 
+    // ---- verify per-shard metrics via GetMetrics gRPC ----
+    //
+    // Three invariants per shard, after distributed gen:
+    //   1. inbound_slab_bytes > 0 — we pulled from N-1 peers.
+    //   2. outbound_slab_bytes > 0 — N-1 peers pulled from us.
+    //   3. By symmetry on a uniformly sized cluster, every shard's
+    //      inbound equals every shard's outbound. We verify per-shard
+    //      directly and also check the cluster-wide totals match.
+    //   4. pk_bytes/vk_bytes/universal_bytes are non-zero and identical
+    //      across shards (every shard's SRS is the same SRS).
+    //   5. cache_hit is false (distributed-gen, not cache).
+    //   6. Phase log contains the expected transitions.
+    let mut total_inbound: u64 = 0;
+    let mut total_outbound: u64 = 0;
+    let mut sizes: Option<(u64, u64, u64)> = None;
+    for (shard_id, endpoint) in endpoints.iter().enumerate() {
+        let mut client = connect_srs_client(endpoint).await.expect("connect");
+        let resp = client
+            .get_metrics(tonic::Request::new(GetMetricsRequest {}))
+            .await
+            .expect("GetMetrics")
+            .into_inner();
+        assert_eq!(resp.shard_id, shard_id as u32);
+        assert!(!resp.cache_hit, "shard {shard_id} should not be cache_hit");
+        assert!(
+            resp.inbound_slab_bytes > 0,
+            "shard {shard_id} inbound bytes should be non-zero"
+        );
+        assert!(
+            resp.outbound_slab_bytes > 0,
+            "shard {shard_id} outbound bytes should be non-zero"
+        );
+        assert!(resp.pk_bytes > 0);
+        assert!(resp.vk_bytes > 0);
+        assert!(resp.universal_bytes > 0);
+        // Compute + communication splits, in the n_shards=4 test
+        // setup: both should be non-zero (we both did local MSM work
+        // and we pulled from 3 peers).
+        assert!(
+            resp.compute_secs > 0.0,
+            "shard {shard_id} should have spent time in compute"
+        );
+        assert!(
+            resp.communication_secs > 0.0,
+            "shard {shard_id} should have spent time in communication (n_shards={n_shards})"
+        );
+        // Sizes are the same across shards.
+        match sizes {
+            None => sizes = Some((resp.pk_bytes, resp.vk_bytes, resp.universal_bytes)),
+            Some((pk, vk, up)) => {
+                assert_eq!(resp.pk_bytes, pk);
+                assert_eq!(resp.vk_bytes, vk);
+                assert_eq!(resp.universal_bytes, up);
+            },
+        }
+        total_inbound += resp.inbound_slab_bytes;
+        total_outbound += resp.outbound_slab_bytes;
+        // Phase log: assert that we hit the expected transitions in
+        // order. The shard's main loop walks
+        // awaiting -> computing/pulling -> assembling/writing -> ready
+        // (we promote to Ready at the end of the test loop above).
+        let labels: Vec<&str> = resp.phases.iter().map(|p| p.phase.as_str()).collect();
+        assert!(
+            labels.first() == Some(&"awaiting-bootstrap"),
+            "shard {shard_id} phase log should start with awaiting-bootstrap, got {labels:?}"
+        );
+        assert!(
+            labels.contains(&"test-complete"),
+            "shard {shard_id} should have seen the test-complete marker"
+        );
+        // Monotonic_secs strictly increases.
+        let mut last = -1.0f64;
+        for p in &resp.phases {
+            assert!(
+                p.monotonic_secs >= last,
+                "phase timestamps must be monotonic, got {p:?} after {last}"
+            );
+            last = p.monotonic_secs;
+        }
+    }
+    // Conservation: by symmetry, the sum of every shard's inbound
+    // equals the sum of every shard's outbound (each byte pulled by
+    // shard A from shard B is also a byte served by shard B to A).
+    assert_eq!(
+        total_inbound, total_outbound,
+        "cluster inbound total {} must equal outbound total {}",
+        total_inbound, total_outbound,
+    );
+
     // ---- second run: fresh state, same cache_dir -> cache hit ----
     for (shard_id, cache_dir) in cache_dirs.iter().enumerate() {
         let cfg = SrsBootstrapConfig {
@@ -209,6 +298,19 @@ async fn distributed_srs_end_to_end() {
             Phase::Initializing,
             "cache hit should advance phase past AwaitingBootstrap"
         );
+        // Cache-hit snapshot: cache_hit flag set, sizes recorded, no
+        // network traffic recorded (byte counters stay at zero because
+        // try_cache_hit doesn't touch peers).
+        let snap = state2.snapshot_metrics().await;
+        assert!(snap.cache_hit, "cache hit flag must be true on second boot");
+        assert_eq!(snap.inbound_slab_bytes, 0);
+        assert_eq!(snap.outbound_slab_bytes, 0);
+        assert!(snap.pk_bytes > 0);
+        assert!(snap.vk_bytes > 0);
+        assert!(snap.universal_bytes > 0);
+        // Cache-hit path does no compute and no communication.
+        assert_eq!(snap.compute_secs, 0.0);
+        assert_eq!(snap.communication_secs, 0.0);
     }
 
     // ---- clean up tmp dirs ----

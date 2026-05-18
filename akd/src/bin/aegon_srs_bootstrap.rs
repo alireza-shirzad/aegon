@@ -19,12 +19,13 @@
 //! `.cache` file on disk, the BootstrapSrs RPC returns `cache_hit =
 //! true` and the cluster reports ready almost immediately.
 
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 use akd::aegon::distributed_srs::{
     connect_srs_client,
-    proto::{BootstrapSrsRequest, WaitForReadyRequest},
+    proto::{BootstrapSrsRequest, GetMetricsRequest, GetMetricsResponse, WaitForReadyRequest},
     Trapdoors,
 };
 use ark_bn254::Bn254;
@@ -74,6 +75,16 @@ struct Args {
     /// polling `WaitForReady`. Default 10s.
     #[arg(long, default_value_t = 10)]
     poll_log_interval_secs: u64,
+
+    /// Optional path. When set, after every shard reports Ready the
+    /// bootstrap actor calls `GetMetrics` on each shard, aggregates
+    /// the per-shard records, and writes one JSON file to this path
+    /// (schema mirrors `aegon_setup_bench` for the size fields, plus
+    /// per-shard inbound/outbound bytes + phase timings). Used by
+    /// `bench-cluster.sh setup-bench` to drive the planetary
+    /// regime's setup-time + comm-bytes measurement.
+    #[arg(long)]
+    metrics_out: Option<PathBuf>,
 }
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 4)]
@@ -228,6 +239,23 @@ async fn main() -> ExitCode {
 
         if ready_count == n_shards {
             eprintln!("[bootstrap] all {n_shards} shard(s) ready");
+            // Aggregate metrics if asked. Done after Ready so the
+            // per-phase timings are complete and the cache-write
+            // sizes are recorded.
+            if let Some(path) = args.metrics_out.as_ref() {
+                if let Err(e) = gather_and_write_metrics(
+                    &args.shard_endpoints,
+                    args.shard_log_capacity as u32,
+                    args.kzh_k as u32,
+                    args.setup_seed,
+                    path,
+                )
+                .await
+                {
+                    eprintln!("[bootstrap] metrics gather failed: {e}");
+                    return ExitCode::from(1);
+                }
+            }
             return ExitCode::SUCCESS;
         }
 
@@ -251,4 +279,180 @@ async fn main() -> ExitCode {
             return ExitCode::from(1);
         }
     }
+}
+
+/// Call `GetMetrics` on every shard and write one consolidated JSON
+/// record to `out_path`. Per-shard records are concatenated into a
+/// `shards` array; cluster-wide aggregates (total inbound/outbound,
+/// max/min per-shard ready time) sit at the top level alongside the
+/// invariant params (log_cap, kzh_k, setup_seed). Schema mirrors
+/// `aegon_setup_bench`'s output for size fields so downstream
+/// analysis can plot the two on the same axes.
+async fn gather_and_write_metrics(
+    endpoints: &[String],
+    shard_log_capacity: u32,
+    kzh_k: u32,
+    setup_seed: u64,
+    out_path: &std::path::Path,
+) -> Result<(), String> {
+    eprintln!("[bootstrap] gathering per-shard metrics");
+    let n_shards = endpoints.len();
+    let mut tasks = Vec::with_capacity(n_shards);
+    for (i, ep) in endpoints.iter().enumerate() {
+        let ep = ep.clone();
+        tasks.push(tokio::spawn(async move {
+            let mut client = connect_srs_client(&ep)
+                .await
+                .map_err(|e| format!("shard {i} connect '{ep}': {e}"))?;
+            let resp = client
+                .get_metrics(tonic::Request::new(GetMetricsRequest {}))
+                .await
+                .map_err(|s| format!("shard {i} GetMetrics: {s}"))?;
+            Ok::<_, String>((i, resp.into_inner()))
+        }));
+    }
+    let mut per_shard: Vec<(usize, GetMetricsResponse)> = Vec::with_capacity(n_shards);
+    for t in tasks {
+        let (i, resp) = t
+            .await
+            .map_err(|e| format!("metrics join: {e}"))?
+            .map_err(|e| e)?;
+        per_shard.push((i, resp));
+    }
+    per_shard.sort_by_key(|(i, _)| *i);
+
+    // Aggregates over the cluster.
+    let mut total_inbound: u64 = 0;
+    let mut total_outbound: u64 = 0;
+    let mut max_ready_secs: f64 = 0.0;
+    let mut min_ready_secs: f64 = f64::INFINITY;
+    // Shards do their setup work in parallel, so the cluster's
+    // effective compute / communication time is the max across
+    // shards (not the sum). We report both max and min so an outlier
+    // straggler is visible.
+    let mut max_compute_secs: f64 = 0.0;
+    let mut max_communication_secs: f64 = 0.0;
+    let mut min_compute_secs: f64 = f64::INFINITY;
+    let mut min_communication_secs: f64 = f64::INFINITY;
+    // Picked from the first shard — all shards see the same SRS, so
+    // pk/vk/universal sizes are identical. Asserting that across all
+    // shards is left to downstream consistency checks.
+    let (pk_bytes, vk_bytes, universal_bytes) = per_shard
+        .first()
+        .map(|(_, r)| (r.pk_bytes, r.vk_bytes, r.universal_bytes))
+        .unwrap_or((0, 0, 0));
+    for (_, r) in &per_shard {
+        total_inbound += r.inbound_slab_bytes;
+        total_outbound += r.outbound_slab_bytes;
+        max_compute_secs = max_compute_secs.max(r.compute_secs);
+        max_communication_secs = max_communication_secs.max(r.communication_secs);
+        min_compute_secs = min_compute_secs.min(r.compute_secs);
+        min_communication_secs = min_communication_secs.min(r.communication_secs);
+        if let Some(ready_entry) = r.phases.iter().find(|p| p.phase == "ready") {
+            max_ready_secs = max_ready_secs.max(ready_entry.monotonic_secs);
+            min_ready_secs = min_ready_secs.min(ready_entry.monotonic_secs);
+        }
+    }
+    if !min_ready_secs.is_finite() {
+        min_ready_secs = 0.0;
+    }
+    if !min_compute_secs.is_finite() {
+        min_compute_secs = 0.0;
+    }
+    if !min_communication_secs.is_finite() {
+        min_communication_secs = 0.0;
+    }
+
+    let mut shards_json: Vec<String> = Vec::with_capacity(n_shards);
+    for (_, r) in &per_shard {
+        let phases_csv = r
+            .phases
+            .iter()
+            .map(|p| format!(
+                "      {{\"phase\": \"{}\", \"monotonic_secs\": {:.6}}}",
+                p.phase, p.monotonic_secs
+            ))
+            .collect::<Vec<_>>()
+            .join(",\n");
+        shards_json.push(format!(
+            concat!(
+                "    {{\n",
+                "      \"shard_id\": {sid},\n",
+                "      \"cache_hit\": {ch},\n",
+                "      \"compute_secs\": {cs:.6},\n",
+                "      \"communication_secs\": {ms:.6},\n",
+                "      \"inbound_slab_bytes\": {in_b},\n",
+                "      \"outbound_slab_bytes\": {out_b},\n",
+                "      \"pk_bytes\": {pkb},\n",
+                "      \"vk_bytes\": {vkb},\n",
+                "      \"universal_bytes\": {upb},\n",
+                "      \"phases\": [\n{phases}\n      ]\n",
+                "    }}"
+            ),
+            sid = r.shard_id,
+            ch = r.cache_hit,
+            cs = r.compute_secs,
+            ms = r.communication_secs,
+            in_b = r.inbound_slab_bytes,
+            out_b = r.outbound_slab_bytes,
+            pkb = r.pk_bytes,
+            vkb = r.vk_bytes,
+            upb = r.universal_bytes,
+            phases = phases_csv,
+        ));
+    }
+
+    let json = format!(
+        concat!(
+            "{{\n",
+            "  \"regime\": \"distributed\",\n",
+            "  \"n_shards\": {n_shards},\n",
+            "  \"shard_log_capacity\": {slc},\n",
+            "  \"kzh_k\": {k},\n",
+            "  \"setup_seed\": {seed},\n",
+            "  \"prover_param_bytes\": {pkb},\n",
+            "  \"verifier_param_bytes\": {vkb},\n",
+            "  \"universal_params_bytes\": {upb},\n",
+            "  \"total_inbound_slab_bytes\": {tot_in},\n",
+            "  \"total_outbound_slab_bytes\": {tot_out},\n",
+            "  \"max_shard_ready_secs\": {max_ready:.6},\n",
+            "  \"min_shard_ready_secs\": {min_ready:.6},\n",
+            "  \"max_shard_compute_secs\": {max_cs:.6},\n",
+            "  \"min_shard_compute_secs\": {min_cs:.6},\n",
+            "  \"max_shard_communication_secs\": {max_ms:.6},\n",
+            "  \"min_shard_communication_secs\": {min_ms:.6},\n",
+            "  \"shards\": [\n{shards}\n  ]\n",
+            "}}\n"
+        ),
+        n_shards = n_shards,
+        slc = shard_log_capacity,
+        k = kzh_k,
+        seed = setup_seed,
+        pkb = pk_bytes,
+        vkb = vk_bytes,
+        upb = universal_bytes,
+        tot_in = total_inbound,
+        tot_out = total_outbound,
+        max_ready = max_ready_secs,
+        min_ready = min_ready_secs,
+        max_cs = max_compute_secs,
+        min_cs = min_compute_secs,
+        max_ms = max_communication_secs,
+        min_ms = min_communication_secs,
+        shards = shards_json.join(",\n"),
+    );
+
+    std::fs::write(out_path, &json)
+        .map_err(|e| format!("write '{}': {e}", out_path.display()))?;
+    eprintln!(
+        "[bootstrap] metrics: total_inbound={:.2} GiB total_outbound={:.2} GiB max_ready={:.2}s \
+         max_compute={:.2}s max_communication={:.2}s",
+        total_inbound as f64 / (1024.0 * 1024.0 * 1024.0),
+        total_outbound as f64 / (1024.0 * 1024.0 * 1024.0),
+        max_ready_secs,
+        max_compute_secs,
+        max_communication_secs,
+    );
+    eprintln!("[bootstrap] wrote {}", out_path.display());
+    Ok(())
 }

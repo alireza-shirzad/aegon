@@ -36,6 +36,14 @@ service SrsService {
   // Aegon initialised, prefill complete). Returns immediately if the
   // shard is already ready.
   rpc WaitForReady(WaitForReadyRequest) returns (WaitForReadyResponse);
+
+  // Snapshot of per-shard setup metrics: phase timestamps (so the
+  // bootstrap actor can derive durations), bytes pulled from peers
+  // and bytes served to peers during the slab exchange, and the
+  // assembled SRS sizes. The bootstrap actor calls this on every
+  // shard after `WaitForReady` returns true; aggregating the results
+  // yields the cluster-wide setup numbers.
+  rpc GetMetrics(GetMetricsRequest) returns (GetMetricsResponse);
 }
 
 message BootstrapSrsRequest {
@@ -103,4 +111,60 @@ message WaitForReadyResponse {
   // Best-effort human-readable status for logs (e.g. "computing slab
   // 3/10", "exchanging with peer 5", "prefilling"). Optional.
   string status = 2;
+}
+
+message GetMetricsRequest {}
+
+// One phase-entry timestamp. The shard records the wall-clock instant
+// it transitioned INTO this phase; the bootstrap actor computes
+// durations by subtracting consecutive entries. Phases not entered
+// (e.g. "computing-slabs" on a cache-hit boot) are absent.
+message PhaseEntry {
+  // The Phase enum encoded as a short stable string: "awaiting-bootstrap",
+  // "computing-slabs", "pulling-peer-slabs", "assembling-srs",
+  // "writing-cache", "initializing-aegon", "prefilling", "ready",
+  // "cache-hit". The shard MAY introduce sub-phases (e.g. multiple
+  // "computing-slabs" / "pulling-peer-slabs" entries to bracket
+  // each step) so the response is a vector, not a map.
+  string phase = 1;
+  // Seconds since shard process start (monotonic). Subtracting two
+  // entries gives the duration between them.
+  double monotonic_secs = 2;
+}
+
+message GetMetricsResponse {
+  uint32 shard_id = 1;
+  // True if this shard's SRS came from disk cache rather than the
+  // distributed gen path. When true, the byte counters and most phase
+  // entries are zero/absent.
+  bool cache_hit = 2;
+  // Phase-transition timestamps in chronological order. See PhaseEntry.
+  repeated PhaseEntry phases = 3;
+  // Total bytes of `H_t` slab point data PULLED from peers during the
+  // exchange phase. Sum over all (t, peer) pairs. Counts only the
+  // canonical-uncompressed `G1Affine` payload, not protobuf framing.
+  uint64 inbound_slab_bytes = 4;
+  // Total bytes of slab point data SERVED to peers. Should match
+  // inbound by symmetry once the cluster is uniformly sized.
+  uint64 outbound_slab_bytes = 5;
+  // Uncompressed serialised sizes of the assembled SRS components.
+  // pk_bytes and vk_bytes are the prover_param / verifier_param the
+  // shard uses internally; universal_bytes is the full
+  // KZHKUniversalParams written to the cache file. Set to zero if
+  // assembly didn't run (shouldn't happen post-Ready).
+  uint64 pk_bytes = 6;
+  uint64 vk_bytes = 7;
+  uint64 universal_bytes = 8;
+  // Wall-clock seconds this shard spent in CPU-bound setup work:
+  // local slab compute (H_t MSM) + v_mat compute + tensor assembly +
+  // universal-params build + trim. Excludes peer slab exchange,
+  // trapdoor wait, and cache I/O. Zero on cache-hit boots; on
+  // single-shard runs equals total setup time.
+  double compute_secs = 9;
+  // Wall-clock seconds this shard spent in the peer slab exchange
+  // phase (`pull_slab_from_peer` calls across all peers, in
+  // aggregate wall-clock — concurrent pulls overlap so this measures
+  // the exchange window, not the sum of per-peer durations). Zero on
+  // cache-hit boots and on single-shard runs (no peers to pull from).
+  double communication_secs = 10;
 }

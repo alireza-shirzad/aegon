@@ -636,6 +636,89 @@ cmd_bootstrap() {
   log "bootstrap done. cluster ready for ./scripts/bench-cluster.sh bench"
 }
 
+# Setup-time + comm-bytes benchmark for the planetary regime.
+#
+# Differs from `bootstrap` in three ways:
+#   1. Forces shards to skip prefill (`PREFILL_COUNT=0`) so the
+#      measured wall-clock isn't inflated by entry-population work
+#      — pure "SRS gen + Aegon init". Requires the shards to have
+#      been started with `prefill_count=0` (cmd_restart_shards before
+#      calling this is the path).
+#   2. Wipes any SRS cache files on every shard so the measurement
+#      reflects the full distributed-gen path, not a cached re-run.
+#   3. Asks the bootstrap actor to write its consolidated metrics
+#      JSON (per-shard phase timestamps + inbound/outbound bytes + SRS
+#      sizes) to /tmp/aegon-setup-bench.json on the coordinator, then
+#      pulls it back to $LOCAL_SETUP_BENCH_OUT.
+#
+# Use this after `up + deploy` (shards bound on SRS_PORT, awaiting
+# bootstrap). After it completes, the cluster is "Ready" but
+# polynomials are empty — `restart-shards` with a non-zero
+# TOTAL_PRELOAD_LOG2 puts it back into a benchable state, OR run
+# `down` to tear it down once the planetary numbers are in hand.
+REMOTE_SETUP_BENCH_OUT="/tmp/aegon-setup-bench.json"
+LOCAL_SETUP_BENCH_OUT="${LOCAL_SETUP_BENCH_OUT:-/tmp/aegon-setup-bench.json}"
+cmd_setup_bench() {
+  require_project
+  require_power_of_two "$N_SHARDS"
+
+  # Step 1: clear the SRS cache on every shard so we measure
+  # distributed-gen wall-clock, not a cache-hit fast-path. The cache
+  # dir is shell-expanded server-side, hence the literal $HOME below.
+  log "wiping SRS cache on all shards ($SRS_CACHE_DIR)"
+  local -a wipe_pids=()
+  for ((i = 0; i < N_SHARDS; i++)); do
+    local name; name="$(shard_name "$i")"
+    (
+      remote "$name" "rm -f $SRS_CACHE_DIR/aegon-srs-*.cache 2>/dev/null || true"
+    ) &
+    wipe_pids+=("$!")
+  done
+  for pid in "${wipe_pids[@]}"; do wait "$pid"; done
+
+  # Step 2: restart shards with prefill_count=0 so the setup-time
+  # measurement is unpolluted by post-SRS prefill work.
+  log "restarting shards with prefill_count=0 (pure setup-time measurement)"
+  local db_ip; db_ip="$(db_internal_ip)"
+  remote "$(db_name)" \
+    "redis-cli -h 127.0.0.1 -p $REDIS_PORT FLUSHALL >/dev/null && \
+     redis-cli -h 127.0.0.1 -p $REDIS_PORT PING >/dev/null"
+
+  local -a restart_pids=()
+  for ((i = 0; i < N_SHARDS; i++)); do
+    local name; name="$(shard_name "$i")"
+    (
+      restart_shard "$name" "$i" 0 "$db_ip"
+    ) &
+    restart_pids+=("$!")
+  done
+  local failed=0
+  for pid in "${restart_pids[@]}"; do
+    wait "$pid" || failed=$((failed + 1))
+  done
+  if (( failed > 0 )); then
+    die "$failed shard restart(s) failed"
+  fi
+
+  # Step 3: run aegon_srs_bootstrap with --metrics-out so the
+  # consolidated per-shard metrics land in one JSON file.
+  local cname; cname="$(coord_name)"
+  local srs_csv; srs_csv="$(srs_endpoints_csv)"
+  log "[$cname] running aegon_srs_bootstrap with metrics gather"
+  remote "$cname" \
+    "$REMOTE_BIN_DIR/aegon_srs_bootstrap \
+       --shard-log-capacity $SHARD_LOG_CAPACITY \
+       --kzh-k $KZH_K \
+       --setup-seed $SETUP_SEED \
+       --shard-endpoints $srs_csv \
+       --metrics-out $REMOTE_SETUP_BENCH_OUT" \
+    stream
+
+  log "retrieving $REMOTE_SETUP_BENCH_OUT -> $LOCAL_SETUP_BENCH_OUT"
+  scp_from "$cname" "$REMOTE_SETUP_BENCH_OUT" "$LOCAL_SETUP_BENCH_OUT"
+  log "setup-bench JSON saved to $LOCAL_SETUP_BENCH_OUT"
+}
+
 cmd_bench() {
   require_project
   require_power_of_two "$N_SHARDS"
@@ -917,6 +1000,12 @@ usage: $0 <subcommand>
                    shards finish distributed SRS gen + prefill. On
                    cache hit (re-runs with the same seed) the
                    bootstrap completes in seconds.
+  setup-bench      Planetary-regime setup benchmark. Wipes every
+                   shard's SRS cache, restarts shards with
+                   prefill_count=0, then runs aegon_srs_bootstrap with
+                   metrics gathering. Outputs one JSON record with
+                   per-shard phase timestamps + inbound/outbound
+                   slab bytes + pk/vk/universal sizes.
   restart-shards   Restart all shards with a fresh --prefill-count using
                    already-uploaded binaries + on-disk SRS cache + FLUSHALL.
                    Cheap per-call (~30 s) — use in (prefill,batch) sweeps.
@@ -952,6 +1041,7 @@ main() {
     up)             cmd_up ;;
     deploy)         cmd_deploy ;;
     bootstrap)      cmd_bootstrap ;;
+    setup-bench)    cmd_setup_bench ;;
     restart-shards) cmd_restart_shards ;;
     bench)          cmd_bench ;;
     lookup-bench)   cmd_lookup_bench ;;

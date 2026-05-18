@@ -42,8 +42,9 @@ use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use ark_ec::{pairing::Pairing, scalar_mul::BatchMulPreprocessing, AffineRepr, CurveGroup};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
@@ -65,8 +66,8 @@ use super::error::AegonError;
 use proto::srs_service_client::SrsServiceClient;
 use proto::srs_service_server::{SrsService, SrsServiceServer};
 use proto::{
-    BootstrapSrsRequest, BootstrapSrsResponse, GetSrsSlabRequest, SrsSlabChunk,
-    WaitForReadyRequest, WaitForReadyResponse,
+    BootstrapSrsRequest, BootstrapSrsResponse, GetMetricsRequest, GetMetricsResponse,
+    GetSrsSlabRequest, PhaseEntry, SrsSlabChunk, WaitForReadyRequest, WaitForReadyResponse,
 };
 
 // Generated tonic code for `aegon.srs.v1`.
@@ -628,6 +629,24 @@ impl Phase {
     }
 }
 
+/// Plain-struct view of the per-shard metrics, mirroring the on-wire
+/// `GetMetricsResponse` shape. Returned by
+/// [`SrsBootstrapState::snapshot_metrics`] and consumed by the
+/// `GetMetrics` handler + tests.
+#[derive(Debug, Clone)]
+pub struct MetricsSnapshot {
+    pub shard_id: u32,
+    pub cache_hit: bool,
+    pub phases: Vec<PhaseEntry>,
+    pub inbound_slab_bytes: u64,
+    pub outbound_slab_bytes: u64,
+    pub pk_bytes: u64,
+    pub vk_bytes: u64,
+    pub universal_bytes: u64,
+    pub compute_secs: f64,
+    pub communication_secs: f64,
+}
+
 struct Inner<E: Pairing> {
     phase: Phase,
     trapdoors: Option<Arc<Trapdoors<E>>>,
@@ -640,6 +659,32 @@ struct Inner<E: Pairing> {
     /// the same allocation without copying.
     local_slabs: Vec<Option<Arc<Vec<E::G1Affine>>>>,
     status: String,
+    /// Phase-transition timestamps in chronological order. Each entry
+    /// is `(label, monotonic_instant)`; the bootstrap actor's
+    /// `GetMetrics` aggregator subtracts consecutive entries to get
+    /// durations. Labels are short stable strings (see `set_phase`).
+    /// May contain multiple entries with the same phase (e.g. nested
+    /// "computing-local-slabs" / "pulling-peer-slabs" sub-phases under
+    /// `Computing`).
+    phase_log: Vec<(String, Instant)>,
+    /// True once an SRS has been assembled (or loaded from cache).
+    /// Used to gate cache-hit reporting in `GetMetrics`.
+    cache_hit: bool,
+    /// Uncompressed serialised sizes of the assembled SRS, recorded at
+    /// cache-write time (or cache-load time on a cache hit). Zero
+    /// before the shard reaches assembly.
+    pk_bytes: u64,
+    vk_bytes: u64,
+    universal_bytes: u64,
+    /// Wall-clock seconds spent in CPU-bound setup (slab compute +
+    /// assembly + build + trim). Set by [`record_phase_durations`]
+    /// once the distributed path finishes. Stays at 0 on the
+    /// cache-hit path.
+    compute_secs: f64,
+    /// Wall-clock seconds spent in the peer slab exchange phase
+    /// (`pull_slab_from_peer`). Stays at 0 on single-shard runs (no
+    /// peers to talk to) and on cache-hit boots.
+    communication_secs: f64,
 }
 
 /// Shared bootstrap state. Holds the trapdoors handoff, the local slab
@@ -653,6 +698,21 @@ pub struct SrsBootstrapState<E: Pairing> {
     /// the actual number of waiters is small (handful of GetSrsSlab
     /// streams in flight + the main loop's trapdoor wait).
     notify: Notify,
+    /// Process-start anchor for the phase log. Subtracting from any
+    /// recorded `Instant` gives a `secs since boot` value that's
+    /// comparable across shards (modulo clock drift, which is
+    /// monotonic-instant-bounded anyway).
+    started_at: Instant,
+    /// Total bytes of `G1Affine` payload pulled from peers (sum across
+    /// all `(t, peer)` pairs). Incremented by the slab pull loop in
+    /// [`run_distributed_compute`] after each peer's stream drains.
+    /// Atomic for cheap lock-free updates from the parallel pull
+    /// tasks.
+    inbound_slab_bytes: AtomicU64,
+    /// Total bytes of slab payload served to peers. Incremented by
+    /// the `GetSrsSlab` handler per request. Should match
+    /// `inbound_slab_bytes` on the symmetric side once exchange ends.
+    outbound_slab_bytes: AtomicU64,
 }
 
 impl<E: Pairing> SrsBootstrapState<E> {
@@ -661,6 +721,7 @@ impl<E: Pairing> SrsBootstrapState<E> {
         // geometry until trapdoors arrive (well, we do — k is in
         // config — but we get the same size from dimensions later).
         let k = config.k as usize;
+        let now = Instant::now();
         Arc::new(Self {
             config,
             inner: Mutex::new(Inner {
@@ -669,8 +730,18 @@ impl<E: Pairing> SrsBootstrapState<E> {
                 peer_endpoints: Vec::new(),
                 local_slabs: vec![None; k],
                 status: "awaiting-bootstrap".to_string(),
+                phase_log: vec![("awaiting-bootstrap".to_string(), now)],
+                cache_hit: false,
+                pk_bytes: 0,
+                vk_bytes: 0,
+                universal_bytes: 0,
+                compute_secs: 0.0,
+                communication_secs: 0.0,
             }),
             notify: Notify::new(),
+            started_at: now,
+            inbound_slab_bytes: AtomicU64::new(0),
+            outbound_slab_bytes: AtomicU64::new(0),
         })
     }
 
@@ -763,14 +834,90 @@ impl<E: Pairing> SrsBootstrapState<E> {
     }
 
     /// Set the current phase + status string. Status is best-effort
-    /// debug info surfaced via `WaitForReady`.
+    /// debug info surfaced via `WaitForReady` and recorded in the phase
+    /// log under the same label so `GetMetrics` can replay the
+    /// sub-phase breakdown the shard's main loop actually walked
+    /// through.
     pub async fn set_phase(&self, phase: Phase, status: impl Into<String>) {
+        let status: String = status.into();
+        let now = Instant::now();
         {
             let mut inner = self.inner.lock().await;
             inner.phase = phase;
-            inner.status = status.into();
+            inner.status = status.clone();
+            inner.phase_log.push((status, now));
         }
         self.notify.notify_waiters();
+    }
+
+    /// Note that the assembled SRS came from disk cache, not from
+    /// distributed gen. Suppresses bogus inbound/outbound numbers in
+    /// `GetMetrics` (the counters would be zero anyway but the flag
+    /// makes intent explicit).
+    pub async fn mark_cache_hit(&self) {
+        let mut inner = self.inner.lock().await;
+        inner.cache_hit = true;
+    }
+
+    /// Record the uncompressed serialised sizes of the assembled SRS,
+    /// so `GetMetrics` can return them without a second serialise pass.
+    /// Called immediately after `write_cache` (or after a cache read).
+    pub async fn record_sizes(&self, pk_bytes: u64, vk_bytes: u64, universal_bytes: u64) {
+        let mut inner = self.inner.lock().await;
+        inner.pk_bytes = pk_bytes;
+        inner.vk_bytes = vk_bytes;
+        inner.universal_bytes = universal_bytes;
+    }
+
+    /// Record the compute-vs-communication wall-clock split for this
+    /// shard's setup pass. Called once at the end of
+    /// [`run_distributed_compute`]. On single-shard runs
+    /// `communication_secs` is 0 by construction (no peers to pull
+    /// from). On the cache-hit path neither is set (both stay at 0).
+    pub async fn record_phase_durations(&self, compute: Duration, communication: Duration) {
+        let mut inner = self.inner.lock().await;
+        inner.compute_secs = compute.as_secs_f64();
+        inner.communication_secs = communication.as_secs_f64();
+    }
+
+    /// Add `n` to the inbound-slab byte counter. Called by the slab
+    /// pull loop in [`run_distributed_compute`] after each peer's
+    /// stream finishes.
+    pub fn add_inbound_bytes(&self, n: u64) {
+        self.inbound_slab_bytes.fetch_add(n, Ordering::Relaxed);
+    }
+
+    /// Add `n` to the outbound-slab byte counter. Called by the
+    /// `GetSrsSlab` handler once it knows the served slab's size.
+    pub fn add_outbound_bytes(&self, n: u64) {
+        self.outbound_slab_bytes.fetch_add(n, Ordering::Relaxed);
+    }
+
+    /// Snapshot the per-shard metrics. Mostly consumed by the
+    /// `GetMetrics` gRPC handler; exposed here so tests can poke at
+    /// the state directly without going through gRPC.
+    pub async fn snapshot_metrics(&self) -> MetricsSnapshot {
+        let inner = self.inner.lock().await;
+        let phases = inner
+            .phase_log
+            .iter()
+            .map(|(label, instant)| PhaseEntry {
+                phase: label.clone(),
+                monotonic_secs: instant.duration_since(self.started_at).as_secs_f64(),
+            })
+            .collect();
+        MetricsSnapshot {
+            shard_id: self.config.shard_id,
+            cache_hit: inner.cache_hit,
+            phases,
+            inbound_slab_bytes: self.inbound_slab_bytes.load(Ordering::Relaxed),
+            outbound_slab_bytes: self.outbound_slab_bytes.load(Ordering::Relaxed),
+            pk_bytes: inner.pk_bytes,
+            vk_bytes: inner.vk_bytes,
+            universal_bytes: inner.universal_bytes,
+            compute_secs: inner.compute_secs,
+            communication_secs: inner.communication_secs,
+        }
     }
 
     /// Block until phase reaches `Ready` or `timeout` elapses. Returns
@@ -937,6 +1084,8 @@ where
         // streaming is to bound the wire-level per-message size below
         // the 1 GiB cap, not to overlap with compute.
         let chunks = encode_slab_to_chunks::<E>(&slab).map_err(err_to_status)?;
+        let served_bytes: u64 = chunks.iter().map(|(b, _)| b.len() as u64).sum();
+        self.state.add_outbound_bytes(served_bytes);
         let stream = futures::stream::iter(
             chunks
                 .into_iter()
@@ -964,6 +1113,25 @@ where
         let (ready, status) = self.state.wait_for_ready(timeout).await;
         Ok(Response::new(WaitForReadyResponse { ready, status }))
     }
+
+    async fn get_metrics(
+        &self,
+        _req: Request<GetMetricsRequest>,
+    ) -> Result<Response<GetMetricsResponse>, Status> {
+        let snap = self.state.snapshot_metrics().await;
+        Ok(Response::new(GetMetricsResponse {
+            shard_id: snap.shard_id,
+            cache_hit: snap.cache_hit,
+            phases: snap.phases,
+            inbound_slab_bytes: snap.inbound_slab_bytes,
+            outbound_slab_bytes: snap.outbound_slab_bytes,
+            pk_bytes: snap.pk_bytes,
+            vk_bytes: snap.vk_bytes,
+            universal_bytes: snap.universal_bytes,
+            compute_secs: snap.compute_secs,
+            communication_secs: snap.communication_secs,
+        }))
+    }
 }
 
 // ---------- gRPC clients ------------------------------------------------
@@ -986,14 +1154,16 @@ pub async fn connect_srs_client(endpoint: &str) -> Result<SrsServiceClient<Chann
 /// yet when we first try to connect, since the bootstrap actor doesn't
 /// barrier them.
 ///
-/// Returns the full slab concatenated. The caller is responsible for
-/// inserting it into the assembly matrix.
+/// Returns `(slab, payload_bytes)` where `payload_bytes` is the sum of
+/// `points_uncompressed.len()` across received chunks (used by the
+/// caller to drive the inbound byte counter). The caller is responsible
+/// for inserting the slab into the assembly matrix.
 pub async fn pull_slab_from_peer<E: Pairing>(
     endpoint: &str,
     t: u32,
     range_start: u64,
     range_end: u64,
-) -> Result<Vec<E::G1Affine>, AegonError> {
+) -> Result<(Vec<E::G1Affine>, u64), AegonError> {
     // Connect-with-retry: each shard binds gRPC roughly simultaneously
     // but DNS / link-up jitter can leave one endpoint unroutable for a
     // few seconds. Six tries × 1-second sleep = 6s tolerance, which
@@ -1028,12 +1198,14 @@ pub async fn pull_slab_from_peer<E: Pairing>(
         .into_inner();
     let expected: usize = (range_end - range_start) as usize;
     let mut out: Vec<E::G1Affine> = Vec::with_capacity(expected);
+    let mut bytes_in: u64 = 0;
     while let Some(chunk) = stream
         .message()
         .await
         .map_err(|s| AegonError::Config(format!("stream '{endpoint}': {s}")))?
     {
         let n = chunk.n_points as usize;
+        bytes_in += chunk.points_uncompressed.len() as u64;
         let pts = decode_slab_chunk::<E>(&chunk.points_uncompressed, n)?;
         out.extend(pts);
     }
@@ -1044,7 +1216,7 @@ pub async fn pull_slab_from_peer<E: Pairing>(
             expected
         )));
     }
-    Ok(out)
+    Ok((out, bytes_in))
 }
 
 // ---------- orchestration helpers --------------------------------------
@@ -1084,10 +1256,19 @@ where
     let shard_id = state.config().shard_id as usize;
     let geoms = HtGeometry::all(&trapdoors.dimensions);
 
+    // Phase-duration accounting. Two buckets — CPU-bound work
+    // (`compute_acc`) and peer slab exchange wall-clock
+    // (`communication_acc`). The bootstrap actor's per-shard JSON
+    // reports both; cluster-wide aggregators take the max across
+    // shards (since they run in parallel).
+    let mut compute_acc = Duration::ZERO;
+    let mut communication_acc = Duration::ZERO;
+
     // ---- local slab compute (in a blocking task — MSM is CPU-heavy) ----
     state
         .set_phase(Phase::Computing, "computing-local-slabs")
         .await;
+    let compute_start = Instant::now();
     for (t_idx, geom) in geoms.iter().enumerate() {
         let (start, end) = slab_range(shard_id, n_shards, geom.len);
         let trapdoors_for_task = Arc::clone(&trapdoors);
@@ -1099,9 +1280,12 @@ where
         .map_err(|e| AegonError::Config(format!("compute_h_t_slab join: {e}")))?;
         state.set_local_slab(t_idx, slab).await;
     }
+    compute_acc += compute_start.elapsed();
+
     state
         .set_phase(Phase::Computing, "pulling-peer-slabs")
         .await;
+    let comm_start = Instant::now();
 
     // ---- pull peer slabs in parallel --------------------------------
     // For each (t, peer), spawn an async task. tokio's scheduler handles
@@ -1143,31 +1327,45 @@ where
                 // empty slab — nothing to fetch
                 let t = t_idx;
                 pull_tasks.push(tokio::spawn(async move {
-                    Ok::<(usize, usize, Vec<E::G1Affine>), AegonError>((t, peer_id, Vec::new()))
+                    Ok::<(usize, usize, Vec<E::G1Affine>, u64), AegonError>((
+                        t,
+                        peer_id,
+                        Vec::new(),
+                        0,
+                    ))
                 }));
                 continue;
             }
             let endpoint = peer_endpoints[peer_id].clone();
             let t = t_idx as u32;
             pull_tasks.push(tokio::spawn(async move {
-                let slab =
+                let (slab, bytes_in) =
                     pull_slab_from_peer::<E>(&endpoint, t, start as u64, end as u64).await?;
-                Ok::<(usize, usize, Vec<E::G1Affine>), AegonError>((t as usize, peer_id, slab))
+                Ok::<(usize, usize, Vec<E::G1Affine>, u64), AegonError>((
+                    t as usize,
+                    peer_id,
+                    slab,
+                    bytes_in,
+                ))
             }));
         }
     }
 
     for task in pull_tasks {
-        let (t_idx, peer_id, slab) = task
+        let (t_idx, peer_id, slab, bytes_in) = task
             .await
             .map_err(|e| AegonError::Config(format!("pull task join: {e}")))??;
+        state.add_inbound_bytes(bytes_in);
         matrix[t_idx].insert(peer_id, slab);
     }
+
+    communication_acc += comm_start.elapsed();
 
     // ---- assemble + write cache --------------------------------------
     state
         .set_phase(Phase::Assembling, "assembling-srs")
         .await;
+    let assembly_start = Instant::now();
     let h_tensors = matrix_to_tensors::<E>(&geoms, matrix, n_shards)?;
     let v_mat = compute_v_mat(&trapdoors);
     let universal_params = build_universal_params(&trapdoors, h_tensors, v_mat);
@@ -1177,6 +1375,7 @@ where
             .trim(trapdoors.num_vars())
             .map_err(|e| AegonError::Config(format!("trim: {e}")))?
     };
+    compute_acc += assembly_start.elapsed();
 
     state
         .set_phase(Phase::Assembling, "writing-cache")
@@ -1190,9 +1389,28 @@ where
     );
     write_cache::<E>(&cache_path, &universal_params, &prover_param, &verifier_param)?;
 
+    // Snapshot the assembled sizes so `GetMetrics` can return them
+    // without a second serialise pass.
+    state
+        .record_sizes(
+            prover_param.uncompressed_size() as u64,
+            verifier_param.uncompressed_size() as u64,
+            universal_params.uncompressed_size() as u64,
+        )
+        .await;
+
     // Free the per-`H_t` slab cache before init/prefill kicks off; the
     // bytes we'd be holding on to are already in the assembled tensors.
     state.drop_local_slabs().await;
+
+    // Final compute/communication split so `GetMetrics` returns it
+    // without the consumer having to derive deltas from the phase
+    // log. `compute_acc` covers slab MSM + assembly + v_mat + trim;
+    // `communication_acc` covers the peer-pull wall-clock. Cache I/O
+    // and trapdoor wait are deliberately excluded from both.
+    state
+        .record_phase_durations(compute_acc, communication_acc)
+        .await;
 
     Ok((universal_params, prover_param, verifier_param))
 }
@@ -1228,6 +1446,14 @@ where
     let (up, pk, vk) = read_cache::<E>(&path)?;
     // Jump straight to Initializing — the trapdoor handoff is bypassed
     // because we never needed it.
+    state.mark_cache_hit().await;
+    state
+        .record_sizes(
+            pk.uncompressed_size() as u64,
+            vk.uncompressed_size() as u64,
+            up.uncompressed_size() as u64,
+        )
+        .await;
     state
         .set_phase(Phase::Initializing, "cache-hit")
         .await;
