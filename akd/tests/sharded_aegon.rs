@@ -356,6 +356,93 @@ fn print_rss(stage: &str) {
 }
 
 #[test]
+fn rocks_backend_publish_lookup_history_round_trip() {
+    use akd::aegon::{verify_lookup_history, DbSource};
+
+    // Unique tempdir so concurrent test runs don't collide. Cleaned
+    // up at the end; on panic Linux's /tmp will eventually GC it.
+    let tmp_root = std::env::temp_dir();
+    let nonce: u64 = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0xDEADBEEF);
+    let db_path = tmp_root.join(format!("aegon-rocks-test-{}-{nonce}", std::process::id()));
+    if db_path.exists() {
+        std::fs::remove_dir_all(&db_path).ok();
+    }
+
+    // log_capacity=8, 2 shards (log_n_shards=1) — minimal config that
+    // still exercises cross-shard probe and the publish-path
+    // is_index_slot_occupied fallback (which is the path RocksDB
+    // forces us onto, since RocksDB is process-local and has no
+    // shard-written slot keys).
+    let cfg = ShardedAegonConfig::<Bn254, Pcs>::builder()
+        .shard_log_capacity(8 - 1)
+        .log_n_shards(1)
+        .private(false)
+        .kzh_k(2)
+        .db(DbSource::Rocks(db_path.clone()))
+        .build()
+        .expect("config builds");
+
+    let mut rng = ChaCha20Rng::seed_from_u64(0xA56_5);
+    let mut server = Sharded::setup(&mut rng, &cfg).expect("setup");
+
+    // Publish 1: introduce three labels (placement events).
+    let updates_v1: Vec<(Vec<u8>, Vec<u8>)> = vec![
+        (b"alice".to_vec(), b"alice-v1".to_vec()),
+        (b"bob".to_vec(), b"bob-v1".to_vec()),
+        (b"carol".to_vec(), b"carol-v1".to_vec()),
+    ];
+    let commit_v1 = server.publish(&updates_v1).expect("publish v1");
+
+    // Publish 2: update alice + carol, leave bob unchanged.
+    let updates_v2: Vec<(Vec<u8>, Vec<u8>)> = vec![
+        (b"alice".to_vec(), b"alice-v2".to_vec()),
+        (b"carol".to_vec(), b"carol-v2".to_vec()),
+    ];
+    let commit_v2 = server.publish(&updates_v2).expect("publish v2");
+    let _ = (commit_v1, commit_v2);
+
+    // Lookup history: alice should have 2 entries (v1 placement,
+    // v2 update). bob should have 1 (placement only). carol should
+    // have 2.
+    let ctx = server.sharded_verifier_context();
+    let alice_hist = server
+        .lookup_history(&b"alice".to_vec())
+        .expect("alice history");
+    assert_eq!(alice_hist.entries.len(), 2, "alice has 2 history entries");
+    // Newest-first ordering: entry[0] is the most recent (v2).
+    assert_eq!(alice_hist.entries[0].value_bytes, b"alice-v2");
+    assert_eq!(alice_hist.entries[1].value_bytes, b"alice-v1");
+
+    let bob_hist = server.lookup_history(&b"bob".to_vec()).expect("bob hist");
+    assert_eq!(bob_hist.entries.len(), 1, "bob has 1 entry (placement only)");
+    assert_eq!(bob_hist.entries[0].value_bytes, b"bob-v1");
+
+    // Verify every entry cryptographically. `verify_lookup_history`
+    // re-anchors merkle paths and runs three PCS opens per entry,
+    // returning the reconstructed (prev_root, post_root) for each.
+    let alice_roots = verify_lookup_history::<Bn254, Pcs, Sha256Hash>(&ctx, &alice_hist)
+        .expect("verify alice history");
+    assert_eq!(alice_roots.len(), 2);
+    let _ = verify_lookup_history::<Bn254, Pcs, Sha256Hash>(&ctx, &bob_hist)
+        .expect("verify bob history");
+
+    // Lookup the latest value via the regular `lookup` API to make
+    // sure RocksDB-backed value:/routing: keys round-trip end-to-end
+    // (not just the new history list).
+    let (alice_v_bytes, _proof): (Vec<u8>, ShardedLookupProof<Bn254, Pcs>) =
+        server.lookup(&b"alice".to_vec()).expect("lookup alice");
+    assert_eq!(alice_v_bytes, b"alice-v2");
+
+    // Tidy up; if this fails it's not a test failure (Linux /tmp
+    // policy will catch it eventually).
+    drop(server);
+    std::fs::remove_dir_all(&db_path).ok();
+}
+
+#[test]
 #[ignore = "production-scale validation — needs ~64 GB RAM and several minutes; run with `cargo test --release -- --ignored bench_production_shard_scale --nocapture`"]
 fn bench_production_shard_scale() {
     use akd::aegon::verify_sharded_lookup;

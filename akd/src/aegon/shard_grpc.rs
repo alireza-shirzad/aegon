@@ -315,10 +315,11 @@ where
         let db: Arc<dyn Db> = match db_source {
             DbSource::None => {
                 return Err(AegonError::Config(
-                    "ShardServer::new_with_checkpoint requires a Redis DbSource".into(),
+                    "ShardServer::new_with_checkpoint requires a Redis or Rocks DbSource".into(),
                 ));
             },
             DbSource::Redis(url) => Arc::new(RedisDb::connect(&url)?),
+            DbSource::Rocks(path) => Arc::new(crate::aegon::db::RocksDb::open(&path)?),
         };
         Ok(Self {
             aegon: Arc::new(AsyncRwLock::new(aegon)),
@@ -419,20 +420,34 @@ where
             .publish_phase_2(r_index, r_value)
             .map_err(err_to_status)?;
 
-        // Durability barrier: snapshot the live state into Redis
-        // *while still holding the write lock*, so nothing else can
-        // mutate the shard before we've captured this epoch's
-        // checkpoint. A failed checkpoint write doesn't roll back
-        // the publish — we surface it as an error so the caller
-        // knows the durability promise wasn't kept this round.
-        if let Some(db) = &self.db {
-            let ckpt = aegon.capture_checkpoint();
-            let bytes = encode(&ckpt).map_err(err_to_status)?;
-            db.write_atomic(&[DbOp::Set {
-                key: key_shard_state(self.shard_id),
-                value: bytes,
-            }])
-            .map_err(err_to_status)?;
+        // TODO(shard-checkpoint-fault-tolerance): per-publish
+        // checkpoint write into the shard's own local DB is
+        // **intentionally disabled** in the current architecture.
+        // The system-wide DB now belongs to the coordinator alone;
+        // shards don't communicate with any DB during steady-state
+        // operation. The code structure below is preserved for the
+        // future fault-tolerance feature: when re-enabled, each
+        // shard would persist its own `(rand_index_poly,
+        // rand_value_poly, KZH aux states)` delta to a private
+        // local RocksDB after every phase_2, slot-keyed for fast
+        // delta writes (~few hundred bytes per publish per shard
+        // at 2^34 scale) and prefix-scan recovery on restart.
+        //
+        // Until that's enabled, a shard process restart loses its
+        // polynomial state and the shard has to be re-driven from
+        // scratch by the coord. Acceptable for bench/research where
+        // shards rarely restart mid-run; not acceptable for prod.
+        const SHARD_CHECKPOINT_ENABLED: bool = false;
+        if SHARD_CHECKPOINT_ENABLED {
+            if let Some(db) = &self.db {
+                let ckpt = aegon.capture_checkpoint();
+                let bytes = encode(&ckpt).map_err(err_to_status)?;
+                db.write_atomic(&[DbOp::Set {
+                    key: key_shard_state(self.shard_id),
+                    value: bytes,
+                }])
+                .map_err(err_to_status)?;
+            }
         }
         drop(aegon);
 

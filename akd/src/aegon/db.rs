@@ -45,7 +45,16 @@ pub enum DbSource {
     None,
     /// Connect to a Redis server at this URL on coordinator setup.
     /// URL form is the standard `redis://[user[:pass]@]host[:port][/db]`.
+    /// Cross-process shared (coord and shards both see each other's
+    /// writes), so the slot-occupancy probe consults the same Redis.
     Redis(String),
+    /// Open (or create) a RocksDB instance at this filesystem path.
+    /// Process-local, single-writer — coord and shards can NOT share
+    /// one directory. When this backend is selected the publish-path
+    /// slot-occupancy probe automatically falls back to per-probe
+    /// gRPC `is_index_slot_occupied` calls to the owning shard, since
+    /// the coord's local RocksDB has no shard-side slot keys.
+    Rocks(std::path::PathBuf),
 }
 
 /// One step of an atomic write batch (a MULTI/EXEC inside RedisDb).
@@ -69,6 +78,52 @@ pub(crate) enum DbOp {
     LTrim { key: Vec<u8>, start: isize, stop: isize },
 }
 
+// TODO(rocksdb-caching): when we add a `RocksDb` impl of this trait
+// for production-scale storage (target ~2^34 labels, ~10s of TB
+// on-disk), the storage layer should grow a configurable caching
+// layer. Today's `RedisDb` has no separate cache because Redis is
+// itself an in-RAM store — once we move to a disk-backed engine the
+// hot/cold split becomes real and caching matters.
+//
+// The default RocksDB block cache is ~8 MiB out of the box — fine
+// for tests, **catastrophically undersized** for production. Touch
+// these knobs when wiring `RocksDb::open`:
+//
+//   1. `BlockBasedOptions::set_block_cache(LruCache::new(N GiB))` —
+//      single biggest lever. Sized to fit "the hot working set" in
+//      RAM. Target 50–70% of the coord box's free RAM minus
+//      whatever the moka cache below takes.
+//   2. `Options::set_row_cache(LruCache::new(M GiB))` — caches
+//      decoded full rows on top of block cache. Helps point-lookup-
+//      heavy workloads like `aegon:value:<label>` and
+//      `aegon:value_history:<label>`. ~1–2 GiB is plenty.
+//   3. `BlockBasedOptions::set_bloom_filter(10, false)` — ~10 bits
+//      per key, ~1% false-positive rate on `EXISTS` probes. Big win
+//      for the publish-path slot-occupancy loop where most probes
+//      hit empty slots that don't exist in any SSTable.
+//   4. Column families per access pattern. Split the keyspace so
+//      hot vs. cold tiers can have independent cache budgets:
+//        * "hot_metadata" CF: `aegon:value:`, `aegon:routing:`,
+//          `aegon:slot:` — small values, every lookup reads them.
+//          Aggressive caching.
+//        * "history" CF: `aegon:value_history:` — large, rarely
+//          read per label. Smaller block cache, lean on the moka
+//          layer below for hot-user hits.
+//        * "audit" CF: `aegon:openings:`, `aegon:coord:epoch_commit:`
+//          — write-once, almost-never-read. Minimal cache.
+//   5. Optional application-level cache (e.g., the `moka` crate)
+//      sitting *in front of* the RocksDB impl. Pattern:
+//        `struct CachedDb { inner: RocksDb, cache: moka::Cache<...> }`
+//      moka's TinyLFU eviction policy is behavior-driven by
+//      definition — hot keys stay, cold keys evict, no per-user
+//      configuration needed. This is the natural place to hook in
+//      future per-user policies (VIP labels pinned, etc.) without
+//      touching the RocksDB layer.
+//
+// Until any of that lands, the in-RAM Redis impl is the only one
+// shipped, and there's nothing to cache because Redis already holds
+// everything in RAM by design.
+//
 /// Coordinator-side durable store. All writes happen via `write_atomic`
 /// (one MULTI/EXEC per publish); reads are point lookups + a couple of
 /// recovery-time enumeration helpers.
@@ -205,6 +260,307 @@ impl Db for RedisDb {
         conn.lrange::<&[u8], Vec<Vec<u8>>>(key, start, stop)
             .map_err(|e| AegonError::Database(format!("LRANGE: {e}")))
     }
+}
+
+// ---------- RocksDb impl ------------------------------------------------
+
+/// RocksDB-backed implementation. Single-process, embedded LSM store
+/// rooted at a directory on local disk. Designed as the target storage
+/// engine for production-scale deployments (target ~2^34 labels at
+/// tens of TB on-disk), where vanilla Redis can't physically hold the
+/// working set in RAM.
+///
+/// Tradeoffs vs `RedisDb`:
+///   * **Process-local**: a single `RocksDb` directory can only be
+///     opened by one process at a time. This is fine in the current
+///     architecture where the coord is the sole DB writer/reader for
+///     all system-wide state. Shards have their own private RocksDB
+///     directories (currently disabled — see
+///     `SHARD_CHECKPOINT_ENABLED` in `shard_grpc.rs`) which the
+///     coord never reads.
+///   * **Disk-backed**: bulk of the dataset lives on SSD, with a
+///     configurable RAM block cache in front. Default block cache
+///     is currently RocksDB's library default (~8 MiB) — fine for
+///     tests, dramatically undersized for production. See the
+///     `TODO(rocksdb-caching)` note above for the knobs to turn.
+///   * **Single-writer model**: the publish path is the only writer
+///     to any given Redis key in our protocol, so the RMW emulation
+///     of LPush/LTrim/SAdd below doesn't race in practice. A second
+///     writer (e.g. concurrent recoveries) would need a
+///     `OptimisticTransactionDB` or per-key locking; out of scope
+///     for the current bench.
+pub(crate) struct RocksDb {
+    inner: rocksdb::DB,
+}
+
+impl RocksDb {
+    /// Open (or create) a RocksDB instance at `path`. Uses bytewise
+    /// comparator (the default) which preserves our key namespaces'
+    /// lexicographic prefix-scan property for `smembers`-style
+    /// iteration over `aegon:labels:`.
+    pub(crate) fn open(path: &std::path::Path) -> Result<Self, AegonError> {
+        let mut opts = rocksdb::Options::default();
+        opts.create_if_missing(true);
+        // Compression on by default at the higher levels — LZ4 is a
+        // good fit (fast, ~2× compression on canonical-serialized
+        // arkworks bytes which still have some structure). Level 0
+        // stays uncompressed to keep flush latency tight.
+        opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
+        let inner = rocksdb::DB::open(&opts, path)
+            .map_err(|e| AegonError::Database(format!("open rocksdb {path:?}: {e}")))?;
+        Ok(Self { inner })
+    }
+
+    /// Compose the internal "set member" key used to emulate Redis
+    /// sets via key-as-membership encoding. Stored value is empty;
+    /// presence == set membership. Iteration is via prefix scan.
+    fn set_member_key(set_key: &[u8], member: &[u8]) -> Vec<u8> {
+        let mut k = Vec::with_capacity(set_key.len() + 1 + member.len());
+        k.extend_from_slice(set_key);
+        k.push(b':');
+        k.extend_from_slice(member);
+        k
+    }
+
+    /// Prefix for prefix-scan over set members (`set_key + ":"`).
+    fn set_member_prefix(set_key: &[u8]) -> Vec<u8> {
+        let mut k = Vec::with_capacity(set_key.len() + 1);
+        k.extend_from_slice(set_key);
+        k.push(b':');
+        k
+    }
+}
+
+impl Db for RocksDb {
+    fn write_atomic(&self, ops: &[DbOp]) -> Result<(), AegonError> {
+        if ops.is_empty() {
+            return Ok(());
+        }
+        // RocksDB's `WriteBatch` is atomic — either every op lands or
+        // none do (assuming the WAL is properly synced, which is the
+        // default). Same all-or-nothing semantics we get from Redis
+        // MULTI/EXEC.
+        //
+        // The List ops (LPush, LTrim) need read-modify-write since
+        // RocksDB has no native list type. We emulate them by storing
+        // the list as a single canonical-serialized
+        // `Vec<Vec<u8>>` value. Because WriteBatch is write-only, we
+        // do the RMW *outside* the batch by buffering per-key state:
+        // on the first list op for a key, read the current value
+        // (one extra DB read); apply each subsequent list op against
+        // the in-memory buffer; at the end, put each buffer's final
+        // bytes into the batch. Single-writer (coord) makes this
+        // safe; a multi-writer setup would need optimistic txns.
+        let mut wb = rocksdb::WriteBatch::default();
+        // Per-key list buffer (lazy-loaded on first list op).
+        let mut list_buffers: std::collections::HashMap<Vec<u8>, Vec<Vec<u8>>> =
+            std::collections::HashMap::new();
+        let mut load_list = |key: &[u8]| -> Result<Vec<Vec<u8>>, AegonError> {
+            let raw = self
+                .inner
+                .get(key)
+                .map_err(|e| AegonError::Database(format!("rocksdb list-load get: {e}")))?;
+            Ok(match raw {
+                Some(bytes) => decode_list(&bytes)?,
+                None => Vec::new(),
+            })
+        };
+        for op in ops {
+            match op {
+                DbOp::Set { key, value } => {
+                    wb.put(key, value);
+                },
+                DbOp::SAdd { key, member } => {
+                    // Encoded as one zero-byte-valued key per member;
+                    // smembers does a prefix scan to enumerate.
+                    let composed = Self::set_member_key(key, member);
+                    wb.put(&composed, &[]);
+                },
+                DbOp::LPush { key, member } => {
+                    if !list_buffers.contains_key(key) {
+                        list_buffers.insert(key.clone(), load_list(key)?);
+                    }
+                    // Redis LPUSH semantics: prepend to head.
+                    let buf = list_buffers.get_mut(key).unwrap();
+                    buf.insert(0, member.clone());
+                },
+                DbOp::LTrim { key, start, stop } => {
+                    if !list_buffers.contains_key(key) {
+                        list_buffers.insert(key.clone(), load_list(key)?);
+                    }
+                    let buf = list_buffers.get_mut(key).unwrap();
+                    let len = buf.len() as isize;
+                    // Resolve negative indices Redis-style.
+                    let lo = normalize_idx(*start, len).max(0) as usize;
+                    let hi_inclusive = normalize_idx(*stop, len).max(-1);
+                    let new_buf: Vec<Vec<u8>> = if hi_inclusive < 0 || (lo as isize) > hi_inclusive {
+                        Vec::new()
+                    } else {
+                        let hi = (hi_inclusive as usize + 1).min(buf.len());
+                        buf[lo..hi].to_vec()
+                    };
+                    *buf = new_buf;
+                },
+            }
+        }
+        // Flush each list buffer into the WriteBatch.
+        for (key, buf) in list_buffers {
+            let bytes = encode_list(&buf)?;
+            wb.put(&key, &bytes);
+        }
+        self.inner
+            .write(wb)
+            .map_err(|e| AegonError::Database(format!("rocksdb WriteBatch ({} ops): {e}", ops.len())))
+    }
+
+    fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, AegonError> {
+        self.inner
+            .get(key)
+            .map_err(|e| AegonError::Database(format!("rocksdb get: {e}")))
+    }
+
+    fn exists(&self, key: &[u8]) -> Result<bool, AegonError> {
+        // `key_may_exist` is the bloom-filter fast path: false means
+        // "definitely not present"; true means "maybe present, do a
+        // real get". For our occupancy-probe workload the bloom is
+        // the whole point — most slots are empty at low load factor.
+        if !self.inner.key_may_exist(key) {
+            return Ok(false);
+        }
+        Ok(self
+            .inner
+            .get(key)
+            .map_err(|e| AegonError::Database(format!("rocksdb exists: {e}")))?
+            .is_some())
+    }
+
+    fn exists_many(&self, keys: &[Vec<u8>]) -> Result<Vec<bool>, AegonError> {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        // `multi_get` issues a single batched call; per-key the
+        // engine still bloom-filters internally and only reads
+        // SSTables for keys that might be present. Faster than
+        // looping `get` for large `keys.len()`.
+        let results = self.inner.multi_get(keys.iter().map(|k| k.as_slice()));
+        let mut out: Vec<bool> = Vec::with_capacity(results.len());
+        for r in results {
+            match r {
+                Ok(opt) => out.push(opt.is_some()),
+                Err(e) => return Err(AegonError::Database(format!("rocksdb multi_get: {e}"))),
+            }
+        }
+        Ok(out)
+    }
+
+    fn smembers(&self, key: &[u8]) -> Result<Vec<Vec<u8>>, AegonError> {
+        // Sets are encoded as `<set_key>:<member>` keys. To
+        // enumerate, prefix-scan over `<set_key>:` and strip the
+        // prefix off each key. Iterator is backed by a snapshot so
+        // concurrent writes don't tear the view.
+        let prefix = Self::set_member_prefix(key);
+        let mut out: Vec<Vec<u8>> = Vec::new();
+        let iter = self.inner.prefix_iterator(&prefix);
+        for kv in iter {
+            let (k, _v) = kv
+                .map_err(|e| AegonError::Database(format!("rocksdb smembers iter: {e}")))?;
+            if !k.starts_with(&prefix) {
+                // prefix_iterator can over-scan past the prefix when
+                // bloom filters are off — defensive bound check.
+                break;
+            }
+            out.push(k[prefix.len()..].to_vec());
+        }
+        Ok(out)
+    }
+
+    fn lrange(&self, key: &[u8], start: isize, stop: isize) -> Result<Vec<Vec<u8>>, AegonError> {
+        let raw = self
+            .inner
+            .get(key)
+            .map_err(|e| AegonError::Database(format!("rocksdb lrange get: {e}")))?;
+        let list = match raw {
+            Some(bytes) => decode_list(&bytes)?,
+            None => return Ok(Vec::new()),
+        };
+        let len = list.len() as isize;
+        let lo = normalize_idx(start, len).max(0) as usize;
+        let hi_inclusive = normalize_idx(stop, len).max(-1);
+        if hi_inclusive < 0 || (lo as isize) > hi_inclusive {
+            return Ok(Vec::new());
+        }
+        let hi = (hi_inclusive as usize + 1).min(list.len());
+        Ok(list[lo..hi].to_vec())
+    }
+
+}
+
+/// Redis-style negative-index normalization: `-1` → `len-1`,
+/// `-2` → `len-2`, etc. Out-of-range negatives clamp to `-1`
+/// (LTRIM "delete everything" semantics).
+fn normalize_idx(idx: isize, len: isize) -> isize {
+    if idx < 0 {
+        let n = len + idx;
+        if n < 0 { -1 } else { n }
+    } else {
+        // Positive indices clamp to `len - 1` (past-the-end → last
+        // valid index, matching Redis behavior).
+        idx.min((len - 1).max(0))
+    }
+}
+
+/// Canonical encoding for the RocksDB list-as-blob representation:
+/// `u32 le count` followed by `count` × (`u32 le len, len bytes`).
+/// Compact, no external dep, and prefix-stable so future "incremental
+/// append" optimizations could append without rewriting.
+fn encode_list(items: &[Vec<u8>]) -> Result<Vec<u8>, AegonError> {
+    if items.len() > u32::MAX as usize {
+        return Err(AegonError::Database(format!(
+            "list length {} exceeds u32::MAX",
+            items.len()
+        )));
+    }
+    let total: usize = 4 + items.iter().map(|i| 4 + i.len()).sum::<usize>();
+    let mut out = Vec::with_capacity(total);
+    out.extend_from_slice(&(items.len() as u32).to_le_bytes());
+    for item in items {
+        if item.len() > u32::MAX as usize {
+            return Err(AegonError::Database(format!(
+                "list element of size {} exceeds u32::MAX",
+                item.len()
+            )));
+        }
+        out.extend_from_slice(&(item.len() as u32).to_le_bytes());
+        out.extend_from_slice(item);
+    }
+    Ok(out)
+}
+
+fn decode_list(bytes: &[u8]) -> Result<Vec<Vec<u8>>, AegonError> {
+    if bytes.len() < 4 {
+        return Err(AegonError::Database("list blob truncated (header)".into()));
+    }
+    let count = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
+    let mut out = Vec::with_capacity(count);
+    let mut off = 4;
+    for _ in 0..count {
+        if off + 4 > bytes.len() {
+            return Err(AegonError::Database("list blob truncated (elem len)".into()));
+        }
+        let elen = u32::from_le_bytes([
+            bytes[off],
+            bytes[off + 1],
+            bytes[off + 2],
+            bytes[off + 3],
+        ]) as usize;
+        off += 4;
+        if off + elen > bytes.len() {
+            return Err(AegonError::Database("list blob truncated (elem body)".into()));
+        }
+        out.push(bytes[off..off + elen].to_vec());
+        off += elen;
+    }
+    Ok(out)
 }
 
 // ---------- key-construction helpers ----------------------------------

@@ -71,15 +71,31 @@ struct Args {
     #[arg(long, requires = "tls_cert")]
     tls_key: Option<PathBuf>,
 
-    /// Optional Redis URL for shard-side durability. When set:
-    /// (1) on startup, if `aegon:shard:{shard_id}:state` exists, the
-    ///     shard restores its polynomial state from that checkpoint
-    ///     instead of re-initializing fresh;
-    /// (2) after every `publish_phase_2`, the shard re-writes the
-    ///     checkpoint to that key. URL form is the standard
-    ///     `redis://host[:port][/db]`. Requires `--shard-id`.
-    #[arg(long, requires = "shard_id")]
+    /// **Currently a no-op** — reserved for the fault-tolerance
+    /// feature. The shard's per-publish checkpoint writer is
+    /// disabled in the current build (see
+    /// `SHARD_CHECKPOINT_ENABLED` in `shard_grpc.rs`), so neither
+    /// this URL nor `--db-path` are actually used during steady-
+    /// state operation. The flag is kept on the CLI so existing
+    /// deploy scripts don't have to change shape when fault
+    /// tolerance lands; the read path (`load_aegon_checkpoint_from_db`)
+    /// remains compiled so flipping the feature on is one constant
+    /// flip + the bench-cluster bring-up.
+    ///
+    /// In the meantime: shards run with in-memory state only. A
+    /// shard process restart loses its polynomial state and must be
+    /// re-driven by the coord. Acceptable for bench/research, not
+    /// for production.
+    #[arg(long, requires = "shard_id", conflicts_with = "db_path")]
     db_url: Option<String>,
+
+    /// **Currently a no-op** — same status as `--db-url`. See that
+    /// flag's doc for the rationale. When fault tolerance is
+    /// enabled this will point at a private per-shard RocksDB
+    /// directory used solely for the shard's own checkpoint
+    /// (coord never reads it). Until then, leave unset.
+    #[arg(long, requires = "shard_id")]
+    db_path: Option<std::path::PathBuf>,
 
     /// Identifier this shard registers under in the coordinator's
     /// routing namespace. Required with `--db-url`; otherwise unused
@@ -125,9 +141,14 @@ async fn main() -> ExitCode {
         _e: PhantomData,
     };
 
-    let db_source = match &args.db_url {
-        Some(url) => DbSource::Redis(url.clone()),
-        None => DbSource::None,
+    let db_source = match (&args.db_url, &args.db_path) {
+        (Some(url), None) => DbSource::Redis(url.clone()),
+        (None, Some(path)) => DbSource::Rocks(path.clone()),
+        (None, None) => DbSource::None,
+        (Some(_), Some(_)) => {
+            eprintln!("error: --db-url and --db-path are mutually exclusive");
+            return ExitCode::from(2);
+        },
     };
     let shard_id = args.shard_id.unwrap_or(0);
 
@@ -229,8 +250,9 @@ async fn main() -> ExitCode {
         args.private,
     );
 
-    let server = match args.db_url.is_some() {
-        true => match ShardServer::<Bn254, Pcs, Sha256Hash>::new_with_checkpoint(
+    let has_db = !matches!(db_source, DbSource::None);
+    let server = if has_db {
+        match ShardServer::<Bn254, Pcs, Sha256Hash>::new_with_checkpoint(
             aegon,
             db_source.clone(),
             shard_id,
@@ -240,8 +262,9 @@ async fn main() -> ExitCode {
                 eprintln!("error wiring shard checkpoint sink: {e}");
                 return ExitCode::from(1);
             },
-        },
-        false => ShardServer::<Bn254, Pcs, Sha256Hash>::new(aegon),
+        }
+    } else {
+        ShardServer::<Bn254, Pcs, Sha256Hash>::new(aegon)
     };
     let result = if let Some(tls) = tls_config {
         server.serve_with_tls(args.bind, tls).await

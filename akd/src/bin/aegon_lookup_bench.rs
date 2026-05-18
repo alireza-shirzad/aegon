@@ -125,8 +125,13 @@ struct Args {
     /// the coordinator falls back to gRPC `EXISTS`-style probes against
     /// the owning shard for every slot check, which dominates latency
     /// on a WAN cluster.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "db_path")]
     db_url: Option<String>,
+
+    /// Local RocksDB directory for coordinator-side state. Mutually
+    /// exclusive with `--db-url`.
+    #[arg(long)]
+    db_path: Option<PathBuf>,
 
     /// Loopback address to bind the in-process gRPC coordinator on.
     /// The bench's own `CoordinatorClient` connects here. Pick a port
@@ -222,6 +227,8 @@ fn main() -> ExitCode {
     }
     if let Some(url) = &args.db_url {
         builder = builder.db(DbSource::Redis(url.clone()));
+    } else if let Some(path) = &args.db_path {
+        builder = builder.db(DbSource::Rocks(path.clone()));
     }
     let cfg = match builder.build() {
         Ok(c) => c,

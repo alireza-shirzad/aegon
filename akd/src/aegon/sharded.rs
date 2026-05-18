@@ -850,6 +850,7 @@ where
         let db: Option<Box<dyn Db>> = match &config.db {
             DbSource::None => None,
             DbSource::Redis(url) => Some(Box::new(RedisDb::connect(url)?)),
+            DbSource::Rocks(path) => Some(Box::new(crate::aegon::db::RocksDb::open(path)?)),
         };
 
         // Recovery path: if the connected DB already has coordinator
@@ -1146,20 +1147,34 @@ where
 
         // Pass 2 — assign new labels via open-addressing.
         //
-        // The Redis path runs in rounds: each round issues one pipelined
-        // EXISTS that covers every still-in-flight label at its current
-        // probe ctr (one TCP round-trip per round, not per probe). Then
-        // we resolve placements in original-input order — necessary to
-        // preserve the sequential implementation's "earlier label wins
-        // an in-batch collision" semantics — and advance any losers to
-        // ctr+1 for the next round. At low load factor (the common
-        // case) almost everyone places on round 0 and the whole pass
-        // collapses to a single round-trip.
+        // Round-based: each round issues ONE pipelined occupancy
+        // batch that covers every still-in-flight label at its
+        // current probe ctr (one network round-trip per round, not
+        // per probe). Then we resolve placements in original-input
+        // order — necessary to preserve the sequential
+        // implementation's "earlier label wins an in-batch
+        // collision" semantics — and advance any losers to ctr+1
+        // for the next round. At low load factor almost everyone
+        // places on round 0 and the whole pass collapses to a
+        // single round-trip.
         //
-        // The DbSource::None branch keeps the original per-label
-        // `assign_trail` for the in-process tests where there is no
-        // Redis and occupancy is checked against the shard's in-memory
-        // set instead.
+        // The coord's local DB is now the system-wide authority for
+        // slot occupancy — both Redis and RocksDB backends go
+        // through the same path. We always batch-query the local
+        // DB; for any probes the DB reports as empty we fall back
+        // to per-probe gRPC `is_index_slot_occupied` to the owning
+        // shard. The fallback handles the bench-cluster scenario
+        // where shards started with `--prefill-count N` (which
+        // populates the shard's polynomial in memory but
+        // deliberately does NOT write slot keys to the coord — see
+        // server.rs `prefill_with_random`). In a clean production
+        // deployment where every label arrives via a coord publish,
+        // the fallback never fires because the coord's local DB
+        // sees every placement.
+        //
+        // The DbSource::None branch falls back to per-label
+        // `assign_trail` against the shard's in-memory occupancy
+        // set (used by in-process tests).
         let total_capacity = 1u64 << self.log_capacity();
         if let Some(db) = self.db.as_ref() {
             let log_n_shards = self.log_n_shards;
@@ -1183,10 +1198,23 @@ where
                     })
                     .collect();
 
-                // One TCP round-trip for the whole round.
+                // One round-trip for the whole round's DB lookup.
                 let keys: Vec<Vec<u8>> =
                     probes.iter().map(|(_, _, _, k)| k.clone()).collect();
-                let occupied_prev = db.exists_many(&keys)?;
+                let mut occupied_prev = db.exists_many(&keys)?;
+                // For any probe the coord's DB doesn't have, fall
+                // back to asking the owning shard. This covers the
+                // bench prefill case (shard's polynomial has the
+                // slot, but the coord wasn't told). In steady-state
+                // production this loop never executes because the
+                // coord wrote every slot key itself.
+                for (i, (shard_id, slot_bits, _slot_idx, _key)) in probes.iter().enumerate() {
+                    if !occupied_prev[i]
+                        && self.shards[*shard_id as usize].is_index_slot_occupied(slot_bits)
+                    {
+                        occupied_prev[i] = true;
+                    }
+                }
 
                 // Resolve in input order so in-batch collisions are
                 // broken consistently with the sequential reference.
@@ -1617,10 +1645,17 @@ where
             // `aegon:slot:*` in the same atomic txn as the shard
             // commitments are finalized, so the two never disagree
             // unless we're mid-recovery.
-            let occupied_prev = if let Some(db) = &self.db {
-                db.exists(&key_slot(shard_id, slot_idx))?
-            } else {
-                self.shards[shard_id as usize].is_index_slot_occupied(&slot_bits)
+            // Coord's local DB is authoritative for slots the coord
+            // itself placed. For slots the coord doesn't know about
+            // (bench-prefill case), fall back to the shard's own
+            // in-memory occupancy. In production where every label
+            // arrives via a coord publish, the fallback never fires.
+            let occupied_prev = match self.db.as_ref() {
+                Some(db) => {
+                    db.exists(&key_slot(shard_id, slot_idx))?
+                        || self.shards[shard_id as usize].is_index_slot_occupied(&slot_bits)
+                },
+                None => self.shards[shard_id as usize].is_index_slot_occupied(&slot_bits),
             };
             let occupied_in_batch = in_batch_claimed[shard_id as usize].contains(&slot_idx);
             if !occupied_prev && !occupied_in_batch {

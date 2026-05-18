@@ -106,8 +106,14 @@ struct Args {
     /// to be correct against a prefilled cluster, every shard must
     /// have been started with the matching `--db-url` so the prefill
     /// also populated these keys.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "db_path")]
     db_url: Option<String>,
+
+    /// Local RocksDB directory for coordinator-side state. Mutually
+    /// exclusive with `--db-url`. When selected, slot-occupancy
+    /// probes fall back to per-probe gRPC calls to the owning shard.
+    #[arg(long)]
+    db_path: Option<PathBuf>,
 }
 
 fn main() -> ExitCode {
@@ -152,6 +158,8 @@ fn main() -> ExitCode {
     // falls back to gRPC occupancy checks (same correctness).
     if let Some(url) = &args.db_url {
         builder = builder.db(DbSource::Redis(url.clone()));
+    } else if let Some(path) = &args.db_path {
+        builder = builder.db(DbSource::Rocks(path.clone()));
     }
     let cfg = match builder.build() {
         Ok(c) => c,

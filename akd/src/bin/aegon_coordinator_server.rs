@@ -81,9 +81,18 @@ struct Args {
 
     /// Redis URL for coordinator-side open-addressing. Required when
     /// the shards were started with `--db-url` so the slot-occupancy
-    /// keys are populated.
-    #[arg(long)]
+    /// keys are populated. Mutually exclusive with `--db-path`.
+    #[arg(long, conflicts_with = "db_path")]
     db_url: Option<String>,
+
+    /// Local RocksDB directory for coordinator-side state (value,
+    /// routing, history, epoch commits, checkpoints). Process-local;
+    /// when set, slot-occupancy probes fall back to per-probe gRPC
+    /// `is_index_slot_occupied` calls to the owning shard instead of
+    /// pipelined `EXISTS` against shared Redis. Use this when the
+    /// dataset is too large to fit Redis RAM (target ~2^34 scale).
+    #[arg(long)]
+    db_path: Option<std::path::PathBuf>,
 
     /// If non-zero, publish `--seed-batch-size` deterministic
     /// `(label, value)` pairs immediately after setup so the
@@ -126,6 +135,8 @@ fn main() -> ExitCode {
     }
     if let Some(url) = &args.db_url {
         builder = builder.db(DbSource::Redis(url.clone()));
+    } else if let Some(path) = &args.db_path {
+        builder = builder.db(DbSource::Rocks(path.clone()));
     }
     let cfg = match builder.build() {
         Ok(c) => c,

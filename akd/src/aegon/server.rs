@@ -534,32 +534,15 @@ where
                 rand_value_state: self.rand_value_state.clone(),
             },
         );
-        // If the operator wired Redis in, also publish an occupancy
-        // bit per prefilled slot. The coordinator's open-addressing
-        // checks `aegon:slot:{shard_id}:{slot}` via EXISTS; without
-        // these writes it would believe the prefilled slots are empty
-        // and silently overwrite real entries on the next publish.
-        // Value is a marker — the production schema would store the
-        // owning label bytes, but prefilled rows have no real label
-        // and the bench never exercises the recovery path that reads
-        // them. Chunked so a 2^23-per-shard prefill doesn't try to
-        // pipeline 8M ops through one MULTI/EXEC.
-        if let DbSource::Redis(url) = db_source {
-            use super::db::{key_slot, Db, DbOp};
-            let db = RedisDb::connect(url)?;
-            const CHUNK: usize = 50_000;
-            let slots: Vec<usize> = filled_slots.into_iter().collect();
-            for chunk in slots.chunks(CHUNK) {
-                let ops: Vec<DbOp> = chunk
-                    .iter()
-                    .map(|&slot| DbOp::Set {
-                        key: key_slot(shard_id, slot),
-                        value: b"prefilled".to_vec(),
-                    })
-                    .collect();
-                db.write_atomic(&ops)?;
-            }
-        }
+        // DELIBERATELY no DB writes here. The architecture has
+        // shifted: the coordinator now owns all cross-process state
+        // in its own local DB, and shards don't talk to a database
+        // at all. The publish-time occupancy probe handles prefilled
+        // slots via a gRPC fallback when the coord's local DB has no
+        // entry (see `plan_phase_1_batches`). `db_source` is kept on
+        // this signature purely so callers don't have to change
+        // shape; it's unused by `prefill_with_random`.
+        let _ = (db_source, filled_slots, shard_id);
         Ok(())
     }
 
@@ -1620,13 +1603,16 @@ where
 // `audit::verify_invariance` for the verifier side.
 
 /// Try to load a previously-persisted [`AegonCheckpoint`] for the
-/// given shard out of Redis. Returns `Ok(None)` for a fresh DB (no
-/// `aegon:shard:{shard_id}:state` key) or `DbSource::None`. Returns
-/// `Err` if the key is present but malformed.
+/// given shard out of its private DB. Returns `Ok(None)` for a fresh
+/// DB (no `aegon:shard:{shard_id}:state` key) or `DbSource::None`.
+/// Returns `Err` if the key is present but malformed.
 ///
-/// Used by the `aegon_shard_server` binary on startup: if a checkpoint
-/// exists, the binary restores the shard's state from it instead of
-/// initializing fresh.
+/// TODO(shard-checkpoint-fault-tolerance): paired with the disabled
+/// per-publish writer in `shard_grpc.rs`. The current shipping
+/// configuration never writes checkpoints, so this function will
+/// always return `Ok(None)` from a fresh start. Kept compiled (not
+/// `#[cfg]`-gated) so the read-path code stays exercised and ready
+/// to flip on when fault tolerance is wired up.
 pub fn load_aegon_checkpoint_from_db<E, P>(
     db_source: &DbSource,
     shard_id: u32,
@@ -1637,22 +1623,20 @@ where
     AegonCheckpoint<E, P>: CanonicalDeserialize,
 {
     use super::db::Db;
-    match db_source {
-        DbSource::None => Ok(None),
-        DbSource::Redis(url) => {
-            let db = RedisDb::connect(url)?;
-            match db.get(&key_shard_state(shard_id))? {
-                Some(bytes) => {
-                    let ckpt = AegonCheckpoint::<E, P>::deserialize_compressed(&bytes[..])
-                        .map_err(|e| {
-                            AegonError::Database(format!(
-                                "deserialize shard {shard_id} checkpoint: {e}"
-                            ))
-                        })?;
-                    Ok(Some(ckpt))
-                },
-                None => Ok(None),
-            }
+    let db: Option<Box<dyn Db>> = match db_source {
+        DbSource::None => None,
+        DbSource::Redis(url) => Some(Box::new(RedisDb::connect(url)?)),
+        DbSource::Rocks(path) => Some(Box::new(super::db::RocksDb::open(path)?)),
+    };
+    let Some(db) = db else { return Ok(None) };
+    match db.get(&key_shard_state(shard_id))? {
+        Some(bytes) => {
+            let ckpt = AegonCheckpoint::<E, P>::deserialize_compressed(&bytes[..])
+                .map_err(|e| {
+                    AegonError::Database(format!("deserialize shard {shard_id} checkpoint: {e}"))
+                })?;
+            Ok(Some(ckpt))
         },
+        None => Ok(None),
     }
 }

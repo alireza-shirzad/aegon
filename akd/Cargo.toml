@@ -77,6 +77,12 @@ log = { version = "0.4", features = ["kv_unstable"] }
 prost = "0.13"
 rayon = { workspace = true }
 redis = { version = "0.27", default-features = false }
+# RocksDB engine for the second `Db` impl. Single-process, disk-backed
+# LSM store; selected via `DbSource::Rocks(PathBuf)`. Stays alongside
+# the Redis impl rather than replacing it so cluster benches can keep
+# using shared-Redis until cross-process state moves to gRPC fallback
+# everywhere.
+rocksdb = { version = "0.24", default-features = false, features = ["lz4"] }
 sha2 = { workspace = true }
 thiserror = { workspace = true }
 tokio = { version = "1", features = ["sync", "time", "rt", "rt-multi-thread", "net", "macros"] }
