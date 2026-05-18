@@ -9,7 +9,12 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::Arc;
 
+use akd::aegon::distributed_srs::{
+    run_distributed_compute, try_cache_hit, Phase, SrsBootstrapConfig, SrsBootstrapState,
+    SrsServer as SrsGrpcServer,
+};
 use akd::aegon::server::load_aegon_checkpoint_from_db;
 use akd::aegon::shard_grpc::{ShardServer, ShardServerTlsConfig};
 use akd::aegon::sharded::read_srs_from_file;
@@ -21,6 +26,7 @@ use ark_std::rand::SeedableRng;
 use clap::Parser;
 use rand_chacha::ChaCha20Rng;
 use std::marker::PhantomData;
+use tonic::transport::Server;
 
 type Pcs = KZHK<Bn254>;
 type Aegon = akd::aegon::Aegon<Bn254, Pcs, Sha256Hash>;
@@ -132,6 +138,36 @@ struct Args {
     /// generating a fresh masking package inline.
     #[arg(long)]
     masking_addr: Option<String>,
+
+    /// Bind address for the distributed-SRS-bootstrap gRPC service
+    /// (separate port from the main shard service). When set, the
+    /// shard:
+    ///
+    ///   1. Binds `SrsService` on this address before doing any heavy
+    ///      work,
+    ///   2. Tries to load a cached SRS from `--srs-cache-dir` keyed on
+    ///      `(shard_log_capacity, kzh_k, hash(setup_seed))`,
+    ///   3. On cache miss, blocks until an external bootstrap actor
+    ///      (`aegon_srs_bootstrap`) pushes trapdoors + peer endpoints
+    ///      via `BootstrapSrs`, then runs the distributed compute /
+    ///      slab exchange protocol with its peers,
+    ///   4. Writes the assembled SRS to the cache and continues to
+    ///      Aegon init + prefill + the main shard service.
+    ///
+    /// Requires `--setup-seed` (used both as the cache key and as a
+    /// safety check against the seed pushed by the bootstrap actor) and
+    /// `--shard-id`. Mutually exclusive with `--srs-path` (file-backed
+    /// SRS path) — `--srs-bind` triggers the distributed-gen path
+    /// exclusively.
+    #[arg(long, requires = "setup_seed", requires = "shard_id", conflicts_with = "srs_path")]
+    srs_bind: Option<SocketAddr>,
+
+    /// Cache directory for the distributed-gen SRS path. Each shard
+    /// writes its assembled SRS here so subsequent boots short-circuit
+    /// the distributed exchange. Honoured only when `--srs-bind` is
+    /// set. Default: `$HOME/.cache/aegon-srs`.
+    #[arg(long)]
+    srs_cache_dir: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -163,8 +199,92 @@ async fn main() -> ExitCode {
     };
     let shard_id = args.shard_id.unwrap_or(0);
 
-    let mut aegon = match (&args.srs_path, args.setup_seed) {
-        (Some(path), _) => {
+    // ---- SRS bootstrap state (only used in distributed-gen mode) ----
+    //
+    // Bound on its own port before any heavy work so the bootstrap
+    // actor can push trapdoors as soon as it's run. The state object
+    // is shared with the gRPC service (which fields incoming
+    // `BootstrapSrs` + `GetSrsSlab` + `WaitForReady` calls) and with
+    // the main control flow below (which polls it for trapdoors and
+    // publishes local slabs as they're computed).
+    let srs_state: Option<Arc<SrsBootstrapState<Bn254>>> = if let Some(addr) = args.srs_bind {
+        let seed = args.setup_seed.expect("--srs-bind requires --setup-seed (checked by clap)");
+        let cache_dir = args
+            .srs_cache_dir
+            .clone()
+            .or_else(|| {
+                std::env::var_os("HOME")
+                    .map(|h| PathBuf::from(h).join(".cache").join("aegon-srs"))
+            })
+            .unwrap_or_else(|| PathBuf::from(".aegon-srs-cache"));
+        eprintln!(
+            "[distributed-gen] cache_dir={} srs_bind={}",
+            cache_dir.display(),
+            addr,
+        );
+        let cfg = SrsBootstrapConfig {
+            shard_id,
+            log_capacity: args.shard_log_capacity as u32,
+            k: args.kzh_k as u32,
+            setup_seed: seed,
+            cache_dir,
+        };
+        let state = SrsBootstrapState::<Bn254>::new(cfg);
+
+        // Bind the SrsService gRPC server on `--srs-bind` in a
+        // background task. Keep it alive for the full process lifetime
+        // — bootstrap actor late-arriving `WaitForReady` polls keep
+        // working after the shard is Ready, and the cost of holding
+        // the listener is negligible.
+        let svc = SrsGrpcServer::new(Arc::clone(&state)).into_service();
+        tokio::spawn(async move {
+            if let Err(e) = Server::builder().add_service(svc).serve(addr).await {
+                eprintln!("srs service exited: {e}");
+            }
+        });
+        // Allow the listener a beat to come up before we start fielding
+        // peer connections.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        Some(state)
+    } else {
+        None
+    };
+
+    let mut aegon = match (&args.srs_path, args.setup_seed, &srs_state) {
+        // --srs-bind path: distributed gen (or cache hit) via the
+        // bootstrap actor + peers. This is the production-grade path.
+        (None, Some(_seed), Some(state)) => {
+            // Cache hit?
+            match try_cache_hit::<Bn254>(state).await {
+                Ok(Some((_up, pk, vk))) => {
+                    eprintln!("[distributed-gen] cache hit; skipping bootstrap handshake");
+                    build_aegon_from_srs(pk, vk, &aegon_cfg, &db_source, shard_id)
+                },
+                Ok(None) => {
+                    eprintln!(
+                        "[distributed-gen] cache miss — awaiting BootstrapSrs from bootstrap actor"
+                    );
+                    match run_distributed_compute::<Bn254>(Arc::clone(state)).await {
+                        Ok((_up, pk, vk)) => {
+                            eprintln!("[distributed-gen] SRS assembled + cached");
+                            build_aegon_from_srs(pk, vk, &aegon_cfg, &db_source, shard_id)
+                        },
+                        Err(e) => {
+                            eprintln!("[distributed-gen] error: {e}");
+                            return ExitCode::from(1);
+                        },
+                    }
+                },
+                Err(e) => {
+                    eprintln!("[distributed-gen] cache read error: {e}");
+                    return ExitCode::from(1);
+                },
+            }
+        },
+        // --srs-path path: load a pre-existing SRS file (production
+        // path without distributed gen — typically a trusted-setup
+        // ceremony output).
+        (Some(path), _, _) => {
             eprintln!("loading SRS from {}", path.display());
             let (pk, vk) = match read_srs_from_file::<Bn254, Pcs>(path) {
                 Ok(p) => p,
@@ -173,52 +293,34 @@ async fn main() -> ExitCode {
                     return ExitCode::from(1);
                 },
             };
-            // Checkpoint-recovery path: if a previous incarnation of
-            // this shard left a checkpoint behind, resume from it
-            // instead of starting fresh at epoch 0.
-            let recovered = match load_aegon_checkpoint_from_db::<Bn254, Pcs>(&db_source, shard_id) {
-                Ok(c) => c,
-                Err(e) => {
-                    eprintln!("error reading shard checkpoint: {e}");
-                    return ExitCode::from(1);
-                },
-            };
-            match recovered {
-                Some(ckpt) => {
-                    eprintln!(
-                        "resuming shard {shard_id} from Redis checkpoint at epoch {}",
-                        ckpt.epoch
-                    );
-                    match Aegon::restore_from_checkpoint(pk, vk, &aegon_cfg, ckpt) {
-                        Ok(a) => a,
-                        Err(e) => {
-                            eprintln!("error restoring Aegon from checkpoint: {e}");
-                            return ExitCode::from(1);
-                        },
-                    }
-                },
-                None => match Aegon::init(pk, vk, &aegon_cfg) {
-                    Ok(a) => a,
-                    Err(e) => {
-                        eprintln!("error initializing Aegon: {e}");
-                        return ExitCode::from(1);
-                    },
-                },
-            }
+            build_aegon_from_srs(pk, vk, &aegon_cfg, &db_source, shard_id)
         },
-        (None, Some(seed)) => {
+        // Legacy in-process gen via seed (no --srs-bind). Test mode.
+        (None, Some(seed), None) => {
             eprintln!("WARNING: generating SRS in-process from seed {seed} (test mode only)");
             let mut rng = ChaCha20Rng::seed_from_u64(seed);
             match Aegon::setup(&mut rng, &aegon_cfg) {
-                Ok(a) => a,
-                Err(e) => {
-                    eprintln!("error: {e}");
-                    return ExitCode::from(1);
-                },
+                Ok(a) => Ok(a),
+                Err(e) => Err(format!("setup: {e}")),
             }
         },
-        (None, None) => unreachable!("checked above"),
+        (None, None, _) => unreachable!("checked above"),
     };
+    let mut aegon = match aegon {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("error initializing Aegon: {e}");
+            return ExitCode::from(1);
+        },
+    };
+
+    // Distributed-gen path advances phase as we work through init +
+    // prefill so any `WaitForReady` poll has a useful status string.
+    if let Some(state) = &srs_state {
+        state
+            .set_phase(Phase::Initializing, "post-init")
+            .await;
+    }
 
     // Wire up the cluster's masking server (if any) so the shard's
     // value-side openings fetch one-shot ZK packages from it instead
@@ -243,6 +345,11 @@ async fn main() -> ExitCode {
     // commit + update_state pass at the end).
     if let Some(count) = args.prefill_count {
         if count > 0 {
+            if let Some(state) = &srs_state {
+                state
+                    .set_phase(Phase::Prefilling, "prefilling")
+                    .await;
+            }
             eprintln!(
                 "prefilling shard with {count} random entries (seed={})",
                 args.prefill_seed
@@ -255,6 +362,14 @@ async fn main() -> ExitCode {
                 return ExitCode::from(1);
             }
         }
+    }
+
+    // Releases any `WaitForReady` polls held by the bootstrap actor.
+    // Done before we bind ShardService so a poll racing the bind
+    // observes Ready first, not "service available but not really
+    // initialized."
+    if let Some(state) = &srs_state {
+        state.set_phase(Phase::Ready, "ready").await;
     }
 
     let tls_config = match (&args.tls_cert, &args.tls_key) {
@@ -303,4 +418,29 @@ async fn main() -> ExitCode {
         return ExitCode::from(1);
     }
     ExitCode::SUCCESS
+}
+
+/// Build an `Aegon` from prover/verifier params, honouring the checkpoint-
+/// recovery path. Centralised here so the file-load, distributed-gen,
+/// and (future) cache-hit paths all share the same checkpoint logic.
+fn build_aegon_from_srs(
+    pk: akd_core::aegon_crypto::pcs::kzhk::srs::KZHKProverParam<Bn254>,
+    vk: akd_core::aegon_crypto::pcs::kzhk::srs::KZHKVerifierParam<Bn254>,
+    aegon_cfg: &AegonConfig<Bn254, Pcs>,
+    db_source: &DbSource,
+    shard_id: u32,
+) -> Result<Aegon, String> {
+    let recovered = load_aegon_checkpoint_from_db::<Bn254, Pcs>(db_source, shard_id)
+        .map_err(|e| format!("read shard checkpoint: {e}"))?;
+    match recovered {
+        Some(ckpt) => {
+            eprintln!(
+                "resuming shard {shard_id} from checkpoint at epoch {}",
+                ckpt.epoch
+            );
+            Aegon::restore_from_checkpoint(pk, vk, aegon_cfg, ckpt)
+                .map_err(|e| format!("restore_from_checkpoint: {e}"))
+        },
+        None => Aegon::init(pk, vk, aegon_cfg).map_err(|e| format!("init: {e}")),
+    }
 }

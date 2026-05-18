@@ -1,0 +1,106 @@
+syntax = "proto3";
+
+package aegon.srs.v1;
+
+// Distributed SRS generation protocol.
+//
+// One bootstrap actor (typically the cluster coordinator, or a
+// standalone `aegon_srs_bootstrap` binary) samples the trapdoors
+// `(g, h, v, mu_mat)` deterministically from `--setup-seed`, pushes
+// them to every shard via `BootstrapSrs`, then polls `WaitForReady`
+// until every shard has its local SRS materialised. Inside that
+// window, shards exchange `H_t` slabs peer-to-peer via `GetSrsSlab`
+// streaming RPCs.
+//
+// Each shard caches its assembled SRS to disk keyed on
+// `(log_capacity, k, hash(setup_seed))`; on subsequent boots the
+// cache hit short-circuits the entire bootstrap path. The bootstrap
+// actor's `BootstrapSrs` call becomes a no-op in that case (the
+// shard ignores the pushed trapdoors and reports ready immediately).
+service SrsService {
+  // Push trapdoors to a shard and trigger distributed compute. Returns
+  // immediately; actual SRS assembly happens in a background task on
+  // the shard. The caller polls `WaitForReady` to know when the shard
+  // is ready for normal traffic.
+  rpc BootstrapSrs(BootstrapSrsRequest) returns (BootstrapSrsResponse);
+
+  // Stream a slab of `H_t` tensor entries from this shard. Each shard
+  // owns the flat-index range `[shard_id * len / n_shards, (shard_id +
+  // 1) * len / n_shards)` of every `H_t` tensor, and serves that
+  // range to its peers on demand. Wire encoding is C-order canonical
+  // uncompressed G1Affine bytes, chunked at ~64 MiB to avoid holding
+  // the whole slab on the wire at once.
+  rpc GetSrsSlab(GetSrsSlabRequest) returns (stream SrsSlabChunk);
+
+  // Block until the shard is ready for normal traffic (SRS assembled,
+  // Aegon initialised, prefill complete). Returns immediately if the
+  // shard is already ready.
+  rpc WaitForReady(WaitForReadyRequest) returns (WaitForReadyResponse);
+}
+
+message BootstrapSrsRequest {
+  // Setup seed (u64), included so the shard can sanity-check it
+  // matches its own --setup-seed CLI flag (which derives the cache
+  // file name). Mismatch returns FAILED_PRECONDITION.
+  uint64 setup_seed = 1;
+  // This shard's logical id, in [0, n_shards). Used to pick which slab
+  // of every H_t this shard computes locally.
+  uint32 shard_id = 2;
+  // Total shard count. The H_t flat-index space is partitioned
+  // evenly across [0, n_shards).
+  uint32 n_shards = 3;
+  // KZH-k block parameter and total log-capacity. Sanity-checked
+  // against this shard's CLI flags.
+  uint32 kzh_k = 4;
+  uint32 log_capacity = 5;
+  // Endpoints of all peer shards, indexed by shard_id. This shard's
+  // own endpoint at index `shard_id` is ignored. Each entry is a
+  // gRPC URL like "http://10.0.0.5:50051".
+  repeated string peer_endpoints = 6;
+  // Canonical-uncompressed-serialised trapdoors: (g, h, v, mu_mat).
+  // See `distributed_srs::Trapdoors` for the layout.
+  bytes trapdoors_uncompressed = 7;
+}
+
+message BootstrapSrsResponse {
+  // True if the shard already had a cached SRS at boot and is using
+  // it. The pushed trapdoors are discarded in that case. The caller
+  // should still call WaitForReady to know when prefill completes.
+  bool cache_hit = 1;
+}
+
+message GetSrsSlabRequest {
+  // Which H_t to fetch. `t` is 0-indexed: t=0 is H_1 (the big one),
+  // t=k-1 is H_k.
+  uint32 t = 1;
+  // The slab's flat-index range, half-open. The server validates this
+  // matches its own assigned slab; mismatched ranges return
+  // FAILED_PRECONDITION.
+  uint64 range_start = 2;
+  uint64 range_end = 3;
+}
+
+message SrsSlabChunk {
+  // C-order canonical-uncompressed G1Affine bytes for a contiguous
+  // sub-range of the requested slab. Concatenating all chunks in
+  // order reconstructs the slab. Each chunk holds an integer number
+  // of G1Affine elements.
+  bytes points_uncompressed = 1;
+  // Number of G1Affine elements in this chunk. Used by the consumer
+  // to size its per-chunk deserialise pass.
+  uint32 n_points = 2;
+}
+
+message WaitForReadyRequest {
+  // Maximum time the server may spend blocking before returning a
+  // not-ready response. Zero = block indefinitely.
+  uint64 timeout_secs = 1;
+}
+
+message WaitForReadyResponse {
+  // True once SRS assembly + Aegon init + prefill have all completed.
+  bool ready = 1;
+  // Best-effort human-readable status for logs (e.g. "computing slab
+  // 3/10", "exchanging with peer 5", "prefilling"). Optional.
+  string status = 2;
+}

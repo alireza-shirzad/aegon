@@ -3,16 +3,24 @@
 # run aegon_coordinator_bench against it.
 #
 # Subcommands:
-#   up        Provision VPC + firewall + N high-memory shard VMs + coordinator VM
-#   deploy    Build binaries locally (in a Docker linux/amd64 container on
-#             macOS), scp aegon_shard_server to every shard VM, scp
-#             aegon_coordinator_bench to the coordinator. Each shard
-#             server generates its SRS in-process from --setup-seed and
-#             then prefills its polynomials with --prefill-count entries.
-#   bench     Run aegon_coordinator_bench on the coordinator, retrieve
-#             /tmp/aegon-bench.json from it
-#   logs N    Tail the shard log on aegon-shard-N
-#   down      Delete every instance + the VPC this script created
+#   up         Provision VPC + firewall + N high-memory shard VMs + coordinator VM
+#   deploy     Build binaries locally (in a Docker linux/amd64 container on
+#              macOS), scp aegon_shard_server to every shard VM, scp
+#              aegon_coordinator_bench + aegon_srs_bootstrap to the
+#              coordinator. Each shard binds its SrsService on :SRS_PORT
+#              and parks in "awaiting-bootstrap" state — no SRS or
+#              prefill work yet. Returns quickly.
+#   bootstrap  Run aegon_srs_bootstrap on the coordinator: sample
+#              trapdoors deterministically from --setup-seed, push them
+#              to every shard, then poll WaitForReady until each shard
+#              has run distributed SRS gen (or cache hit) + Aegon init
+#              + prefill. First boot per (log_cap, k, seed) does the
+#              full distributed exchange; subsequent boots hit the cache
+#              and finish in seconds.
+#   bench      Run aegon_coordinator_bench on the coordinator, retrieve
+#              /tmp/aegon-bench.json from it
+#   logs N     Tail the shard log on aegon-shard-N
+#   down       Delete every instance + the VPC this script created
 #
 # Required env (or defaults):
 #   PROJECT             GCP project ID                (no default; required)
@@ -75,12 +83,25 @@ REDIS_MACHINE_TYPE="${REDIS_MACHINE_TYPE:-n2-standard-2}"
 
 NETWORK="aegon-bench-vpc"
 FIREWALL_GRPC="aegon-bench-grpc"
+FIREWALL_SRS="aegon-bench-srs"
 FIREWALL_SSH="aegon-bench-ssh"
 FIREWALL_REDIS="aegon-bench-redis"
 SHARD_TAG="aegon-bench-shard"
 COORD_TAG="aegon-bench-coord"
 DB_TAG="aegon-bench-db"
 SHARD_PORT=50051
+# Distributed-SRS-bootstrap port. Each shard binds aegon_shard_server's
+# SrsService here (separate listener from SHARD_PORT) so peers can pull
+# H_t slabs from each other during distributed gen, and so the
+# `aegon_srs_bootstrap` binary on the coordinator can push trapdoors +
+# poll WaitForReady. Kept distinct from SHARD_PORT so the coordinator's
+# normal shard client never accidentally hits the SRS-only listener.
+SRS_PORT=50052
+# On-shard cache directory for the assembled SRS. After the first
+# `bootstrap`, every shard caches its SRS here, so a subsequent boot
+# (e.g. via `restart-shards`) short-circuits the distributed exchange
+# and reaches Ready in seconds rather than minutes.
+SRS_CACHE_DIR='$HOME/artifacts/srs-cache'
 REDIS_PORT=6379
 ROUTER="aegon-bench-router"
 NAT="aegon-bench-nat"
@@ -171,6 +192,20 @@ shard_endpoints_csv() {
   echo "${out[*]}"
 }
 
+# Same shape as `shard_endpoints_csv` but pointing at every shard's
+# distributed-SRS-bootstrap port. Consumed by `cmd_bootstrap` to tell
+# the bootstrap binary where each shard's `SrsService` listener lives
+# (and pushed through to every shard so they know each other's
+# GetSrsSlab URLs for the slab exchange phase).
+srs_endpoints_csv() {
+  local out=()
+  for ((i = 0; i < N_SHARDS; i++)); do
+    out+=("http://$(shard_internal_ip "$i"):$SRS_PORT")
+  done
+  local IFS=,
+  echo "${out[*]}"
+}
+
 cmd_up() {
   require_project
   require_power_of_two "$N_SHARDS"
@@ -219,6 +254,33 @@ cmd_up() {
       --network="$NETWORK" \
       --allow="tcp:$SHARD_PORT" \
       --source-tags="$COORD_TAG" \
+      --target-tags="$SHARD_TAG" >/dev/null
+  fi
+
+  # ---- firewall: SRS-bootstrap port (shard <-> shard, coord -> shard) ----
+  # Two source tags here: shards talk to each other on SRS_PORT for the
+  # H_t slab exchange (every shard pulls (N-1)/N of every tensor from
+  # its peers), and the coordinator talks to shards on SRS_PORT so the
+  # `aegon_srs_bootstrap` binary running on the coord can push trapdoors
+  # and poll WaitForReady.
+  local srs_want="$SHARD_TAG,$COORD_TAG"
+  if gcloud compute firewall-rules describe "$FIREWALL_SRS" >/dev/null 2>&1; then
+    local srs_have
+    srs_have="$(gcloud compute firewall-rules describe "$FIREWALL_SRS" \
+      --format='value(sourceTags.list())' 2>/dev/null)"
+    if [[ "$srs_have" != "$srs_want" ]]; then
+      log "firewall $FIREWALL_SRS: updating source-tags to '$srs_want'"
+      gcloud compute firewall-rules update "$FIREWALL_SRS" \
+        --source-tags="$srs_want" >/dev/null
+    else
+      log "firewall $FIREWALL_SRS already correct"
+    fi
+  else
+    log "creating firewall $FIREWALL_SRS (shard+coord -> shards:$SRS_PORT)"
+    gcloud compute firewall-rules create "$FIREWALL_SRS" \
+      --network="$NETWORK" \
+      --allow="tcp:$SRS_PORT" \
+      --source-tags="$srs_want" \
       --target-tags="$SHARD_TAG" >/dev/null
   fi
 
@@ -342,15 +404,22 @@ restart_shard() {
   local db_ip="$4"
   local shard_prefill_seed=$((PREFILL_SEED + i))
   log "[$name] starting shard server (shard_id=$i, prefill_count=$per_shard, prefill_seed=$shard_prefill_seed)"
+  # Distributed-SRS mode: pass `--srs-bind` + `--srs-cache-dir`. On first
+  # boot every shard sits in "awaiting-bootstrap" on SRS_PORT until the
+  # coordinator runs `bench-cluster.sh bootstrap`; on subsequent boots
+  # (e.g. `restart-shards`) the cache hits and the shard reaches Ready
+  # without needing the bootstrap actor.
   remote "$name" "if [ -f /tmp/aegon-shard.pid ]; then \
       kill \$(cat /tmp/aegon-shard.pid) 2>/dev/null || true; \
     fi; \
     pkill -x aegon_shard_ser 2>/dev/null || true; \
     sleep 2; \
-    mkdir -p \$HOME/aegon-run \$HOME/artifacts/srs && \
+    mkdir -p \$HOME/aegon-run $SRS_CACHE_DIR && \
     cd \$HOME/aegon-run && \
     nohup $REMOTE_BIN_DIR/aegon_shard_server \
       --bind 0.0.0.0:$SHARD_PORT \
+      --srs-bind 0.0.0.0:$SRS_PORT \
+      --srs-cache-dir $SRS_CACHE_DIR \
       --shard-log-capacity $SHARD_LOG_CAPACITY \
       --kzh-k $KZH_K \
       --setup-seed $SETUP_SEED \
@@ -392,15 +461,16 @@ cmd_deploy() {
         apt-get update >/dev/null && \
         apt-get install -y --no-install-recommends protobuf-compiler ca-certificates >/dev/null && \
         cargo build --release -p akd $cargo_features --target x86_64-unknown-linux-gnu \
-          --bin aegon_shard_server --bin aegon_coordinator_bench"
+          --bin aegon_shard_server --bin aegon_coordinator_bench --bin aegon_srs_bootstrap"
     remote_bin_dir="$REPO_ROOT/target/x86_64-unknown-linux-gnu/release"
   else
-    log "building release binaries (aegon_shard_server, aegon_coordinator_bench)"
+    log "building release binaries (aegon_shard_server, aegon_coordinator_bench, aegon_srs_bootstrap)"
     (cd "$REPO_ROOT" && cargo build --release -p akd $cargo_features \
-      --bin aegon_shard_server --bin aegon_coordinator_bench) >/dev/null
+      --bin aegon_shard_server --bin aegon_coordinator_bench --bin aegon_srs_bootstrap) >/dev/null
   fi
   [[ -x "$remote_bin_dir/aegon_shard_server" ]]      || die "aegon_shard_server missing"
   [[ -x "$remote_bin_dir/aegon_coordinator_bench" ]] || die "aegon_coordinator_bench missing"
+  [[ -x "$remote_bin_dir/aegon_srs_bootstrap" ]]     || die "aegon_srs_bootstrap missing"
 
   local per_shard; per_shard="$(prefill_per_shard)"
   log "shards will prefill ${per_shard} entries each (total = 2^$TOTAL_PRELOAD_LOG2)"
@@ -474,16 +544,18 @@ cmd_deploy() {
 
   # ---- push to coordinator ----
   local cname; cname="$(coord_name)"
-  log "[$cname] uploading aegon_coordinator_bench"
+  log "[$cname] uploading aegon_coordinator_bench + aegon_srs_bootstrap"
   scp_to "$cname" "$remote_bin_dir/aegon_coordinator_bench"
+  scp_to "$cname" "$remote_bin_dir/aegon_srs_bootstrap"
   remote "$cname" "sudo mkdir -p $REMOTE_BIN_DIR && \
     sudo mv /tmp/aegon_coordinator_bench $REMOTE_BIN_DIR/ && \
-    sudo chmod +x $REMOTE_BIN_DIR/aegon_coordinator_bench"
+    sudo mv /tmp/aegon_srs_bootstrap $REMOTE_BIN_DIR/ && \
+    sudo chmod +x $REMOTE_BIN_DIR/aegon_coordinator_bench $REMOTE_BIN_DIR/aegon_srs_bootstrap"
 
-  log "deploy started. shards are doing SRS gen + prefill in parallel."
-  log "at log_cap=$SHARD_LOG_CAPACITY this takes a while — check progress with"
-  log "  ./scripts/bench-cluster.sh logs 0"
-  log "wait for 'aegon_shard_server listening on ...' on every shard before running bench."
+  log "deploy done. shards are awaiting BootstrapSrs on :$SRS_PORT."
+  log "next: ./scripts/bench-cluster.sh bootstrap"
+  log "  (on cache hit, bootstrap completes in seconds; on cache miss it"
+  log "  pushes trapdoors + waits for distributed gen + prefill across all shards.)"
 }
 
 # Restart every shard server with a fresh --prefill-count, reusing the
@@ -527,6 +599,41 @@ cmd_restart_shards() {
     die "$failed shard restart(s) failed — inspect output above and run 'logs <i>' to debug"
   fi
   log "all shards restarted. wait for 'aegon_shard_server listening on ...' on each."
+}
+
+# Run aegon_srs_bootstrap on the coordinator to drive the distributed
+# SRS gen across all shards. Sends one BootstrapSrs RPC per shard to
+# its SrsService port (sampling trapdoors from --setup-seed), then
+# polls WaitForReady on every shard until they all transition through
+# distributed compute + slab exchange + Aegon init + prefill.
+#
+# Behaviour:
+#   * On cache hit (every shard has a `.cache` file under
+#     $SRS_CACHE_DIR matching log_cap + k + seed-hash): runs in
+#     seconds — the BootstrapSrs RPC returns cache_hit=true and
+#     shards report Ready almost immediately.
+#   * On cache miss: drives the full distributed-gen path. Each shard
+#     computes its slab of every H_t in parallel, exchanges slabs
+#     peer-to-peer over $SRS_PORT, assembles the SRS, writes the
+#     cache, runs Aegon init + prefill, reports Ready.
+#
+# Run after `deploy` and before `bench` / `lookup-bench`.
+cmd_bootstrap() {
+  require_project
+  require_power_of_two "$N_SHARDS"
+
+  local cname; cname="$(coord_name)"
+  local srs_csv; srs_csv="$(srs_endpoints_csv)"
+  log "srs endpoints (first 2 shown): $(echo "$srs_csv" | cut -d, -f1-2),..."
+  log "[$cname] running aegon_srs_bootstrap (seed=$SETUP_SEED)"
+  remote "$cname" \
+    "$REMOTE_BIN_DIR/aegon_srs_bootstrap \
+       --shard-log-capacity $SHARD_LOG_CAPACITY \
+       --kzh-k $KZH_K \
+       --setup-seed $SETUP_SEED \
+       --shard-endpoints $srs_csv" \
+    stream
+  log "bootstrap done. cluster ready for ./scripts/bench-cluster.sh bench"
 }
 
 cmd_bench() {
@@ -772,7 +879,7 @@ cmd_down() {
     gcloud compute instances delete "$dname" --zone="$ZONE" --quiet >/dev/null
   fi
 
-  for fw in "$FIREWALL_GRPC" "$FIREWALL_REDIS" "$FIREWALL_SSH"; do
+  for fw in "$FIREWALL_GRPC" "$FIREWALL_SRS" "$FIREWALL_REDIS" "$FIREWALL_SSH"; do
     if gcloud compute firewall-rules describe "$fw" >/dev/null 2>&1; then
       log "deleting firewall $fw"
       gcloud compute firewall-rules delete "$fw" --quiet >/dev/null
@@ -801,10 +908,20 @@ usage: $0 <subcommand>
 
   up               Provision VPC, firewall, $N_SHARDS shards + coordinator
   deploy           Build binaries, push to every node, start shard servers
-                   (each does in-process SRS gen + --prefill-count locally)
+                   in "awaiting-bootstrap" state. Shards bind their
+                   SrsService on :$SRS_PORT and wait for the bootstrap
+                   step before doing any SRS / prefill work.
+  bootstrap        Run aegon_srs_bootstrap on the coordinator: sample
+                   trapdoors from --setup-seed, push them to every
+                   shard's SrsService, poll WaitForReady until all
+                   shards finish distributed SRS gen + prefill. On
+                   cache hit (re-runs with the same seed) the
+                   bootstrap completes in seconds.
   restart-shards   Restart all shards with a fresh --prefill-count using
                    already-uploaded binaries + on-disk SRS cache + FLUSHALL.
                    Cheap per-call (~30 s) — use in (prefill,batch) sweeps.
+                   Cache hit makes the bootstrap step a no-op too, so
+                   follow with `bootstrap` then `bench`.
   bench            Run aegon_coordinator_bench on the coordinator, fetch JSON
   lookup-bench     Run aegon_lookup_bench on the coordinator (publishes
                    LOOKUP_PRELOAD_COUNT labels then samples
@@ -834,6 +951,7 @@ main() {
   case "$sub" in
     up)             cmd_up ;;
     deploy)         cmd_deploy ;;
+    bootstrap)      cmd_bootstrap ;;
     restart-shards) cmd_restart_shards ;;
     bench)          cmd_bench ;;
     lookup-bench)   cmd_lookup_bench ;;

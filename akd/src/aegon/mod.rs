@@ -17,6 +17,7 @@ pub mod config;
 pub mod consistency;
 pub mod coordinator_grpc;
 pub mod db;
+pub mod distributed_srs;
 pub mod error;
 pub(crate) mod fs;
 pub mod hash;
