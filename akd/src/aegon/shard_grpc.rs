@@ -167,6 +167,27 @@ where
     fn verifier_context(&self) -> VerifierContext<E, P>;
 
     fn log_capacity(&self) -> usize;
+
+    /// Pre-populate this shard's polynomials with `count` random
+    /// `(slot, h_label, h_value)` entries. Drives the publish bench's
+    /// fill-percentage sweep.
+    ///
+    /// Only callable on a freshly-`init`-ed shard at epoch 0 with no
+    /// pending publish (matches `Aegon::prefill_random`). Default
+    /// returns `AegonError::Config(...)` so the gRPC `ShardClient`
+    /// impl, which has no path to call into a remote shard's prefill,
+    /// can keep the no-op default — remote prefill is driven at boot
+    /// time via `aegon_shard_server --prefill-count`.
+    fn prefill_random_in_place(
+        &mut self,
+        _count: usize,
+        _seed: u64,
+    ) -> Result<(), AegonError> {
+        Err(AegonError::Config(
+            "prefill_random_in_place not supported via this transport — set --prefill-count at shard boot time"
+                .into(),
+        ))
+    }
 }
 
 // ---------- in-process impl: Aegon directly is a ShardHandle -----------
@@ -273,6 +294,19 @@ where
 
     fn verifier_context(&self) -> VerifierContext<E, P> {
         Aegon::verifier_context(self)
+    }
+
+    fn prefill_random_in_place(
+        &mut self,
+        count: usize,
+        seed: u64,
+    ) -> Result<(), AegonError> {
+        use ark_std::rand::SeedableRng;
+        let mut rng = rand_chacha::ChaCha20Rng::seed_from_u64(seed);
+        // `shard_id`/`db_source` arguments to Aegon::prefill_random are
+        // legacy — the implementation ignores both (the comment on
+        // server.rs:573 spells it out). Pass `DbSource::None` + `0`.
+        Aegon::prefill_random(self, &mut rng, count, &super::DbSource::None, 0)
     }
 
     fn log_capacity(&self) -> usize {

@@ -24,7 +24,9 @@ use std::marker::PhantomData;
 
 use ark_ec::pairing::Pairing;
 use ark_ff::{Field, Zero};
-use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
+use ark_serialize::{
+    CanonicalDeserialize, CanonicalSerialize, Compress, SerializationError, Valid, Validate,
+};
 use ark_std::rand::Rng;
 use akd_core::aegon_crypto::pcs::PCSGlobalParam;
 use akd_core::aegon_crypto::transcript::IOPTranscript;
@@ -433,11 +435,77 @@ struct RecoveredState<E: Pairing, P: AegonPcs<E>> {
 /// External epoch commitment exposed by [`ShardedAegon::current_commitment`].
 /// `merkle_root` is the root over `per_shard`; `per_shard[i]` is the
 /// `EpochCommitment` produced by shard `i` for this epoch.
-#[derive(Debug, CanonicalSerialize, CanonicalDeserialize)]
+///
+/// ## Single Merkle tree, not four
+///
+/// Each leaf is `H("aegon.sharded.leaf" || index_com || value_com ||
+/// rand_index_com || rand_value_com)` for one shard — so all four
+/// per-shard commitments live in the same leaf and the same path
+/// covers all four polynomials. That's a deliberate compression
+/// (saves 3× the path digests and 3 independent Merkle roots);
+/// it does mean opening any of the four polynomials at a slot
+/// reveals all four commits for the owning shard.
+///
+/// ## Cached paths
+///
+/// `paths[i]` is the sibling-only Merkle path from shard `i`'s leaf
+/// to `merkle_root`. Eagerly computed once in
+/// [`ShardedEpochCommitment::with_per_shard`] (alongside the root),
+/// so the publish + lookup + history paths can read pre-built path
+/// data via [`merkle_path`](Self::merkle_path) instead of rebuilding
+/// the whole tree on every opening.
+///
+/// ## Wire format
+///
+/// The `paths` field is a server-side cache, **not** part of the
+/// published bytes — auditors and verifiers can rebuild it from
+/// `per_shard` on their own, so we don't pay the ~`n × log(n) × 32 B`
+/// cost on the wire. Deserialisation rebuilds the cache from
+/// `per_shard` automatically.
+///
+/// ## Single-shard degenerate case
+///
+/// When `n_shards = 1`: `paths[0]` is empty and `merkle_root` equals
+/// `merkle_leaf(per_shard[0])`. The verifier path-walk loop is a
+/// no-op and the leaf hash IS the dictionary commitment. No special
+/// branch is needed in callers — empty path is handled uniformly.
+#[derive(Debug)]
 pub struct ShardedEpochCommitment<E: Pairing, P: AegonPcs<E>> {
     pub epoch: u64,
     pub merkle_root: EpochDigest,
     pub per_shard: Vec<EpochCommitment<E, P>>,
+    /// Sibling-only Merkle paths, one per shard. Derived from
+    /// `per_shard` and never serialised — see the type-level docs.
+    /// Kept `pub(crate)` so the constructor is the only public way
+    /// to produce a well-formed instance.
+    pub(crate) paths: Vec<Vec<EpochDigest>>,
+}
+
+impl<E: Pairing, P: AegonPcs<E>> ShardedEpochCommitment<E, P> {
+    /// Construct a commitment for `(epoch, per_shard)` by computing the
+    /// root and all sibling paths in a single pass over the Merkle
+    /// tree. Use this everywhere a `ShardedEpochCommitment` is built —
+    /// it's the only public way to populate the `paths` cache.
+    ///
+    /// `per_shard.len()` must be a power of two (asserted by the
+    /// underlying tree-build helper).
+    pub fn with_per_shard(epoch: u64, per_shard: Vec<EpochCommitment<E, P>>) -> Self {
+        let (merkle_root, paths) = build_merkle_root_and_paths::<E, P>(&per_shard);
+        Self {
+            epoch,
+            merkle_root,
+            per_shard,
+            paths,
+        }
+    }
+
+    /// Sibling-only Merkle path from shard `shard_id`'s leaf up to
+    /// `merkle_root`. Pre-built; O(1) lookup at every call site that
+    /// previously walked `build_merkle_path`. Returns an empty slice
+    /// at `n_shards = 1`.
+    pub fn merkle_path(&self, shard_id: usize) -> &[EpochDigest] {
+        &self.paths[shard_id]
+    }
 }
 
 impl<E: Pairing, P: AegonPcs<E>> Clone for ShardedEpochCommitment<E, P> {
@@ -446,7 +514,82 @@ impl<E: Pairing, P: AegonPcs<E>> Clone for ShardedEpochCommitment<E, P> {
             epoch: self.epoch,
             merkle_root: self.merkle_root,
             per_shard: self.per_shard.clone(),
+            paths: self.paths.clone(),
         }
+    }
+}
+
+// Manual ark-serialize impls — the `paths` cache is derivable from
+// `per_shard`, so the wire format only carries `(epoch, merkle_root,
+// per_shard)` and deserialisation rebuilds the cache. This keeps the
+// on-disk + bulletin-board encoding byte-identical to what the older
+// derive-based impl produced.
+impl<E: Pairing, P: AegonPcs<E>> CanonicalSerialize for ShardedEpochCommitment<E, P>
+where
+    EpochCommitment<E, P>: CanonicalSerialize,
+{
+    fn serialize_with_mode<W: std::io::Write>(
+        &self,
+        mut writer: W,
+        compress: Compress,
+    ) -> Result<(), SerializationError> {
+        self.epoch.serialize_with_mode(&mut writer, compress)?;
+        self.merkle_root
+            .serialize_with_mode(&mut writer, compress)?;
+        self.per_shard
+            .serialize_with_mode(&mut writer, compress)?;
+        Ok(())
+    }
+
+    fn serialized_size(&self, compress: Compress) -> usize {
+        self.epoch.serialized_size(compress)
+            + self.merkle_root.serialized_size(compress)
+            + self.per_shard.serialized_size(compress)
+    }
+}
+
+impl<E: Pairing, P: AegonPcs<E>> Valid for ShardedEpochCommitment<E, P>
+where
+    EpochCommitment<E, P>: Valid,
+{
+    fn check(&self) -> Result<(), SerializationError> {
+        self.epoch.check()?;
+        self.merkle_root.check()?;
+        self.per_shard.check()?;
+        // `paths` is derived from `per_shard`, no independent validity
+        // condition to verify.
+        Ok(())
+    }
+}
+
+impl<E: Pairing, P: AegonPcs<E>> CanonicalDeserialize for ShardedEpochCommitment<E, P>
+where
+    EpochCommitment<E, P>: CanonicalDeserialize,
+{
+    fn deserialize_with_mode<R: std::io::Read>(
+        mut reader: R,
+        compress: Compress,
+        validate: Validate,
+    ) -> Result<Self, SerializationError> {
+        let epoch = u64::deserialize_with_mode(&mut reader, compress, validate)?;
+        let merkle_root =
+            <EpochDigest>::deserialize_with_mode(&mut reader, compress, validate)?;
+        let per_shard =
+            Vec::<EpochCommitment<E, P>>::deserialize_with_mode(&mut reader, compress, validate)?;
+        // Rebuild the path cache deterministically from per_shard;
+        // sanity-check that the stored `merkle_root` matches what
+        // per_shard reconstructs (catches truncated reads + tampering
+        // at the wire layer).
+        let (recomputed_root, paths) = build_merkle_root_and_paths::<E, P>(&per_shard);
+        if recomputed_root != merkle_root {
+            return Err(SerializationError::InvalidData);
+        }
+        Ok(Self {
+            epoch,
+            merkle_root,
+            per_shard,
+            paths,
+        })
     }
 }
 
@@ -971,12 +1114,8 @@ where
 
         let initial_per_shard: Vec<EpochCommitment<E, P>> =
             shards.iter().map(|s| s.current_commitment()).collect();
-        let initial_root = merkle_root(&initial_per_shard);
-        let initial_commit = ShardedEpochCommitment {
-            epoch: 0,
-            merkle_root: initial_root,
-            per_shard: initial_per_shard,
-        };
+        let initial_commit =
+            ShardedEpochCommitment::<E, P>::with_per_shard(0, initial_per_shard);
 
         // Coordinator-side KV store. Connect eagerly so a misconfigured
         // URL fails at setup, not on the first publish.
@@ -1139,6 +1278,61 @@ where
 
     pub fn epoch_commitment(&self, epoch: u64) -> Option<ShardedEpochCommitment<E, P>> {
         self.epoch_commits.get(epoch as usize).cloned()
+    }
+
+    /// Bench-only: populate every (in-process) shard's polynomials with
+    /// `total_count` random `(slot, h_label, h_value)` entries, evenly
+    /// split across shards, then refresh the cached epoch-0 commit so
+    /// the next `publish` sees the prefilled state. Used by
+    /// `aegon_publish_bench` to sweep across fill percentages without
+    /// having to actually drive the publish flow for hundreds of
+    /// thousands of entries.
+    ///
+    /// Requires every shard's [`ShardHandle::prefill_random_in_place`]
+    /// to succeed — which is only true for in-process shards (the
+    /// gRPC client transport returns `Err`, since remote shards
+    /// prefill at boot time via `aegon_shard_server --prefill-count`).
+    /// Distributed-mode benches should prefill via the shard binary
+    /// and then run this with `total_count = 0`.
+    ///
+    /// `seed_base` deterministically distinguishes per-shard prefill:
+    /// shard `i` is seeded with `seed_base.wrapping_add(i as u64)`,
+    /// mirroring the bench-cluster.sh pattern `PREFILL_SEED + i`.
+    pub fn prefill_random_per_shard(
+        &mut self,
+        total_count: u64,
+        seed_base: u64,
+    ) -> Result<(), AegonError> {
+        let n_shards = self.shards.len();
+        if n_shards == 0 {
+            return Err(AegonError::Config("prefill: no shards".into()));
+        }
+        // Even split with leftover assigned to the first `r` shards.
+        let per_shard = total_count / n_shards as u64;
+        let leftover = (total_count % n_shards as u64) as usize;
+        for (i, shard) in self.shards.iter_mut().enumerate() {
+            let count_i = per_shard + if i < leftover { 1 } else { 0 };
+            let seed_i = seed_base.wrapping_add(i as u64);
+            shard.prefill_random_in_place(count_i as usize, seed_i)?;
+        }
+        // Re-snapshot every shard's current_commitment() and rebuild
+        // the cached epoch-0 commit — the Merkle root over the per-
+        // shard commits has changed.
+        let per_shard: Vec<EpochCommitment<E, P>> = self
+            .shards
+            .iter()
+            .map(|s| s.current_commitment())
+            .collect();
+        let refreshed = ShardedEpochCommitment::<E, P>::with_per_shard(0, per_shard);
+        // `epoch_commits` is the cached chain of commits; slot 0 is
+        // epoch 0. `setup` always pushes one entry there. Overwrite
+        // rather than push.
+        if self.epoch_commits.is_empty() {
+            self.epoch_commits.push(refreshed);
+        } else {
+            self.epoch_commits[0] = refreshed;
+        }
+        Ok(())
     }
 
     /// Apply a batch of updates and produce a new epoch.
@@ -1518,12 +1712,8 @@ where
         self.r_index = new_r_index;
         self.r_value = new_r_value;
         self.epoch += 1;
-        let merkle_root = merkle_root(&per_shard_commits);
-        let sharded_commit = ShardedEpochCommitment {
-            epoch: self.epoch,
-            merkle_root,
-            per_shard: per_shard_commits,
-        };
+        let sharded_commit =
+            ShardedEpochCommitment::<E, P>::with_per_shard(self.epoch, per_shard_commits);
         self.epoch_commits.push(sharded_commit.clone());
         sharded_commit
     }
@@ -1699,9 +1889,9 @@ where
                 continue;
             };
             let prev_leaf = prev_sharded.per_shard[shard_id].clone();
-            let prev_merkle_path = build_merkle_path(&prev_sharded.per_shard, shard_id);
+            let prev_merkle_path = prev_sharded.merkle_path(shard_id).to_vec();
             let post_leaf = sharded_commit.per_shard[shard_id].clone();
-            let post_merkle_path = build_merkle_path(&sharded_commit.per_shard, shard_id);
+            let post_merkle_path = sharded_commit.merkle_path(shard_id).to_vec();
             for vc in &history.value_changes {
                 // Find the label that owns this (shard_id, slot_bits).
                 // Must be in `slot_to_label` because every value change
@@ -1792,7 +1982,7 @@ where
                     ))
                 })?;
             let post_leaf = sharded_commit.per_shard[shard_id as usize].clone();
-            let post_merkle_path = build_merkle_path(&sharded_commit.per_shard, shard_id as usize);
+            let post_merkle_path = sharded_commit.merkle_path(shard_id as usize).to_vec();
             let stored = StoredLabelPlacement::<E, P> {
                 epoch: sharded_commit.epoch,
                 shard_id,
@@ -1892,7 +2082,7 @@ where
             let (evaluation, proof) =
                 self.shards[*shard_id as usize].open_index_at_slot(slot_bits)?;
             let leaf = current.per_shard[*shard_id as usize].clone();
-            let merkle_path = build_merkle_path(&current.per_shard, *shard_id as usize);
+            let merkle_path = current.merkle_path(*shard_id as usize).to_vec();
             probes.push(ShardedProbe {
                 shard_id: *shard_id,
                 leaf,
@@ -1940,7 +2130,7 @@ where
         }
         let current = self.current_commitment();
         let leaf = current.per_shard[slot.shard_id as usize].clone();
-        let merkle_path = build_merkle_path(&current.per_shard, slot.shard_id as usize);
+        let merkle_path = current.merkle_path(slot.shard_id as usize).to_vec();
         let (evaluation, proof) =
             self.shards[slot.shard_id as usize].open_value_at_slot(&slot.slot_bits)?;
         Ok(ShardedValueProof {
@@ -2035,7 +2225,7 @@ where
             let current = self.current_commitment();
             let (eval, proof) = self.shards[shard_id as usize]
                 .open_rand_value_at_slot_current(&latest.slot_bits)?;
-            let merkle_path = build_merkle_path(&current.per_shard, shard_id as usize);
+            let merkle_path = current.merkle_path(shard_id as usize).to_vec();
             let shard_commit = current.per_shard[shard_id as usize].clone();
             Some(FreshnessAttestation {
                 shard_id,
@@ -2124,7 +2314,7 @@ where
         let current = self.current_commitment();
         let (eval, proof) = self.shards[shard_id as usize]
             .open_rand_index_at_slot_current(&placement.slot_bits)?;
-        let merkle_path = build_merkle_path(&current.per_shard, shard_id as usize);
+        let merkle_path = current.merkle_path(shard_id as usize).to_vec();
         let shard_commit = current.per_shard[shard_id as usize].clone();
         let freshness = Some(FreshnessAttestationLabel {
             shard_id,
@@ -2204,8 +2394,8 @@ where
                 shard_id: *shard_id,
                 leaf_s0: s0_commit.per_shard[*shard_id as usize].clone(),
                 leaf_s1: s1_commit.per_shard[*shard_id as usize].clone(),
-                merkle_path_s0: build_merkle_path(&s0_commit.per_shard, *shard_id as usize),
-                merkle_path_s1: build_merkle_path(&s1_commit.per_shard, *shard_id as usize),
+                merkle_path_s0: s0_commit.merkle_path(*shard_id as usize).to_vec(),
+                merkle_path_s1: s1_commit.merkle_path(*shard_id as usize).to_vec(),
                 inner: RandPair {
                     eval_s0,
                     proof_s0,
@@ -2224,8 +2414,8 @@ where
             shard_id: *final_shard,
             leaf_s0: s0_commit.per_shard[*final_shard as usize].clone(),
             leaf_s1: s1_commit.per_shard[*final_shard as usize].clone(),
-            merkle_path_s0: build_merkle_path(&s0_commit.per_shard, *final_shard as usize),
-            merkle_path_s1: build_merkle_path(&s1_commit.per_shard, *final_shard as usize),
+            merkle_path_s0: s0_commit.merkle_path(*final_shard as usize).to_vec(),
+            merkle_path_s1: s1_commit.merkle_path(*final_shard as usize).to_vec(),
             inner: RandPair {
                 eval_s0,
                 proof_s0,
@@ -3113,47 +3303,86 @@ fn merkle_parent(left: &EpochDigest, right: &EpochDigest) -> EpochDigest {
 
 /// Compute the Merkle root over an exact power-of-two number of leaves.
 /// `n_shards = 1` is supported: the root is just the single leaf.
+///
+/// Prefer [`ShardedEpochCommitment::with_per_shard`] for new code —
+/// it builds the root + every shard's sibling path in one pass and
+/// caches the result. This standalone helper stays for the auditor /
+/// verifier paths that only have `per_shard` in hand.
 pub fn merkle_root<E: Pairing, P: AegonPcs<E>>(
     per_shard: &[EpochCommitment<E, P>],
 ) -> EpochDigest {
-    assert!(
-        per_shard.len().is_power_of_two(),
-        "merkle_root: leaf count must be a power of two (got {})",
-        per_shard.len()
-    );
-    let mut layer: Vec<EpochDigest> = per_shard.iter().map(merkle_leaf).collect();
-    while layer.len() > 1 {
-        let mut next = Vec::with_capacity(layer.len() / 2);
-        for pair in layer.chunks_exact(2) {
-            next.push(merkle_parent(&pair[0], &pair[1]));
-        }
-        layer = next;
-    }
-    layer[0]
+    build_merkle_root_and_paths::<E, P>(per_shard).0
 }
 
 /// Build the sibling-only Merkle path for `leaf_index` against
 /// `per_shard`. Path length is `log2(per_shard.len())`.
+///
+/// Prefer [`ShardedEpochCommitment::merkle_path`] for new code — the
+/// path is precomputed at commit construction. This helper rebuilds
+/// the tree on every call and is kept only for verifier-side code
+/// that operates on bare `&[EpochCommitment]` slices.
 pub fn build_merkle_path<E: Pairing, P: AegonPcs<E>>(
     per_shard: &[EpochCommitment<E, P>],
     leaf_index: usize,
 ) -> Vec<EpochDigest> {
-    assert!(per_shard.len().is_power_of_two());
-    assert!(leaf_index < per_shard.len());
-    let mut layer: Vec<EpochDigest> = per_shard.iter().map(merkle_leaf).collect();
-    let mut idx = leaf_index;
-    let mut path = Vec::with_capacity(layer.len().trailing_zeros() as usize);
-    while layer.len() > 1 {
-        let sibling = if idx % 2 == 0 { idx + 1 } else { idx - 1 };
-        path.push(layer[sibling]);
-        let mut next = Vec::with_capacity(layer.len() / 2);
-        for pair in layer.chunks_exact(2) {
+    let (_, mut paths) = build_merkle_root_and_paths::<E, P>(per_shard);
+    paths
+        .get_mut(leaf_index)
+        .map(std::mem::take)
+        .expect("leaf_index in range (guarded by power-of-two assertion)")
+}
+
+/// Build the Merkle root **and** every shard's sibling path in one
+/// pass over the tree. `O(n_shards)` SHA256 ops total (each interior
+/// digest computed once, each leaf hashed once), versus
+/// `O(n_shards × log n_shards)` if [`build_merkle_path`] were called
+/// once per shard.
+///
+/// Returns `(root, paths)` where `paths[i]` is the sibling-only path
+/// from leaf `i` to the root. At `n_shards = 1`, `paths = vec![vec![]]`
+/// (one shard, vacuous empty path) and `root = merkle_leaf(per_shard[0])`.
+pub fn build_merkle_root_and_paths<E: Pairing, P: AegonPcs<E>>(
+    per_shard: &[EpochCommitment<E, P>],
+) -> (EpochDigest, Vec<Vec<EpochDigest>>) {
+    assert!(
+        per_shard.len().is_power_of_two(),
+        "build_merkle_root_and_paths: leaf count must be a power of two (got {})",
+        per_shard.len()
+    );
+    let n = per_shard.len();
+    // Build every layer of the tree, bottom-up, retaining each layer
+    // so we can index sibling digests when extracting paths.
+    let mut layers: Vec<Vec<EpochDigest>> = Vec::with_capacity(n.trailing_zeros() as usize + 1);
+    layers.push(per_shard.iter().map(merkle_leaf).collect());
+    while layers.last().expect("at least one layer").len() > 1 {
+        let prev = layers.last().expect("just pushed");
+        let mut next: Vec<EpochDigest> = Vec::with_capacity(prev.len() / 2);
+        for pair in prev.chunks_exact(2) {
             next.push(merkle_parent(&pair[0], &pair[1]));
         }
-        layer = next;
-        idx /= 2;
+        layers.push(next);
     }
-    path
+    let depth = layers.len() - 1; // path length = tree depth
+    let root = layers
+        .last()
+        .expect("non-empty")
+        .first()
+        .copied()
+        .expect("singleton root");
+
+    // Walk each leaf upward, picking the sibling at every layer.
+    let mut paths: Vec<Vec<EpochDigest>> = Vec::with_capacity(n);
+    for leaf_idx in 0..n {
+        let mut path: Vec<EpochDigest> = Vec::with_capacity(depth);
+        let mut idx = leaf_idx;
+        for d in 0..depth {
+            let sibling = if idx % 2 == 0 { idx + 1 } else { idx - 1 };
+            path.push(layers[d][sibling]);
+            idx /= 2;
+        }
+        paths.push(path);
+    }
+    (root, paths)
 }
 
 /// Verify a Merkle path. Returns the root the path reconstructs.

@@ -719,6 +719,153 @@ cmd_setup_bench() {
   log "setup-bench JSON saved to $LOCAL_SETUP_BENCH_OUT"
 }
 
+# Publish-time + commit-size benchmark for the planetary regime.
+#
+# Walks PUBLISH_FILL_PERCENTS (default 0,30,60,90), restarting shards
+# between stages with the per-shard prefill_count needed to hit that
+# fill level vs. the cluster's TRUE log capacity (default 32, i.e.,
+# 2^32 = ~4.3B entries total across 32 shards). For each stage, runs
+# aegon_publish_bench in distributed mode against the live cluster
+# and ferries one JSON record per fill level back to the local box.
+#
+# What this measures, per (fill_pct, batch_size):
+#   - publish wall-clock (samples + fastest/slowest/median/mean ms)
+#   - uncompressed bytes of the four published commits
+#     (index, value, rand_index, rand_value) summed across all shards
+#   - total ShardedEpochCommitment bytes (commits + Merkle root + epoch)
+#
+# Prereqs: cluster must be `up + deploy`-ed once, and `bootstrap` must
+# have completed at least once (so the SRS cache file is on each
+# shard's disk — subsequent bootstraps hit cache in seconds rather
+# than re-running distributed gen). The script handles that
+# automatically — it runs `bootstrap` between every restart-shards
+# step, which is a no-op on cache hit.
+PUBLISH_FILL_PERCENTS="${PUBLISH_FILL_PERCENTS:-0,30,60,90}"
+PUBLISH_BATCH_SIZES="${PUBLISH_BATCH_SIZES:-4096,8192,16384,32768,65536,131072}"
+PUBLISH_SAMPLES_PER_BATCH="${PUBLISH_SAMPLES_PER_BATCH:-3}"
+# True (non-over-provisioned) total log capacity. Default 32 (2^32
+# entries). The per-shard polynomial sizes against SHARD_LOG_CAPACITY
+# (default 29), which gives a 4x over-provisioning.
+PUBLISH_TRUE_LOG_CAP="${PUBLISH_TRUE_LOG_CAP:-32}"
+LOCAL_PUBLISH_BENCH_DIR="${LOCAL_PUBLISH_BENCH_DIR:-/tmp/aegon-publish-bench}"
+cmd_publish_bench() {
+  require_project
+  require_power_of_two "$N_SHARDS"
+  mkdir -p "$LOCAL_PUBLISH_BENCH_DIR"
+
+  # Build + push the bench binary to the coordinator (idempotent —
+  # cached cargo + scp-only-if-different is what `bench-cluster.sh
+  # deploy` already does, but this subcommand may run on its own).
+  local cargo_features=""
+  if [[ "${TRACING:-0}" == "1" ]]; then
+    cargo_features="--features tracing_instrument"
+  fi
+  local local_bin_dir="$REPO_ROOT/target/release"
+  local remote_bin_dir="$local_bin_dir"
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    command -v docker >/dev/null || die "macOS host needs Docker"
+    docker info >/dev/null 2>&1  || die "Docker daemon unreachable"
+    log "macOS host: building aegon_publish_bench inside Docker"
+    docker run --rm --platform linux/amd64 \
+      -v "$REPO_ROOT:/workspace" -w /workspace \
+      rust:slim-bookworm \
+      bash -c "set -e; \
+        apt-get update >/dev/null && \
+        apt-get install -y --no-install-recommends protobuf-compiler ca-certificates >/dev/null && \
+        cargo build --release -p akd $cargo_features --target x86_64-unknown-linux-gnu \
+          --bin aegon_publish_bench"
+    remote_bin_dir="$REPO_ROOT/target/x86_64-unknown-linux-gnu/release"
+  else
+    log "building aegon_publish_bench (release)"
+    (cd "$REPO_ROOT" && cargo build --release -p akd $cargo_features --bin aegon_publish_bench) >/dev/null
+  fi
+  [[ -x "$remote_bin_dir/aegon_publish_bench" ]] || die "aegon_publish_bench missing"
+
+  local cname; cname="$(coord_name)"
+  log "[$cname] uploading aegon_publish_bench"
+  scp_to "$cname" "$remote_bin_dir/aegon_publish_bench"
+  remote "$cname" "sudo mkdir -p $REMOTE_BIN_DIR && \
+    sudo mv /tmp/aegon_publish_bench $REMOTE_BIN_DIR/ && \
+    sudo chmod +x $REMOTE_BIN_DIR/aegon_publish_bench"
+
+  local db_ip; db_ip="$(db_internal_ip)"
+  local shard_csv; shard_csv="$(shard_endpoints_csv)"
+  local srs_csv; srs_csv="$(srs_endpoints_csv)"
+
+  # Walk every fill percent. For each, compute per-shard prefill,
+  # restart shards, bootstrap (cache hit -> fast), then run the
+  # bench in distributed mode with --fill-percents <pct>.
+  local total_capacity=$((1 << PUBLISH_TRUE_LOG_CAP))
+  IFS=',' read -ra fill_pcts <<< "$PUBLISH_FILL_PERCENTS"
+  for fill_pct in "${fill_pcts[@]}"; do
+    log "==== publish-bench: fill_percent=$fill_pct ===="
+    # python3 for the multiplication so the arithmetic survives at
+    # PUBLISH_TRUE_LOG_CAP=32 (= ~4.3B, fits in u64 but easy to mis-
+    # shift in bash).
+    local per_shard
+    per_shard="$(python3 -c "print((${total_capacity} * ${fill_pct}) // 100 // ${N_SHARDS})")"
+    log "[$fill_pct%] per-shard prefill_count = $per_shard"
+
+    # Stage 1: restart shards with the right prefill count.
+    log "[$fill_pct%] restarting all shards with prefill_count=$per_shard"
+    remote "$(db_name)" \
+      "redis-cli -h 127.0.0.1 -p $REDIS_PORT FLUSHALL >/dev/null && \
+       redis-cli -h 127.0.0.1 -p $REDIS_PORT PING >/dev/null"
+    local -a restart_pids=()
+    for ((i = 0; i < N_SHARDS; i++)); do
+      local name; name="$(shard_name "$i")"
+      (
+        restart_shard "$name" "$i" "$per_shard" "$db_ip"
+      ) &
+      restart_pids+=("$!")
+    done
+    local failed=0
+    for pid in "${restart_pids[@]}"; do
+      wait "$pid" || failed=$((failed + 1))
+    done
+    if (( failed > 0 )); then
+      die "$failed shard restart(s) failed at fill_pct=$fill_pct"
+    fi
+
+    # Stage 2: bootstrap. SRS cache should hit (assuming this isn't
+    # the very first run), making this near-instant.
+    log "[$fill_pct%] running bootstrap (cache hit expected)"
+    remote "$cname" \
+      "$REMOTE_BIN_DIR/aegon_srs_bootstrap \
+         --shard-log-capacity $SHARD_LOG_CAPACITY \
+         --kzh-k $KZH_K \
+         --setup-seed $SETUP_SEED \
+         --shard-endpoints $srs_csv" \
+      stream
+
+    # Stage 3: run the bench in distributed mode.
+    local remote_out="/tmp/aegon-publish-bench-${fill_pct}.json"
+    log "[$fill_pct%] running aegon_publish_bench (distributed)"
+    remote "$cname" \
+      "mkdir -p \$HOME/aegon-run && cd \$HOME/aegon-run && \
+       $REMOTE_BIN_DIR/aegon_publish_bench \
+         --shard-log-capacity $SHARD_LOG_CAPACITY \
+         --true-log-capacity $PUBLISH_TRUE_LOG_CAP \
+         --kzh-k $KZH_K \
+         --n-shards $N_SHARDS \
+         --endpoints $shard_csv \
+         --fill-percents $fill_pct \
+         --batch-sizes $PUBLISH_BATCH_SIZES \
+         --samples-per-batch $PUBLISH_SAMPLES_PER_BATCH \
+         --setup-seed $SETUP_SEED \
+         --prefill-seed $PREFILL_SEED \
+         --db-url redis://$db_ip:$REDIS_PORT \
+         --out $remote_out" \
+      stream
+
+    local local_out="$LOCAL_PUBLISH_BENCH_DIR/publish-${fill_pct}pct.json"
+    log "[$fill_pct%] retrieving $remote_out -> $local_out"
+    scp_from "$cname" "$remote_out" "$local_out"
+    log "[$fill_pct%] done"
+  done
+  log "publish-bench complete. JSONs in $LOCAL_PUBLISH_BENCH_DIR/"
+}
+
 cmd_bench() {
   require_project
   require_power_of_two "$N_SHARDS"
@@ -747,22 +894,35 @@ cmd_bench() {
   log "bench JSON saved to $LOCAL_BENCH_OUT"
 }
 
-# Run aegon_lookup_bench on the coordinator. The lookup bench owns its
-# own publish cycle (publishes PRELOAD_COUNT labels then samples
-# lookup_label/value/history for both server-direct and client paths),
-# so it expects to be run AFTER deploy + (optionally) AFTER the publish
-# bench but NOT mixed with one.
+# Run aegon_lookup_bench on the coordinator. The lookup bench mirrors
+# the publish-bench cluster flow: walks LOOKUP_FILL_PERCENTS (default
+# 0,30,60,90), restarts shards with the per-shard anonymous prefill
+# matching each fill level, bootstraps (cache hit -> fast), then runs
+# aegon_lookup_bench against the live cluster with a small
+# LOOKUP_PRELOAD_COUNT of sampleable labels published on top. At each
+# stage the bench measures:
+#   - lookup latencies (server + client × {label, value, value-history,
+#     label-history})
+#   - data + proof + total payload sizes per lookup type
+#   - publish-bench sweep over LOOKUP_PUBLISH_BATCH_SIZES (default
+#     matches PUBLISH_BATCH_SIZES — 4096..131072 for planetary)
 #
 # Why scp the binary fresh each time: the deploy step only pushes
 # aegon_coordinator_bench, not aegon_lookup_bench. If you're running
 # the lookup bench after a deploy, the binary isn't on the coord yet.
-LOOKUP_PRELOAD_COUNT="${LOOKUP_PRELOAD_COUNT:-256}"
+LOOKUP_PRELOAD_COUNT="${LOOKUP_PRELOAD_COUNT:-1000}"
 LOOKUP_SAMPLES_PER_LEVEL="${LOOKUP_SAMPLES_PER_LEVEL:-20}"
-REMOTE_LOOKUP_OUT="/tmp/aegon-lookup-bench.json"
-LOCAL_LOOKUP_OUT="${LOCAL_LOOKUP_OUT:-/tmp/aegon-lookup-bench.json}"
+LOOKUP_FILL_PERCENTS="${LOOKUP_FILL_PERCENTS:-${PUBLISH_FILL_PERCENTS}}"
+LOOKUP_PUBLISH_BATCH_SIZES="${LOOKUP_PUBLISH_BATCH_SIZES:-${PUBLISH_BATCH_SIZES}}"
+LOOKUP_PUBLISH_SAMPLES_PER_BATCH="${LOOKUP_PUBLISH_SAMPLES_PER_BATCH:-${PUBLISH_SAMPLES_PER_BATCH}}"
+LOOKUP_TRUE_LOG_CAP="${LOOKUP_TRUE_LOG_CAP:-${PUBLISH_TRUE_LOG_CAP}}"
+LOOKUP_PUBLISH_BATCH_SIZE="${LOOKUP_PUBLISH_BATCH_SIZE:-1024}"
+LOOKUP_AUDIT_SAMPLES="${LOOKUP_AUDIT_SAMPLES:-5}"
+LOCAL_LOOKUP_BENCH_DIR="${LOCAL_LOOKUP_BENCH_DIR:-/tmp/aegon-lookup-bench}"
 cmd_lookup_bench() {
   require_project
   require_power_of_two "$N_SHARDS"
+  mkdir -p "$LOCAL_LOOKUP_BENCH_DIR"
 
   # Need the binary on the coord. The default deploy step doesn't push
   # it, so do that here (idempotent — same as cmd_deploy's coord push
@@ -793,7 +953,8 @@ cmd_lookup_bench() {
   [[ -x "$remote_bin_dir/aegon_lookup_bench" ]] || die "aegon_lookup_bench missing"
 
   local cname; cname="$(coord_name)"
-  local csv; csv="$(shard_endpoints_csv)"
+  local shard_csv; shard_csv="$(shard_endpoints_csv)"
+  local srs_csv; srs_csv="$(srs_endpoints_csv)"
   local db_ip; db_ip="$(db_internal_ip)"
   log "[$cname] uploading aegon_lookup_bench"
   scp_to "$cname" "$remote_bin_dir/aegon_lookup_bench"
@@ -801,23 +962,78 @@ cmd_lookup_bench() {
     sudo mv /tmp/aegon_lookup_bench $REMOTE_BIN_DIR/ && \
     sudo chmod +x $REMOTE_BIN_DIR/aegon_lookup_bench"
 
-  log "[$cname] running aegon_lookup_bench (preload=$LOOKUP_PRELOAD_COUNT, samples=$LOOKUP_SAMPLES_PER_LEVEL)"
-  remote "$cname" \
-    "mkdir -p \$HOME/aegon-run && \
-     cd \$HOME/aegon-run && \
-     $REMOTE_BIN_DIR/aegon_lookup_bench \
-       --shard-log-capacity $SHARD_LOG_CAPACITY \
-       --kzh-k $KZH_K \
-       --setup-seed $SETUP_SEED \
-       --endpoints $csv \
-       --db-url redis://$db_ip:$REDIS_PORT \
-       --preload-counts $LOOKUP_PRELOAD_COUNT \
-       --samples-per-level $LOOKUP_SAMPLES_PER_LEVEL \
-       --output $REMOTE_LOOKUP_OUT" \
-    stream
-  log "retrieving $REMOTE_LOOKUP_OUT -> $LOCAL_LOOKUP_OUT"
-  scp_from "$cname" "$REMOTE_LOOKUP_OUT" "$LOCAL_LOOKUP_OUT"
-  log "lookup bench JSON saved to $LOCAL_LOOKUP_OUT"
+  local total_capacity=$((1 << LOOKUP_TRUE_LOG_CAP))
+  IFS=',' read -ra fill_pcts <<< "$LOOKUP_FILL_PERCENTS"
+  for fill_pct in "${fill_pcts[@]}"; do
+    log "==== lookup-bench: fill_percent=$fill_pct ===="
+    local per_shard
+    per_shard="$(python3 -c "print((${total_capacity} * ${fill_pct}) // 100 // ${N_SHARDS})")"
+    log "[$fill_pct%] per-shard prefill_count = $per_shard"
+
+    # Stage 1: restart shards with the right prefill count. Reuses
+    # cmd_publish_bench's parallel-restart pattern.
+    log "[$fill_pct%] restarting all shards with prefill_count=$per_shard"
+    remote "$(db_name)" \
+      "redis-cli -h 127.0.0.1 -p $REDIS_PORT FLUSHALL >/dev/null && \
+       redis-cli -h 127.0.0.1 -p $REDIS_PORT PING >/dev/null"
+    local -a restart_pids=()
+    for ((i = 0; i < N_SHARDS; i++)); do
+      local name; name="$(shard_name "$i")"
+      (
+        restart_shard "$name" "$i" "$per_shard" "$db_ip"
+      ) &
+      restart_pids+=("$!")
+    done
+    local failed=0
+    for pid in "${restart_pids[@]}"; do
+      wait "$pid" || failed=$((failed + 1))
+    done
+    if (( failed > 0 )); then
+      die "$failed shard restart(s) failed at fill_pct=$fill_pct"
+    fi
+
+    # Stage 2: bootstrap. SRS cache should hit on re-runs.
+    log "[$fill_pct%] running bootstrap (cache hit expected)"
+    remote "$cname" \
+      "$REMOTE_BIN_DIR/aegon_srs_bootstrap \
+         --shard-log-capacity $SHARD_LOG_CAPACITY \
+         --kzh-k $KZH_K \
+         --setup-seed $SETUP_SEED \
+         --shard-endpoints $srs_csv" \
+      stream
+
+    # Stage 3: run the lookup bench. --preload-counts is the
+    # sampleable-namespace size *added on top* of the anonymous
+    # per-shard prefill the cluster already has; --publish-batch-
+    # sizes runs the per-stage publish bench using a disjoint
+    # namespace.
+    local remote_out="/tmp/aegon-lookup-bench-${fill_pct}.json"
+    log "[$fill_pct%] running aegon_lookup_bench (preload=$LOOKUP_PRELOAD_COUNT, samples=$LOOKUP_SAMPLES_PER_LEVEL)"
+    remote "$cname" \
+      "mkdir -p \$HOME/aegon-run && \
+       cd \$HOME/aegon-run && \
+       $REMOTE_BIN_DIR/aegon_lookup_bench \
+         --shard-log-capacity $SHARD_LOG_CAPACITY \
+         --kzh-k $KZH_K \
+         --n-shards $N_SHARDS \
+         --setup-seed $SETUP_SEED \
+         --endpoints $shard_csv \
+         --db-url redis://$db_ip:$REDIS_PORT \
+         --preload-counts $LOOKUP_PRELOAD_COUNT \
+         --samples-per-level $LOOKUP_SAMPLES_PER_LEVEL \
+         --publish-batch-size $LOOKUP_PUBLISH_BATCH_SIZE \
+         --publish-batch-sizes $LOOKUP_PUBLISH_BATCH_SIZES \
+         --publish-samples-per-batch $LOOKUP_PUBLISH_SAMPLES_PER_BATCH \
+         --audit-samples $LOOKUP_AUDIT_SAMPLES \
+         --output $remote_out" \
+      stream
+
+    local local_out="$LOCAL_LOOKUP_BENCH_DIR/lookup-${fill_pct}pct.json"
+    log "[$fill_pct%] retrieving $remote_out -> $local_out"
+    scp_from "$cname" "$remote_out" "$local_out"
+    log "[$fill_pct%] done"
+  done
+  log "lookup-bench complete. JSONs in $LOCAL_LOOKUP_BENCH_DIR/"
 }
 
 cmd_logs() {
@@ -1006,16 +1222,41 @@ usage: $0 <subcommand>
                    metrics gathering. Outputs one JSON record with
                    per-shard phase timestamps + inbound/outbound
                    slab bytes + pk/vk/universal sizes.
+  publish-bench    Planetary-regime publish-time + commit-size bench.
+                   Walks PUBLISH_FILL_PERCENTS (default 0,30,60,90),
+                   restarting shards per stage with the per-shard
+                   prefill count for that fill level. For each stage,
+                   sweeps PUBLISH_BATCH_SIZES (default
+                   4096..131072) and emits one JSON per fill level
+                   under LOCAL_PUBLISH_BENCH_DIR (default
+                   /tmp/aegon-publish-bench). Bootstrap between
+                   stages should hit cache and be near-instant.
   restart-shards   Restart all shards with a fresh --prefill-count using
                    already-uploaded binaries + on-disk SRS cache + FLUSHALL.
                    Cheap per-call (~30 s) — use in (prefill,batch) sweeps.
                    Cache hit makes the bootstrap step a no-op too, so
                    follow with `bootstrap` then `bench`.
   bench            Run aegon_coordinator_bench on the coordinator, fetch JSON
-  lookup-bench     Run aegon_lookup_bench on the coordinator (publishes
-                   LOOKUP_PRELOAD_COUNT labels then samples
-                   server/client lookup_label, lookup_value,
-                   lookup_history), fetch JSON
+  lookup-bench     Planetary-regime combined lookup + publish bench.
+                   Walks LOOKUP_FILL_PERCENTS (default mirrors
+                   PUBLISH_FILL_PERCENTS = 0,30,60,90), restarting
+                   shards per stage with the matching per-shard
+                   anonymous prefill. At each stage, publishes
+                   LOOKUP_PRELOAD_COUNT (default 1000) sampleable
+                   labels and runs:
+                   - lookup samples (server + client × {label, value,
+                     value-history, label-history}) with data/proof/
+                     total size reporting per the user's spec.
+                   - publish-bench sweep over
+                     LOOKUP_PUBLISH_BATCH_SIZES (default mirrors
+                     PUBLISH_BATCH_SIZES).
+                   - LOOKUP_AUDIT_SAMPLES (default 5) consecutive
+                     epoch-transition audits via
+                     `verify_sharded_invariance`, recording
+                     per-epoch audit time + audit proof bytes.
+                   Outputs one JSON per fill level under
+                   LOCAL_LOOKUP_BENCH_DIR (default
+                   /tmp/aegon-lookup-bench).
   watchdog         Parallel health probe across every VM (shards + coord +
                    db): checks process liveness, free memory, dmesg OOM
                    marks. Exits non-zero if any host is BAD. Wrap in a
@@ -1042,6 +1283,7 @@ main() {
     deploy)         cmd_deploy ;;
     bootstrap)      cmd_bootstrap ;;
     setup-bench)    cmd_setup_bench ;;
+    publish-bench)  cmd_publish_bench ;;
     restart-shards) cmd_restart_shards ;;
     bench)          cmd_bench ;;
     lookup-bench)   cmd_lookup_bench ;;

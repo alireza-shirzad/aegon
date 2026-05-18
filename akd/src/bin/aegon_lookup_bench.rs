@@ -1,34 +1,64 @@
-//! `aegon_lookup_bench` — lookup latency + wire-size sweep against a
-//! live shard cluster.
+//! `aegon_lookup_bench` — combined lookup + publish bench, sweeping
+//! preloaded dictionary sizes.
 //!
-//! For each "preload level" N in `--preload-counts` (e.g.
-//! `1,2,4,...,capacity/8`), the bench:
+//! At each "preload level" N (specified either directly via
+//! `--preload-counts` or as a fraction of true capacity via
+//! `--fill-percents` + `--true-log-capacity`), the bench:
 //!
-//!   1. Publishes enough fresh `(label, value)` pairs to bring the
-//!      total count up to N (incremental from the last level).
-//!   2. Picks `--samples-per-level` already-loaded labels and, for
-//!      each, measures four timings:
-//!        * `server_lookup_label_ns`: time of the *server-side*
-//!          `ShardedAegon::lookup_label` call (no gRPC, no verify).
-//!        * `server_lookup_value_ns`: time of the *server-side*
-//!          `ShardedAegon::lookup_value` call.
-//!        * `client_lookup_label_ns`: full client path — gRPC RTT
-//!          to the in-process coordinator + local proof verification.
-//!        * `client_lookup_value_ns`: same, for the value side.
-//!   3. Encodes the response messages via `prost::Message::encoded_len`
-//!      to capture the on-wire byte counts the coordinator actually
-//!      sends back to clients, plus the size of just the proof field
-//!      (excludes the slot / value fields), plus the label/value
-//!      application-level sizes. "Proof overhead" is then
-//!      `wire_bytes - label_size_bytes` or `wire_bytes - value_size_bytes`
-//!      depending on the call.
+//!   1. **Top-up**: publishes fresh `(label, value)` pairs in the
+//!      bench's known namespace (`phone_label(idx)` for `idx` in
+//!      `[0..N)`) until the sampleable namespace has N entries. The
+//!      growth is incremental — going from level N₁ to level N₂
+//!      only publishes the gap N₂ − N₁.
+//!   2. **Lookup bench**: picks `--samples-per-level` already-loaded
+//!      labels and, for each, measures four server-direct +
+//!      four client-via-gRPC timings:
+//!        * label lookup        — opens index_poly at the label's slot.
+//!        * value lookup        — opens value_poly at that slot.
+//!        * value history       — DB read of value-history entries +
+//!                                a live freshness opening.
+//!        * label history       — DB read of placement record + a
+//!                                live freshness opening.
+//!      For each lookup type, reports three size numbers:
+//!        * `*_data_bytes`      — literal application payload (label
+//!                                bytes for label/label-history;
+//!                                value bytes for value/value-history,
+//!                                summed across entries for the latter).
+//!        * `*_proof_bytes`     — uncompressed-serialised size of the
+//!                                cryptographic proof object the server
+//!                                returns. For value-history this
+//!                                excludes the in-band value_bytes (we
+//!                                subtract them out so data + proof
+//!                                doesn't double-count).
+//!        * `*_total_bytes`     — `data + proof`, the total payload
+//!                                metric per the user's spec.
+//!   3. **Publish bench (optional)**: if `--publish-batch-sizes` is
+//!      provided, sweeps each batch size and runs `--publish-samples-
+//!      per-batch` publishes per size, recording per-publish wall
+//!      time + the commit-class byte sizes (index / value / rand-
+//!      index / rand-value, summed across shards, plus the total
+//!      `ShardedEpochCommitment` size). The publish bench uses a
+//!      disjoint namespace from the lookup-sampleable one, so its
+//!      samples don't pollute future-stage lookup measurements.
 //!
-//! The bench drives the preload itself (no shard-level `--prefill-count`
-//! coordination) so a fresh cluster yields well-defined sample
-//! distributions — every sample at level N is drawn from the bench's
-//! own deterministic namespace `bench-u{i}` for i in [0..N), so we
-//! always know the value bytes for `lookup_value_with_bytes` and we
-//! always know a label is actually present.
+//! ## Modes
+//!
+//! * **Local in-process** (no `--endpoints`): builds an in-process
+//!   `ShardedAegon` with `--n-shards` (default 1). The `--initial-
+//!   prefill-count` flag bulk-loads anonymous filler via
+//!   `prefill_random_per_shard` (only valid at epoch 0, before any
+//!   publish), so the dict can land at a realistic fill level
+//!   without paying for hundreds of thousands of `publish` calls.
+//!   Used for the **small** (`shard_log_cap=22`, `true_log_cap=20`)
+//!   and **medium** (`shard_log_cap=28`, `true_log_cap=26`) regimes.
+//!
+//! * **Remote / distributed** (`--endpoints http://...,...`):
+//!   connects to a running cluster. The cluster is expected to be
+//!   prefilled to the desired baseline via
+//!   `aegon_shard_server --prefill-count` (the lookup namespace's
+//!   labels are then published on top by this bench). Used for the
+//!   **planetary** (`shard_log_cap=29`, `true_log_cap=32`,
+//!   `n_shards=32`) regime.
 //!
 //! The coordinator gRPC server runs in a background thread on
 //! `--coordinator-listen` (default `127.0.0.1:50190`), driven by the
@@ -37,14 +67,28 @@
 //! gRPC, so they see the same state the client side sees — just
 //! without serialization / network / verify cost.
 //!
-//! Usage:
+//! ## Usage
 //!
+//! Local single-shard small regime:
 //! ```text
 //! aegon_lookup_bench \
-//!   --shard-log-capacity 20 --kzh-k 10 --setup-seed 42 \
-//!   --endpoints http://aegon-shard-0:50051,...,http://aegon-shard-3:50051 \
-//!   --preload-counts 1,2,4,8,16,32,64,128,256,512,1024,2048,4096,8192,16384,32768,65536,131072,262144,524288 \
+//!   --shard-log-capacity 22 --true-log-capacity 20 --kzh-k 10 \
+//!   --setup-seed 42 --n-shards 1 \
+//!   --fill-percents 0,30,60,90 \
 //!   --samples-per-level 20 \
+//!   --publish-batch-sizes 2,4,8,16,32,64 --publish-samples-per-batch 3 \
+//!   --output /tmp/aegon-lookup-bench.json
+//! ```
+//!
+//! Remote planetary regime (cluster prefilled externally):
+//! ```text
+//! aegon_lookup_bench \
+//!   --shard-log-capacity 29 --kzh-k 10 --setup-seed 42 \
+//!   --endpoints http://aegon-shard-0:50051,...,http://aegon-shard-31:50051 \
+//!   --preload-counts 1000 \
+//!   --samples-per-level 20 \
+//!   --publish-batch-sizes 4096,8192,16384,32768,65536,131072 \
+//!   --publish-samples-per-batch 3 \
 //!   --db-url redis://aegon-bench-db:6379 \
 //!   --output /tmp/aegon-lookup-bench.json
 //! ```
@@ -65,7 +109,11 @@ use akd::aegon::coordinator_grpc::{
     },
     CoordinatorServer,
 };
-use akd::aegon::{DbSource, Sha256Hash, ShardTransport, ShardedAegon, ShardedAegonConfig, SrsSource};
+use akd::aegon::{
+    optimal_kzh_k, verify_sharded_invariance, AuditState, DbSource, Sha256Hash, ShardTransport,
+    ShardedAegon, ShardedAegonConfig, SrsSource,
+};
+use ark_ec::pairing::Pairing;
 use akd_core::aegon_crypto::pcs::kzhk::KZHK;
 use ark_bn254::Bn254;
 use ark_serialize::CanonicalSerialize;
@@ -87,6 +135,17 @@ type Sharded = ShardedAegon<Bn254, Pcs, Sha256Hash>;
 /// numbers reflect what a real deployment would see, instead of the
 /// ~10-byte `bench-u{i}` / `bench-v{i}` that the old bench used.
 const RSA_VALUE_LEN: usize = 256;
+
+/// Index-namespace offset reserved for the publish bench. Lookup-
+/// sampleable labels live in `phone_label(i)` for `i in [0..2^33)`;
+/// publish-bench labels live at `phone_label(PUBLISH_BENCH_NAMESPACE_OFFSET
+/// + j)` for `j in [0..)`. The two namespaces never overlap, so
+/// publish-bench samples cannot accidentally become lookup-bench
+/// sampleable. 2^33 is comfortably above the planetary regime's
+/// `true_log_capacity = 32`. Both namespaces share the `phone_label`
+/// + `rsa_value` byte format so wire-size measurements stay
+/// apples-to-apples.
+const PUBLISH_BENCH_NAMESPACE_OFFSET: u64 = 1u64 << 33;
 
 fn phone_label(idx: u64) -> Vec<u8> {
     // E.164 +1NNNNNNNNNN. The 10-digit space is 10^10 which comfortably
@@ -123,18 +182,35 @@ fn read_self_rss_kb() -> Option<u64> {
 #[derive(Debug, Parser)]
 #[command(
     name = "aegon_lookup_bench",
-    about = "Sweep preload counts against a live shard cluster, measure lookup latency (server + client) and proof wire sizes."
+    about = "Sweep preload counts (or fill_percents) and measure lookup latency (server + client), \
+             proof wire sizes, and optional per-stage publish bench."
 )]
 struct Args {
     /// log_2 of slots per shard. Must match every shard server.
     #[arg(long)]
     shard_log_capacity: usize,
 
-    /// KZH-k block parameter. Must match every shard.
+    /// log_2 of the TRUE total dictionary size — fill percentages are
+    /// computed against this, not the over-provisioned shard size.
+    /// Required when `--fill-percents` is used.
     #[arg(long)]
-    kzh_k: usize,
+    true_log_capacity: Option<usize>,
 
-    /// Comma-separated shard endpoints. Length must be a power of two.
+    /// KZH-k block parameter. Defaults to
+    /// `optimal_kzh_k(shard_log_capacity)`. Must match every shard
+    /// in distributed mode.
+    #[arg(long)]
+    kzh_k: Option<usize>,
+
+    /// Number of shards. Defaults to 1 (in-process local mode).
+    /// `n_shards > 1` requires `--endpoints` and switches to remote
+    /// (distributed) mode.
+    #[arg(long, default_value_t = 1)]
+    n_shards: usize,
+
+    /// Comma-separated shard endpoints. Length must be a power of two
+    /// and match `--n-shards`. When empty, runs in local in-process
+    /// mode with `--n-shards` (default 1) in-memory shards.
     #[arg(long, value_delimiter = ',')]
     endpoints: Vec<String>,
 
@@ -168,18 +244,43 @@ struct Args {
     #[arg(long, default_value = "127.0.0.1:50190")]
     coordinator_listen: String,
 
-    /// Sweep points: comma-separated label counts that the bench will
-    /// publish up to before sampling lookups. Must be strictly
-    /// increasing; the bench publishes the gap between consecutive
-    /// points so e.g. `1,2,4,...,N` publishes N labels total across
-    /// the sweep, not 1+2+4+...+N.
+    /// Sweep points: comma-separated **lookup-sampleable** label
+    /// counts that the bench will publish up to before sampling
+    /// lookups. Must be strictly increasing; the bench publishes the
+    /// gap between consecutive points so e.g. `1,2,4,...,N` publishes
+    /// N labels total across the sweep, not 1+2+4+...+N. Mutually
+    /// exclusive with `--fill-percents`.
     #[arg(long, value_delimiter = ',')]
     preload_counts: Vec<usize>,
 
+    /// Alternative sweep specification: comma-separated fill
+    /// percentages against `true_log_capacity`. Each percentage `p`
+    /// produces a sweep target of `floor(2^true_log_capacity * p /
+    /// 100)`. Requires `--true-log-capacity`. Mutually exclusive with
+    /// `--preload-counts`. The lookup-sampleable count at each stage
+    /// is `target - initial_prefill_count` (clamped to ≥ 0).
+    #[arg(long, value_delimiter = ',')]
+    fill_percents: Vec<u32>,
+
+    /// **Local mode only**: bulk-prefill the in-process shards with
+    /// `count` random `(slot, h_label, h_value)` entries via
+    /// `prefill_random_per_shard` BEFORE any publish. These entries
+    /// are anonymous (no label↔slot mapping in routing) so they are
+    /// NOT lookup-sampleable — they just pad the dict to a realistic
+    /// fill level so lookup latencies reflect probe-trail depth at
+    /// scale. Must be called at epoch 0 (no prior publishes).
+    #[arg(long, default_value_t = 0)]
+    initial_prefill_count: u64,
+
+    /// Prefill seed base (local mode bulk-prefill only). Shard `i`
+    /// is seeded with `prefill_seed + i`, mirroring the cluster
+    /// pattern.
+    #[arg(long, default_value_t = 1)]
+    prefill_seed: u64,
+
     /// How many lookup samples to draw per preload level. Each sample
-    /// times all four call paths (server-direct label, server-direct
-    /// value, client label, client value) and records one wire-size
-    /// row.
+    /// times all eight call paths (server + client × {label, value,
+    /// value-history, label-history}) and records one wire-size row.
     #[arg(long, default_value_t = 10)]
     samples_per_level: usize,
 
@@ -189,6 +290,33 @@ struct Args {
     /// memory. 1024 is a safe default on the bench cluster.
     #[arg(long, default_value_t = 1024)]
     publish_batch_size: usize,
+
+    /// **Publish bench**: comma-separated batch sizes to sweep at
+    /// every preload level (after the lookup samples). When empty,
+    /// the publish bench is skipped. Each sample uses a disjoint
+    /// namespace so it doesn't pollute the lookup-sampleable space.
+    #[arg(long, value_delimiter = ',')]
+    publish_batch_sizes: Vec<usize>,
+
+    /// Samples per publish-bench batch size. Default 3 — enough for a
+    /// stable median.
+    #[arg(long, default_value_t = 3)]
+    publish_samples_per_batch: usize,
+
+    /// **Audit bench**: number of consecutive epoch-transition audits
+    /// to time per stage via `verify_sharded_invariance`. Starts from
+    /// a fresh `AuditState` at epoch 0 and walks forward, so the chain
+    /// state is correct at every step. Each sample times one
+    /// `verify_sharded_invariance(prev_commit, next_commit)` call and
+    /// records `audit_proof_bytes` = `next.uncompressed_size()` (the
+    /// bulletin-board fetch the auditor pays per epoch).
+    ///
+    /// Requires at least `audit_samples + 1` published epochs by the
+    /// time the audit phase runs (which happens AFTER the lookup and
+    /// publish-bench phases, so the publish bench's own batches count
+    /// toward the available epoch chain). Set to 0 to skip auditing.
+    #[arg(long, default_value_t = 5)]
+    audit_samples: usize,
 
     /// Where to write the JSON timing report.
     #[arg(long)]
@@ -200,10 +328,27 @@ fn main() -> ExitCode {
     akd::aegon::tracing_init::init_tree_subscriber();
     let args = Args::parse();
 
-    if !args.endpoints.len().is_power_of_two() {
+    // ---- mode + arg validation ----
+    let local_mode = args.endpoints.is_empty();
+    let effective_n_shards = if local_mode { args.n_shards } else { args.endpoints.len() };
+    if !effective_n_shards.is_power_of_two() || effective_n_shards == 0 {
         eprintln!(
-            "error: --endpoints length must be a power of two (got {})",
-            args.endpoints.len()
+            "error: n_shards must be a power of two (got {effective_n_shards})"
+        );
+        return ExitCode::from(2);
+    }
+    if !local_mode && args.endpoints.len() != args.n_shards {
+        eprintln!(
+            "error: --endpoints length ({}) must equal --n-shards ({})",
+            args.endpoints.len(),
+            args.n_shards
+        );
+        return ExitCode::from(2);
+    }
+    if !local_mode && args.initial_prefill_count > 0 {
+        eprintln!(
+            "error: --initial-prefill-count is local-mode only (in-process shards). \
+             For remote shards, prefill via `aegon_shard_server --prefill-count`."
         );
         return ExitCode::from(2);
     }
@@ -211,26 +356,69 @@ fn main() -> ExitCode {
         eprintln!("error: provide either --srs-path or --setup-seed");
         return ExitCode::from(2);
     }
-    if args.preload_counts.is_empty() {
-        eprintln!("error: --preload-counts must list at least one value");
+    if !args.preload_counts.is_empty() && !args.fill_percents.is_empty() {
+        eprintln!("error: --preload-counts and --fill-percents are mutually exclusive");
+        return ExitCode::from(2);
+    }
+    if args.preload_counts.is_empty() && args.fill_percents.is_empty() {
+        eprintln!("error: provide either --preload-counts or --fill-percents");
+        return ExitCode::from(2);
+    }
+    if !args.fill_percents.is_empty() && args.true_log_capacity.is_none() {
+        eprintln!("error: --fill-percents requires --true-log-capacity");
         return ExitCode::from(2);
     }
     if args.samples_per_level == 0 {
         eprintln!("error: --samples-per-level must be > 0");
         return ExitCode::from(2);
     }
-    // Sort + dedup. The publish loop assumes monotonically increasing
-    // levels because it only publishes the gap between consecutive
-    // levels — going back would require deleting labels, which the
-    // coordinator doesn't expose.
-    let mut preload_counts = args.preload_counts.clone();
+    if !args.publish_batch_sizes.is_empty() && args.publish_samples_per_batch == 0 {
+        eprintln!("error: --publish-samples-per-batch must be > 0 when --publish-batch-sizes is set");
+        return ExitCode::from(2);
+    }
+
+    let log_n_shards = effective_n_shards.trailing_zeros() as usize;
+    let k = args.kzh_k.unwrap_or_else(|| optimal_kzh_k(args.shard_log_capacity));
+
+    // Resolve preload_counts. Either taken directly from --preload-counts
+    // or derived from --fill-percents × true_capacity, minus the initial
+    // bulk-prefill (those entries are anonymous and not lookup-sampleable).
+    let preload_counts: Vec<usize> = if !args.preload_counts.is_empty() {
+        let mut v = args.preload_counts.clone();
+        v.sort();
+        v.dedup();
+        v
+    } else {
+        let true_cap: u128 = 1u128 << args.true_log_capacity.unwrap();
+        let mut pcts = args.fill_percents.clone();
+        pcts.sort();
+        pcts.dedup();
+        pcts.into_iter()
+            .map(|pct| {
+                let target_total = ((true_cap * pct as u128) / 100u128) as i128;
+                let sampleable = target_total - args.initial_prefill_count as i128;
+                sampleable.max(0) as usize
+            })
+            .collect()
+    };
+    // Sort + dedup once more (fill_percents=0 might map to preload=0
+    // alongside other 0s if initial_prefill is large).
+    let mut preload_counts = preload_counts;
     preload_counts.sort();
     preload_counts.dedup();
-    if preload_counts[0] == 0 {
-        // 0 means "sample without publishing anything new" — but we
-        // can't sample if there are no labels at all, so skip.
+    // We keep a leading 0 — it means "no lookup samples at this stage,
+    // but the stage may still run a publish bench against the
+    // initial-prefilled state". Without a publish-bench config we
+    // skip it.
+    let publish_enabled = !args.publish_batch_sizes.is_empty();
+    if preload_counts.is_empty() {
+        eprintln!("error: empty sweep after dedup");
+        return ExitCode::from(2);
+    }
+    if preload_counts[0] == 0 && !publish_enabled {
         eprintln!(
-            "warn: preload_count 0 has no labels to sample; dropping that level"
+            "warn: preload_count 0 has no labels to sample and publish bench is disabled; \
+             dropping that level"
         );
         preload_counts.remove(0);
         if preload_counts.is_empty() {
@@ -238,19 +426,20 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     }
-    let log_n_shards = args.endpoints.len().trailing_zeros() as usize;
 
     // ---- build ShardedAegon -------------------------------------------
-    // Same wiring as `aegon_coordinator_bench`: remote shards + optional
-    // Redis for occupancy probes.
     let mut builder = ShardedAegonConfig::<Bn254, Pcs>::builder()
         .shard_log_capacity(args.shard_log_capacity)
         .log_n_shards(log_n_shards)
         .private(args.private)
-        .kzh_k(args.kzh_k)
-        .shards(ShardTransport::Remote {
+        .kzh_k(k);
+    if local_mode {
+        builder = builder.shards(ShardTransport::InProcess);
+    } else {
+        builder = builder.shards(ShardTransport::Remote {
             endpoints: args.endpoints.clone(),
         });
+    }
     if let Some(path) = &args.srs_path {
         builder = builder.srs(SrsSource::Path(path.clone()));
     }
@@ -268,15 +457,16 @@ fn main() -> ExitCode {
     };
 
     eprintln!(
-        "bench: connecting to {} shards (shard_log_capacity={}, kzh_k={}, log_n_shards={})",
-        args.endpoints.len(),
+        "bench: mode={} n_shards={} (shard_log_capacity={}, kzh_k={}, log_n_shards={})",
+        if local_mode { "local" } else { "remote" },
+        effective_n_shards,
         args.shard_log_capacity,
-        args.kzh_k,
+        k,
         log_n_shards
     );
     let mut rng = ChaCha20Rng::seed_from_u64(args.setup_seed.unwrap_or(0));
     let t_setup = Instant::now();
-    let state = match Sharded::setup(&mut rng, &cfg) {
+    let mut state = match Sharded::setup(&mut rng, &cfg) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("error: setup failed: {e}");
@@ -285,6 +475,31 @@ fn main() -> ExitCode {
     };
     let setup_ms = t_setup.elapsed().as_secs_f64() * 1000.0;
     eprintln!("bench: setup OK in {setup_ms:.1} ms");
+
+    // Initial bulk-prefill (local mode only). Anonymous filler that
+    // pads the dict to a realistic fill level without going through
+    // publish — keeps the lookup-bench's preload climb cheap even at
+    // medium/planetary scale. Must be done before any publish call:
+    // `prefill_random` errors at epoch != 0.
+    let mut initial_prefill_ms: f64 = 0.0;
+    if args.initial_prefill_count > 0 {
+        eprintln!(
+            "bench: initial prefill of {} anonymous entries (seed_base={})",
+            args.initial_prefill_count, args.prefill_seed
+        );
+        let t = Instant::now();
+        if let Err(e) =
+            state.prefill_random_per_shard(args.initial_prefill_count, args.prefill_seed)
+        {
+            eprintln!("error: initial prefill failed: {e}");
+            return ExitCode::from(1);
+        }
+        initial_prefill_ms = t.elapsed().as_secs_f64() * 1000.0;
+        eprintln!(
+            "bench: initial prefill done in {:.1} s",
+            initial_prefill_ms / 1000.0
+        );
+    }
 
     // ---- spawn in-process CoordinatorServer ---------------------------
     // The bench owns the `Arc<RwLock<ShardedAegon>>` and gives a clone
@@ -392,13 +607,16 @@ fn main() -> ExitCode {
     };
 
     // ---- preload sweep ------------------------------------------------
-    // `current_count` tracks how many labels have been published so
-    // far. Each level publishes `target - current_count` more, in
-    // batches of `--publish-batch-size`. Labels follow a bench-local
-    // namespace `bench-u{i}` so we always know the value bytes
-    // (`bench-v{i}`) and can call `lookup_value_with_bytes` without
-    // touching the side-channel KV.
+    // `current_count` tracks how many labels have been published in the
+    // **lookup-sampleable** namespace so far (i.e. via `phone_label(i)`
+    // for `i in [0..current_count)`). Each stage publishes
+    // `target - current_count` more in chunks of `--publish-batch-size`.
+    //
+    // The bench also tracks a separate publish-bench namespace
+    // (`PUBLISH_BENCH_NAMESPACE_OFFSET` upward) so the publish-bench
+    // samples never collide with the lookup-bench namespace.
     let mut current_count: usize = 0;
+    let mut publish_bench_idx: u64 = PUBLISH_BENCH_NAMESPACE_OFFSET;
     let mut level_reports: Vec<String> = Vec::new();
 
     for (level_idx, &target) in preload_counts.iter().enumerate() {
@@ -414,7 +632,7 @@ fn main() -> ExitCode {
         // chunks. We do this one batch at a time so a single failure
         // doesn't lose all progress and so progress reports come out
         // at a reasonable rate.
-        let mut publish_ms_total: f64 = 0.0;
+        let mut preload_publish_ms_total: f64 = 0.0;
         while current_count < target {
             let batch_end = (current_count + args.publish_batch_size).min(target);
             let updates: Vec<(Vec<u8>, Vec<u8>)> = (current_count..batch_end)
@@ -433,7 +651,7 @@ fn main() -> ExitCode {
                 s.publish(&updates)
             };
             let ms = t.elapsed().as_secs_f64() * 1000.0;
-            publish_ms_total += ms;
+            preload_publish_ms_total += ms;
             match res {
                 Ok(_commit) => {
                     eprintln!(
@@ -467,7 +685,12 @@ fn main() -> ExitCode {
         // Sample lookups. Pick deterministic indices spread across
         // [0..current_count] so different sweep levels don't all keep
         // hitting the same hot label.
-        let n_samples = args.samples_per_level;
+        //
+        // Skip lookup sampling entirely if `current_count == 0` (no
+        // labels in the sampleable namespace yet). The stage still
+        // runs the publish bench below — useful as a baseline at
+        // fill_pct=0 stages.
+        let n_samples = if current_count == 0 { 0 } else { args.samples_per_level };
         let mut samples_json: Vec<String> = Vec::with_capacity(n_samples);
         for sample_idx in 0..n_samples {
             // Deterministic spread: stride by a coprime increment to
@@ -639,10 +862,52 @@ fn main() -> ExitCode {
                 return ExitCode::from(1);
             }
 
-            // ---- wire-size + application-size accounting ------------
-            // Reproduce the responses the gRPC server would send (the
-            // server's `encode` helper is private, but it's just
-            // canonical-uncompressed serialization — same as below).
+            // ---- size accounting -------------------------------------
+            //
+            // Per the user's spec, each lookup type reports three
+            // numbers: `*_data_bytes`, `*_proof_bytes`,
+            // `*_total_bytes = data + proof`. "Data" is the literal
+            // application-level payload (label/value bytes); "proof" is
+            // the cryptographic-opening byte cost; "total" is their
+            // sum.
+            //
+            //   * label lookup: data = label bytes (the user's queried
+            //     identifier); proof = `serialize_uncompressed(label_
+            //     proof)` (does NOT contain the label bytes). The
+            //     full gRPC response also ships back the slot bytes —
+            //     reported as `label_slot_bytes` for transparency but
+            //     NOT included in proof (the user spec sums only data
+            //     + proof).
+            //
+            //   * value lookup: data = value bytes; proof =
+            //     `serialize_uncompressed(value_proof)` (does NOT
+            //     contain the value bytes — the protobuf sends them
+            //     in a separate `value` field).
+            //
+            //   * value history: data = sum of `value_bytes.len()`
+            //     across entries (each entry carries one value
+            //     snapshot). proof = serialize_uncompressed length of
+            //     the full `ShardedValueHistory` struct MINUS data
+            //     (the struct embeds value_bytes inline, so we
+            //     subtract to avoid double-counting in
+            //     total = data + proof). For HISTORY_WINDOW = 1
+            //     entry × 256-byte values the proof dwarfs data, and
+            //     `total` matches the full struct's
+            //     `serialize_uncompressed` length.
+            //
+            //   * label history: data = label bytes (per the user
+            //     spec — "the one and only label in label history").
+            //     proof = serialize_uncompressed length of the full
+            //     `ShardedLabelHistory` struct MINUS the label bytes
+            //     it inlines (the struct has its own `label: Vec<u8>`
+            //     field; subtracting keeps total = data + proof from
+            //     double-counting). `total` then equals the struct's
+            //     `serialize_uncompressed` length.
+            //
+            // Also recorded for cross-checking: the actual protobuf-
+            // encoded gRPC response sizes (`*_wire_bytes`), so a
+            // reader can confirm `data + proof + framing ≈ wire`.
+
             let mut slot_bytes: Vec<u8> = Vec::with_capacity(slot.uncompressed_size());
             if let Err(e) = slot.serialize_uncompressed(&mut slot_bytes) {
                 eprintln!("error: serialize slot: {e}");
@@ -660,87 +925,139 @@ fn main() -> ExitCode {
                 eprintln!("error: serialize value proof: {e}");
                 return ExitCode::from(1);
             }
-            // `LookupValueResponse.value` may or may not be populated
-            // by the coordinator depending on DbSource — to compute
-            // the *worst-case* wire size we report it both with and
-            // without inline value bytes.
-            let label_resp = LookupLabelResponse {
-                slot: slot_bytes.clone(),
-                proof: label_proof_bytes.clone(),
-            };
-            let value_resp_empty = LookupValueResponse {
-                proof: value_proof_bytes.clone(),
-                value: Vec::new(),
-            };
-            let value_resp_with_value = LookupValueResponse {
-                proof: value_proof_bytes.clone(),
-                value: value.clone(),
-            };
-
-            let label_wire_bytes = label_resp.encoded_len();
-            let value_wire_bytes_empty = value_resp_empty.encoded_len();
-            let value_wire_bytes_with_value = value_resp_with_value.encoded_len();
-
-            // History wire size: encode the same bundle the server
-            // ships back. Each entry carries 3 opening proofs + the
-            // post/pre commits + per-entry value bytes, so the wire
-            // size grows roughly linearly in `history.entries.len()`
-            // up to HISTORY_WINDOW.
             let mut history_bytes: Vec<u8> = Vec::with_capacity(history.uncompressed_size());
             if let Err(e) = history.serialize_uncompressed(&mut history_bytes) {
                 eprintln!("error: serialize history: {e}");
                 return ExitCode::from(1);
             }
-            let history_resp = LookupHistoryResponse {
-                history: history_bytes.clone(),
-            };
-            let history_wire_bytes = history_resp.encoded_len();
-            let history_entries = history.entries.len();
-
-            // Label-history wire size. Asymmetric with value-
-            // history: at most one placement record + at most one
-            // freshness opening, so the bundle is always smaller
-            // than a 5-entry value-history. We still encode it for
-            // a fair size comparison.
             let mut label_history_bytes: Vec<u8> =
                 Vec::with_capacity(label_history.uncompressed_size());
             if let Err(e) = label_history.serialize_uncompressed(&mut label_history_bytes) {
                 eprintln!("error: serialize label_history: {e}");
                 return ExitCode::from(1);
             }
+
+            // Protobuf wire sizes (for cross-checks / `wire == data +
+            // proof + framing` sanity).
+            let label_resp = LookupLabelResponse {
+                slot: slot_bytes.clone(),
+                proof: label_proof_bytes.clone(),
+            };
+            let value_resp_with_value = LookupValueResponse {
+                proof: value_proof_bytes.clone(),
+                value: value.clone(),
+            };
+            let history_resp = LookupHistoryResponse {
+                history: history_bytes.clone(),
+            };
             let label_history_resp = LookupLabelHistoryResponse {
                 history: label_history_bytes.clone(),
             };
+            let label_wire_bytes = label_resp.encoded_len();
+            let value_wire_bytes = value_resp_with_value.encoded_len();
+            let history_wire_bytes = history_resp.encoded_len();
             let label_history_wire_bytes = label_history_resp.encoded_len();
 
-            // "proof overhead" per the user's spec: the gap between
-            // the bytes shipped to the client and the underlying
-            // application-level payload (label for the label call,
-            // value for the value call; for history, the payload is
-            // n_entries × value_size since each entry carries one
-            // value snapshot).
-            let label_size_bytes = label.len();
-            let value_size_bytes = value.len();
-            let history_payload_bytes = history_entries * value_size_bytes;
-            let label_proof_overhead_bytes =
-                label_wire_bytes.saturating_sub(label_size_bytes);
-            let value_proof_overhead_bytes =
-                value_wire_bytes_with_value.saturating_sub(value_size_bytes);
-            let history_proof_overhead_bytes =
-                history_wire_bytes.saturating_sub(history_payload_bytes);
+            let history_entries = history.entries.len();
+            let value_history_value_bytes_sum: usize = history
+                .entries
+                .iter()
+                .map(|e| e.value_bytes.len())
+                .sum();
+
+            // Per-type data/proof/total triples.
+            let label_lookup_data_bytes = label.len();
+            let label_lookup_proof_bytes = label_proof_bytes.len();
+            let label_lookup_total_bytes =
+                label_lookup_data_bytes + label_lookup_proof_bytes;
+
+            let value_lookup_data_bytes = value.len();
+            let value_lookup_proof_bytes = value_proof_bytes.len();
+            let value_lookup_total_bytes =
+                value_lookup_data_bytes + value_lookup_proof_bytes;
+
+            let value_history_lookup_data_bytes = value_history_value_bytes_sum;
+            let value_history_lookup_proof_bytes = history_bytes
+                .len()
+                .saturating_sub(value_history_lookup_data_bytes);
+            let value_history_lookup_total_bytes =
+                value_history_lookup_data_bytes + value_history_lookup_proof_bytes;
+
+            let label_history_lookup_data_bytes = label.len();
+            let label_history_lookup_proof_bytes = label_history_bytes
+                .len()
+                .saturating_sub(label_history_lookup_data_bytes);
+            let label_history_lookup_total_bytes =
+                label_history_lookup_data_bytes + label_history_lookup_proof_bytes;
 
             samples_json.push(format!(
-                "        {{\n          \"sample_idx\": {sample_idx},\n          \"label_idx\": {idx},\n          \"server_lookup_label_ns\": {server_label_ns},\n          \"server_lookup_value_ns\": {server_value_ns},\n          \"server_lookup_history_ns\": {server_history_ns},\n          \"server_lookup_label_history_ns\": {server_label_history_ns},\n          \"client_lookup_label_ns\": {client_label_ns},\n          \"client_lookup_value_ns\": {client_value_ns},\n          \"client_lookup_history_ns\": {client_history_ns},\n          \"client_lookup_label_history_ns\": {client_label_history_ns},\n          \"label_size_bytes\": {label_size_bytes},\n          \"value_size_bytes\": {value_size_bytes},\n          \"history_entries\": {history_entries},\n          \"label_wire_bytes\": {label_wire_bytes},\n          \"value_wire_bytes_empty_value\": {value_wire_bytes_empty},\n          \"value_wire_bytes_with_value\": {value_wire_bytes_with_value},\n          \"history_wire_bytes\": {history_wire_bytes},\n          \"label_history_wire_bytes\": {label_history_wire_bytes},\n          \"label_proof_field_bytes\": {label_proof_field},\n          \"value_proof_field_bytes\": {value_proof_field},\n          \"history_proof_field_bytes\": {history_proof_field},\n          \"label_history_proof_field_bytes\": {label_history_proof_field},\n          \"label_slot_field_bytes\": {label_slot_field},\n          \"label_proof_overhead_bytes\": {label_proof_overhead_bytes},\n          \"value_proof_overhead_bytes\": {value_proof_overhead_bytes},\n          \"history_proof_overhead_bytes\": {history_proof_overhead_bytes}\n        }}",
-                label_proof_field = label_proof_bytes.len(),
-                value_proof_field = value_proof_bytes.len(),
-                history_proof_field = history_bytes.len(),
-                label_history_proof_field = label_history_bytes.len(),
-                label_slot_field = slot_bytes.len(),
+                concat!(
+                    "        {{\n",
+                    "          \"sample_idx\": {sample_idx},\n",
+                    "          \"label_idx\": {idx},\n",
+                    "          \"server_lookup_label_ns\": {server_label_ns},\n",
+                    "          \"server_lookup_value_ns\": {server_value_ns},\n",
+                    "          \"server_lookup_history_ns\": {server_history_ns},\n",
+                    "          \"server_lookup_label_history_ns\": {server_label_history_ns},\n",
+                    "          \"client_lookup_label_ns\": {client_label_ns},\n",
+                    "          \"client_lookup_value_ns\": {client_value_ns},\n",
+                    "          \"client_lookup_history_ns\": {client_history_ns},\n",
+                    "          \"client_lookup_label_history_ns\": {client_label_history_ns},\n",
+                    "          \"history_entries\": {history_entries},\n",
+                    "          \"label_lookup_data_bytes\": {l_d},\n",
+                    "          \"label_lookup_proof_bytes\": {l_p},\n",
+                    "          \"label_lookup_total_bytes\": {l_t},\n",
+                    "          \"value_lookup_data_bytes\": {v_d},\n",
+                    "          \"value_lookup_proof_bytes\": {v_p},\n",
+                    "          \"value_lookup_total_bytes\": {v_t},\n",
+                    "          \"value_history_lookup_data_bytes\": {vh_d},\n",
+                    "          \"value_history_lookup_proof_bytes\": {vh_p},\n",
+                    "          \"value_history_lookup_total_bytes\": {vh_t},\n",
+                    "          \"label_history_lookup_data_bytes\": {lh_d},\n",
+                    "          \"label_history_lookup_proof_bytes\": {lh_p},\n",
+                    "          \"label_history_lookup_total_bytes\": {lh_t},\n",
+                    "          \"label_slot_bytes\": {slot_b},\n",
+                    "          \"label_response_wire_bytes\": {l_w},\n",
+                    "          \"value_response_wire_bytes\": {v_w},\n",
+                    "          \"history_response_wire_bytes\": {h_w},\n",
+                    "          \"label_history_response_wire_bytes\": {lh_w}\n",
+                    "        }}"
+                ),
+                sample_idx = sample_idx,
+                idx = idx,
+                server_label_ns = server_label_ns,
+                server_value_ns = server_value_ns,
+                server_history_ns = server_history_ns,
+                server_label_history_ns = server_label_history_ns,
+                client_label_ns = client_label_ns,
+                client_value_ns = client_value_ns,
+                client_history_ns = client_history_ns,
+                client_label_history_ns = client_label_history_ns,
+                history_entries = history_entries,
+                l_d = label_lookup_data_bytes,
+                l_p = label_lookup_proof_bytes,
+                l_t = label_lookup_total_bytes,
+                v_d = value_lookup_data_bytes,
+                v_p = value_lookup_proof_bytes,
+                v_t = value_lookup_total_bytes,
+                vh_d = value_history_lookup_data_bytes,
+                vh_p = value_history_lookup_proof_bytes,
+                vh_t = value_history_lookup_total_bytes,
+                lh_d = label_history_lookup_data_bytes,
+                lh_p = label_history_lookup_proof_bytes,
+                lh_t = label_history_lookup_total_bytes,
+                slot_b = slot_bytes.len(),
+                l_w = label_wire_bytes,
+                v_w = value_wire_bytes,
+                h_w = history_wire_bytes,
+                lh_w = label_history_wire_bytes,
             ));
 
             if sample_idx == 0 || (sample_idx + 1) % 10 == 0 {
                 eprintln!(
-                    "  sample {}: server_label={:.2}ms server_value={:.2}ms server_history={:.2}ms server_label_history={:.2}ms client_label={:.2}ms client_value={:.2}ms client_history={:.2}ms client_label_history={:.2}ms label_wire={}B value_wire={}B history_wire={}B (entries={}) label_history_wire={}B",
+                    "  sample {}: server[lbl/val/vh/lh]={:.2}/{:.2}/{:.2}/{:.2}ms \
+                     client[lbl/val/vh/lh]={:.2}/{:.2}/{:.2}/{:.2}ms \
+                     totals[lbl/val/vh/lh]={}/{}/{}/{}B (vh_entries={})",
                     sample_idx,
                     server_label_ns as f64 / 1e6,
                     server_value_ns as f64 / 1e6,
@@ -750,20 +1067,263 @@ fn main() -> ExitCode {
                     client_value_ns as f64 / 1e6,
                     client_history_ns as f64 / 1e6,
                     client_label_history_ns as f64 / 1e6,
-                    label_wire_bytes,
-                    value_wire_bytes_with_value,
-                    history_wire_bytes,
+                    label_lookup_total_bytes,
+                    value_lookup_total_bytes,
+                    value_history_lookup_total_bytes,
+                    label_history_lookup_total_bytes,
                     history_entries,
-                    label_history_wire_bytes,
                 );
             }
         }
 
-        // Per-level eyeball summary on the four timing series.
-        // Computing them inline here keeps the JSON writer simple.
-        let level_block = format!(
-            "    {{\n      \"preload_count\": {target},\n      \"publish_ms_total\": {publish_ms_total:.4},\n      \"samples\": [\n{samples}\n      ]\n    }}",
+        // ---- per-stage publish bench (optional) -------------------
+        // After the lookup samples, sweep `--publish-batch-sizes`
+        // (each batch run `--publish-samples-per-batch` times) and
+        // record per-publish wall time + commit-class byte sizes.
+        // Disjoint namespace from the lookup-sampleable space so the
+        // bench doesn't accidentally turn its own publish-samples
+        // into sample candidates for the next stage.
+        let mut publish_bench_json: Option<String> = None;
+        if publish_enabled {
+            let mut batch_blocks: Vec<String> = Vec::with_capacity(args.publish_batch_sizes.len());
+            for &batch_size in &args.publish_batch_sizes {
+                eprintln!(
+                    "  publish_bench: batch={batch_size} samples={}",
+                    args.publish_samples_per_batch
+                );
+                let mut samples_ms: Vec<f64> = Vec::with_capacity(args.publish_samples_per_batch);
+                // Commit-class sizes are invariant in batch_size for a
+                // given n_shards; we still record them per batch so a
+                // buggy invariant shows up in the JSON.
+                let mut commit_sizes: Option<(u64, u64, u64, u64, u64)> = None;
+                for sample_idx in 0..args.publish_samples_per_batch {
+                    let updates: Vec<(Vec<u8>, Vec<u8>)> = (0..batch_size as u64)
+                        .map(|_| {
+                            let idx = publish_bench_idx;
+                            publish_bench_idx += 1;
+                            (phone_label(idx), rsa_value(idx))
+                        })
+                        .collect();
+                    let t = Instant::now();
+                    let res = {
+                        let mut s = shared.blocking_write();
+                        s.publish(&updates)
+                    };
+                    let ms = t.elapsed().as_secs_f64() * 1000.0;
+                    samples_ms.push(ms);
+                    let commit = match res {
+                        Ok(c) => c,
+                        Err(e) => {
+                            eprintln!(
+                                "error: publish_bench publish failed (level={target}, \
+                                 batch={batch_size}, sample={sample_idx}): {e}"
+                            );
+                            return ExitCode::from(1);
+                        },
+                    };
+                    if commit_sizes.is_none() {
+                        let (mut ic, mut vc, mut ric, mut rvc) = (0u64, 0u64, 0u64, 0u64);
+                        for shard_commit in &commit.per_shard {
+                            ic += shard_commit.index_commitment.uncompressed_size() as u64;
+                            vc += shard_commit.value_commitment.uncompressed_size() as u64;
+                            ric += shard_commit.rand_index_commitment.uncompressed_size() as u64;
+                            rvc += shard_commit.rand_value_commitment.uncompressed_size() as u64;
+                        }
+                        let total = commit.uncompressed_size() as u64;
+                        commit_sizes = Some((ic, vc, ric, rvc, total));
+                    }
+                }
+                let mut sorted = samples_ms.clone();
+                sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                let fastest = sorted[0];
+                let slowest = sorted[sorted.len() - 1];
+                let median = sorted[sorted.len() / 2];
+                let mean = samples_ms.iter().sum::<f64>() / samples_ms.len() as f64;
+                let (ic, vc, ric, rvc, total_commit) =
+                    commit_sizes.expect("commit_sizes set in publish_bench loop");
+                let samples_str = samples_ms
+                    .iter()
+                    .map(|t| format!("{t:.4}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                batch_blocks.push(format!(
+                    concat!(
+                        "          {{\n",
+                        "            \"batch_size\": {bs},\n",
+                        "            \"samples_ms\": [{samples_str}],\n",
+                        "            \"fastest_ms\": {fastest:.4},\n",
+                        "            \"slowest_ms\": {slowest:.4},\n",
+                        "            \"median_ms\": {median:.4},\n",
+                        "            \"mean_ms\": {mean:.4},\n",
+                        "            \"index_commitment_bytes\": {ic},\n",
+                        "            \"value_commitment_bytes\": {vc},\n",
+                        "            \"rand_index_commitment_bytes\": {ric},\n",
+                        "            \"rand_value_commitment_bytes\": {rvc},\n",
+                        "            \"total_commit_bytes\": {tot}\n",
+                        "          }}"
+                    ),
+                    bs = batch_size,
+                    samples_str = samples_str,
+                    fastest = fastest,
+                    slowest = slowest,
+                    median = median,
+                    mean = mean,
+                    ic = ic,
+                    vc = vc,
+                    ric = ric,
+                    rvc = rvc,
+                    tot = total_commit,
+                ));
+            }
+            publish_bench_json = Some(format!(
+                "        \"batches\": [\n{batches}\n        ]",
+                batches = batch_blocks.join(",\n"),
+            ));
+        }
+
+        // ---- per-stage audit bench --------------------------------
+        // Run `verify_sharded_invariance` on consecutive epoch
+        // transitions starting from a fresh `AuditState` at epoch 0.
+        // The auditor's per-epoch cost is `O(n_shards × 2)` group
+        // equations (no PCS openings, no proofs to ship — the only
+        // bytes pulled per audit step are the next epoch's
+        // `ShardedEpochCommitment`).
+        //
+        // We do this AFTER publish-bench so the chain has plenty of
+        // transitions to sample. With `samples = audit_samples`, we
+        // need ≥ samples + 1 published epochs available.
+        //
+        // The whole audit is verifier-side work — the "server" cost is
+        // just the `epoch_commitment(epoch)` clone (cached in
+        // `epoch_commits`). We record that fetch time separately as
+        // `server_fetch_ns` so the auditor + bulletin-board sides are
+        // both visible.
+        let mut audit_json: Option<String> = None;
+        if args.audit_samples > 0 {
+            let current_epoch = shared.blocking_read().current_commitment().epoch;
+            if current_epoch < 1 {
+                eprintln!(
+                    "  audit: skipped — only epoch 0 available (no transitions to audit)"
+                );
+            } else {
+                let max_audit = args.audit_samples.min(current_epoch as usize);
+                let verifier_ctx = shared.blocking_read().sharded_verifier_context();
+                let mut audit_state =
+                    AuditState::<<Bn254 as Pairing>::ScalarField>::default();
+                let prev0 = match shared.blocking_read().epoch_commitment(0) {
+                    Some(c) => c,
+                    None => {
+                        eprintln!("error: epoch 0 commitment missing");
+                        return ExitCode::from(1);
+                    },
+                };
+                let mut prev_commit = prev0;
+                let mut audit_blocks: Vec<String> = Vec::with_capacity(max_audit);
+                for i in 0..max_audit {
+                    let next_epoch = i as u64 + 1;
+                    // Time the server-side commit fetch (cached clone)
+                    // and the auditor-side verify separately. Auditors
+                    // pull `next` from a bulletin board; the bench
+                    // approximates that with the local `epoch_commitment`
+                    // accessor (a clone of a cached `Vec` entry).
+                    let t_fetch = Instant::now();
+                    let next_commit = match shared.blocking_read().epoch_commitment(next_epoch) {
+                        Some(c) => c,
+                        None => {
+                            eprintln!(
+                                "error: epoch_commitment({next_epoch}) missing during audit"
+                            );
+                            return ExitCode::from(1);
+                        },
+                    };
+                    let server_fetch_ns = t_fetch.elapsed().as_nanos() as u64;
+
+                    let t_audit = Instant::now();
+                    let ok = verify_sharded_invariance::<Bn254, Pcs>(
+                        &verifier_ctx,
+                        &mut audit_state,
+                        &prev_commit,
+                        &next_commit,
+                    );
+                    let audit_ns = t_audit.elapsed().as_nanos() as u64;
+                    match ok {
+                        Ok(true) => {},
+                        Ok(false) => {
+                            eprintln!(
+                                "error: verify_sharded_invariance returned false at \
+                                 epoch transition {i} -> {next_epoch}"
+                            );
+                            return ExitCode::from(1);
+                        },
+                        Err(e) => {
+                            eprintln!(
+                                "error: verify_sharded_invariance failed at epoch transition \
+                                 {i} -> {next_epoch}: {e}"
+                            );
+                            return ExitCode::from(1);
+                        },
+                    }
+                    let audit_proof_bytes = next_commit.uncompressed_size() as u64;
+                    audit_blocks.push(format!(
+                        concat!(
+                            "          {{\n",
+                            "            \"sample_idx\": {idx},\n",
+                            "            \"prev_epoch\": {pe},\n",
+                            "            \"next_epoch\": {ne},\n",
+                            "            \"server_fetch_ns\": {fetch_ns},\n",
+                            "            \"audit_invariance_ns\": {audit_ns},\n",
+                            "            \"audit_proof_bytes\": {bytes}\n",
+                            "          }}"
+                        ),
+                        idx = i,
+                        pe = i,
+                        ne = next_epoch,
+                        fetch_ns = server_fetch_ns,
+                        audit_ns = audit_ns,
+                        bytes = audit_proof_bytes,
+                    ));
+                    if i == 0 || (i + 1) % 5 == 0 {
+                        eprintln!(
+                            "  audit sample {i}: epoch {i}->{next_epoch} verify={:.3}ms \
+                             fetch={:.3}ms proof_bytes={audit_proof_bytes}",
+                            audit_ns as f64 / 1e6,
+                            server_fetch_ns as f64 / 1e6,
+                        );
+                    }
+                    prev_commit = next_commit;
+                }
+                audit_json = Some(format!(
+                    "        \"samples\": [\n{samples}\n        ]",
+                    samples = audit_blocks.join(",\n"),
+                ));
+            }
+        }
+
+        // Per-stage JSON block. `lookup.samples` is empty when
+        // current_count==0; `publish_bench` is absent when
+        // --publish-batch-sizes was not provided.
+        let lookup_block = format!(
+            "      \"lookup\": {{\n        \"sample_count\": {sc},\n        \"samples\": [\n{samples}\n        ]\n      }}",
+            sc = samples_json.len(),
             samples = samples_json.join(",\n"),
+        );
+        let publish_block = match publish_bench_json {
+            Some(b) => format!(",\n      \"publish_bench\": {{\n{b}\n      }}"),
+            None => String::new(),
+        };
+        let audit_block = match audit_json {
+            Some(b) => format!(",\n      \"audit\": {{\n{b}\n      }}"),
+            None => String::new(),
+        };
+        let level_block = format!(
+            "    {{\n      \"preload_count\": {target},\n      \"current_count_after_topup\": {current_count},\n      \"preload_publish_ms_total\": {preload_publish_ms_total:.4},\n      \"rss_kb\": {rss},\n{lookup_block}{publish_block}{audit_block}\n    }}",
+            target = target,
+            current_count = current_count,
+            preload_publish_ms_total = preload_publish_ms_total,
+            rss = rss_kb,
+            lookup_block = lookup_block,
+            publish_block = publish_block,
+            audit_block = audit_block,
         );
         level_reports.push(level_block);
     }
@@ -780,18 +1340,68 @@ fn main() -> ExitCode {
         .map(|c| c.to_string())
         .collect::<Vec<_>>()
         .join(", ");
+    let fill_percents_json = args
+        .fill_percents
+        .iter()
+        .map(|p| p.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let publish_batch_sizes_json = args
+        .publish_batch_sizes
+        .iter()
+        .map(|b| b.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let true_log_capacity_json = match args.true_log_capacity {
+        Some(v) => v.to_string(),
+        None => "null".to_string(),
+    };
     let json = format!(
-        "{{\n  \"params\": {{\n    \"n_shards\": {n_shards},\n    \"log_n_shards\": {log_n_shards},\n    \"shard_log_capacity\": {shard_log_capacity},\n    \"kzh_k\": {kzh_k},\n    \"private\": {private},\n    \"samples_per_level\": {samples},\n    \"publish_batch_size\": {publish_batch_size},\n    \"endpoints\": [{endpoints_json}],\n    \"preload_counts\": [{preload_json}]\n  }},\n  \"setup_ms\": {setup_ms:.4},\n  \"levels\": [\n{levels}\n  ]\n}}\n",
-        n_shards = args.endpoints.len(),
+        concat!(
+            "{{\n",
+            "  \"params\": {{\n",
+            "    \"mode\": \"{mode}\",\n",
+            "    \"n_shards\": {n_shards},\n",
+            "    \"log_n_shards\": {log_n_shards},\n",
+            "    \"shard_log_capacity\": {shard_log_capacity},\n",
+            "    \"true_log_capacity\": {true_log_capacity},\n",
+            "    \"kzh_k\": {kzh_k},\n",
+            "    \"private\": {private},\n",
+            "    \"samples_per_level\": {samples},\n",
+            "    \"publish_batch_size\": {publish_batch_size},\n",
+            "    \"publish_batch_sizes\": [{publish_batch_sizes}],\n",
+            "    \"publish_samples_per_batch\": {publish_samples_per_batch},\n",
+            "    \"audit_samples\": {audit_samples},\n",
+            "    \"initial_prefill_count\": {initial_prefill_count},\n",
+            "    \"prefill_seed\": {prefill_seed},\n",
+            "    \"endpoints\": [{endpoints_json}],\n",
+            "    \"preload_counts\": [{preload_json}],\n",
+            "    \"fill_percents\": [{fill_percents_json}]\n",
+            "  }},\n",
+            "  \"setup_ms\": {setup_ms:.4},\n",
+            "  \"initial_prefill_ms\": {initial_prefill_ms:.4},\n",
+            "  \"levels\": [\n{levels}\n  ]\n",
+            "}}\n"
+        ),
+        mode = if local_mode { "local" } else { "remote" },
+        n_shards = effective_n_shards,
         log_n_shards = log_n_shards,
         shard_log_capacity = args.shard_log_capacity,
-        kzh_k = args.kzh_k,
+        true_log_capacity = true_log_capacity_json,
+        kzh_k = k,
         private = args.private,
         samples = args.samples_per_level,
         publish_batch_size = args.publish_batch_size,
+        publish_batch_sizes = publish_batch_sizes_json,
+        publish_samples_per_batch = args.publish_samples_per_batch,
+        audit_samples = args.audit_samples,
+        initial_prefill_count = args.initial_prefill_count,
+        prefill_seed = args.prefill_seed,
         endpoints_json = endpoints_json,
         preload_json = preload_json,
+        fill_percents_json = fill_percents_json,
         setup_ms = setup_ms,
+        initial_prefill_ms = initial_prefill_ms,
         levels = level_reports.join(",\n"),
     );
 

@@ -40,7 +40,8 @@ pub use hash::{HashSuite, Sha256Hash};
 pub use presets::optimal_kzh_k;
 pub use server::Aegon;
 pub use sharded::{
-    probe_at, rederive_sharded_fs_scalars, verify_lookup_history, verify_lookup_label,
+    build_merkle_path, build_merkle_root_and_paths, merkle_root, probe_at,
+    rederive_sharded_fs_scalars, verify_lookup_history, verify_lookup_label,
     verify_lookup_label_history, verify_lookup_value, verify_merkle_path,
     verify_sharded_consistency, verify_sharded_invariance, verify_sharded_lookup, EpochDigest,
     FreshnessAttestation, FreshnessAttestationLabel, LabelSlot, ShardTransport, ShardedAegon,
