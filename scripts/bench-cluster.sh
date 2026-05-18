@@ -20,23 +20,33 @@
 #   N_SHARDS            number of shards (power of 2) (32)
 #   SHARD_LOG_CAPACITY  log_2 slots per shard         (29)
 #   KZH_K               KZH-k block parameter         (10 — optimal_kzh_k(29))
-#   TOTAL_PRELOAD_LOG2  log_2 of total prefilled users (28 → 2^28 split across shards)
-#   BATCH_SIZES         comma-separated sweep sizes   (10,100,1000,10000)
-#   SAMPLES_PER_BATCH   timed publishes per batch     (5)
+#   TOTAL_PRELOAD_LOG2  log_2 of total prefilled users (8 → 2^8=256 split across shards)
+#   BATCH_SIZES         comma-separated sweep sizes   (2,4,8,...,16384)
+#   SAMPLES_PER_BATCH   timed publishes per batch     (1)
 #   SETUP_SEED          deterministic SRS gen seed    (42)
 #   PREFILL_SEED        deterministic prefill seed    (1)
-#   SHARD_MACHINE_TYPE  GCE machine type for shards   (n2-highmem-16 — 128 GB RAM)
+#   SHARD_MACHINE_TYPE  GCE machine type for shards   (n2-standard-16 — 64 GB RAM)
 #   COORD_MACHINE_TYPE  GCE machine type coordinator  (n2-standard-4)
 #
 # At the defaults above (N_SHARDS=32, SHARD_LOG_CAPACITY=29, KZH_K=10):
-#   * Each shard machine needs ~64 GB RAM. n2-highmem-16 (128 GB) leaves
-#     headroom; n2-highmem-8 (64 GB) is right at the edge and may OOM
-#     during the in-process SRS gen pass.
-#   * 32 × n2-highmem-16 ≈ $38/hr. Run `down` aggressively.
-#   * Redis is provisioned on its own small VM. Open-addressing
-#     occupancy goes via Redis `EXISTS`; shard prefill also writes
-#     `aegon:slot:{shard_id}:{slot_idx}` keys so the coordinator sees
-#     prefilled rows as occupied. `deploy` `FLUSHALL`s before starting.
+#   * Each shard's KZH-k SRS at log_cap=29 / kzh_k=10 is dominated by
+#     H_1: 2^29 entries × 64 B = 32 GiB. Plus H_2..H_10 (smaller),
+#     working set, and KZH aux state during the in-process SRS gen
+#     pass, peak memory lands around ~40-45 GiB.
+#   * n2-standard-16 (64 GB RAM) has empirically been enough for this;
+#     n2-highmem-16 (128 GB) is overkill but the safe choice if
+#     you've changed the per-shard log_cap upward or are stacking
+#     multiple shards per machine.
+#   * 32 × n2-standard-16 ≈ $25/hr. Run `down` aggressively.
+#   * Redis is provisioned on its own small VM. In the current
+#     architecture (coord-owns-everything), the shard's `--db-url` is
+#     a no-op and the shard prefill writes nothing to Redis — the
+#     coord's open-addressing probe falls back to a gRPC
+#     `is_index_slot_occupied` against the owning shard on local-DB
+#     miss. At the default light preload (256 entries / 2^34 capacity)
+#     the collision rate is essentially zero, so the fallback rarely
+#     fires. `deploy` still `FLUSHALL`s before starting to reset the
+#     coord's own keyspace from prior runs.
 #
 # This script is a prototyping aid, not production infrastructure.
 
@@ -47,12 +57,19 @@ ZONE="${ZONE:-us-central1-f}"
 N_SHARDS="${N_SHARDS:-32}"
 SHARD_LOG_CAPACITY="${SHARD_LOG_CAPACITY:-29}"
 KZH_K="${KZH_K:-10}"
-TOTAL_PRELOAD_LOG2="${TOTAL_PRELOAD_LOG2:-28}"
-BATCH_SIZES="${BATCH_SIZES:-10,100,1000,10000}"
-SAMPLES_PER_BATCH="${SAMPLES_PER_BATCH:-5}"
+# Default: 2^8 = 256 users preloaded total, evenly split across shards.
+# This is the "light preload" baseline used by the 2^34-capacity bench.
+TOTAL_PRELOAD_LOG2="${TOTAL_PRELOAD_LOG2:-8}"
+# Default: power-of-two sweep from 2^1 to 2^14. Each batch is a single
+# `ShardedAegon::publish` call that fans out across all 32 shards.
+BATCH_SIZES="${BATCH_SIZES:-2,4,8,16,32,64,128,256,512,1024,2048,4096,8192,16384}"
+# Default: 1 sample per batch size. At log_cap=29 publish wall time
+# climbs steeply with batch size; one sample per size keeps the whole
+# sweep tractable. Bump to 3-5 for noise statistics.
+SAMPLES_PER_BATCH="${SAMPLES_PER_BATCH:-1}"
 SETUP_SEED="${SETUP_SEED:-42}"
 PREFILL_SEED="${PREFILL_SEED:-1}"
-SHARD_MACHINE_TYPE="${SHARD_MACHINE_TYPE:-n2-highmem-16}"
+SHARD_MACHINE_TYPE="${SHARD_MACHINE_TYPE:-n2-standard-16}"
 COORD_MACHINE_TYPE="${COORD_MACHINE_TYPE:-n2-standard-4}"
 REDIS_MACHINE_TYPE="${REDIS_MACHINE_TYPE:-n2-standard-2}"
 
@@ -259,7 +276,7 @@ cmd_up() {
       --network="$NETWORK" \
       --no-address \
       --tags="$SHARD_TAG" \
-      --image-family="ubuntu-2204-lts" --image-project="ubuntu-os-cloud" \
+      --image-family="ubuntu-2604-lts-amd64" --image-project="ubuntu-os-cloud" \
       --boot-disk-size=100GB >/dev/null
   done
 
@@ -275,7 +292,7 @@ cmd_up() {
       --network="$NETWORK" \
       --no-address \
       --tags="$COORD_TAG" \
-      --image-family="ubuntu-2204-lts" --image-project="ubuntu-os-cloud" \
+      --image-family="ubuntu-2604-lts-amd64" --image-project="ubuntu-os-cloud" \
       --boot-disk-size=20GB >/dev/null
   fi
 
@@ -296,7 +313,7 @@ cmd_up() {
       --network="$NETWORK" \
       --no-address \
       --tags="$DB_TAG" \
-      --image-family="ubuntu-2204-lts" --image-project="ubuntu-os-cloud" \
+      --image-family="ubuntu-2604-lts-amd64" --image-project="ubuntu-os-cloud" \
       --boot-disk-size=20GB >/dev/null
   fi
 
@@ -396,7 +413,20 @@ cmd_deploy() {
   # for empty polynomial slots.
   local dname; dname="$(db_name)"
   log "[$dname] installing + (re)starting redis on :$REDIS_PORT"
+  # Wait for unattended-upgrades (which runs at boot on fresh Ubuntu
+  # images) to release the apt lock. Without this, the install line
+  # races with the daemon and fails with
+  #   E: Could not get lock /var/lib/dpkg/lock-frontend.
+  # 90 s is generous: cloud-init's unattended-upgrades pass typically
+  # takes 30-60 s on a fresh n2-standard-2.
   remote "$dname" "set -e; \
+    for i in \$(seq 1 90); do \
+      if ! sudo fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 \
+         && ! sudo fuser /var/lib/apt/lists/lock >/dev/null 2>&1; then \
+        break; \
+      fi; \
+      sleep 1; \
+    done; \
     if ! dpkg -s redis-server >/dev/null 2>&1; then \
       sudo apt-get update -qq && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq redis-server; \
     fi; \
@@ -527,6 +557,79 @@ cmd_bench() {
   log "bench JSON saved to $LOCAL_BENCH_OUT"
 }
 
+# Run aegon_lookup_bench on the coordinator. The lookup bench owns its
+# own publish cycle (publishes PRELOAD_COUNT labels then samples
+# lookup_label/value/history for both server-direct and client paths),
+# so it expects to be run AFTER deploy + (optionally) AFTER the publish
+# bench but NOT mixed with one.
+#
+# Why scp the binary fresh each time: the deploy step only pushes
+# aegon_coordinator_bench, not aegon_lookup_bench. If you're running
+# the lookup bench after a deploy, the binary isn't on the coord yet.
+LOOKUP_PRELOAD_COUNT="${LOOKUP_PRELOAD_COUNT:-256}"
+LOOKUP_SAMPLES_PER_LEVEL="${LOOKUP_SAMPLES_PER_LEVEL:-20}"
+REMOTE_LOOKUP_OUT="/tmp/aegon-lookup-bench.json"
+LOCAL_LOOKUP_OUT="${LOCAL_LOOKUP_OUT:-/tmp/aegon-lookup-bench.json}"
+cmd_lookup_bench() {
+  require_project
+  require_power_of_two "$N_SHARDS"
+
+  # Need the binary on the coord. The default deploy step doesn't push
+  # it, so do that here (idempotent — same as cmd_deploy's coord push
+  # but for the lookup binary).
+  local cargo_features=""
+  if [[ "${TRACING:-0}" == "1" ]]; then
+    cargo_features="--features tracing_instrument"
+  fi
+  local local_bin_dir="$REPO_ROOT/target/release"
+  local remote_bin_dir="$local_bin_dir"
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    command -v docker >/dev/null || die "macOS host needs Docker (linux/amd64 build container)"
+    docker info >/dev/null 2>&1  || die "Docker daemon unreachable"
+    log "macOS host: building aegon_lookup_bench inside Docker"
+    docker run --rm --platform linux/amd64 \
+      -v "$REPO_ROOT:/workspace" -w /workspace \
+      rust:slim-bookworm \
+      bash -c "set -e; \
+        apt-get update >/dev/null && \
+        apt-get install -y --no-install-recommends protobuf-compiler ca-certificates >/dev/null && \
+        cargo build --release -p akd $cargo_features --target x86_64-unknown-linux-gnu \
+          --bin aegon_lookup_bench"
+    remote_bin_dir="$REPO_ROOT/target/x86_64-unknown-linux-gnu/release"
+  else
+    log "building aegon_lookup_bench (release)"
+    (cd "$REPO_ROOT" && cargo build --release -p akd $cargo_features --bin aegon_lookup_bench) >/dev/null
+  fi
+  [[ -x "$remote_bin_dir/aegon_lookup_bench" ]] || die "aegon_lookup_bench missing"
+
+  local cname; cname="$(coord_name)"
+  local csv; csv="$(shard_endpoints_csv)"
+  local db_ip; db_ip="$(db_internal_ip)"
+  log "[$cname] uploading aegon_lookup_bench"
+  scp_to "$cname" "$remote_bin_dir/aegon_lookup_bench"
+  remote "$cname" "sudo mkdir -p $REMOTE_BIN_DIR && \
+    sudo mv /tmp/aegon_lookup_bench $REMOTE_BIN_DIR/ && \
+    sudo chmod +x $REMOTE_BIN_DIR/aegon_lookup_bench"
+
+  log "[$cname] running aegon_lookup_bench (preload=$LOOKUP_PRELOAD_COUNT, samples=$LOOKUP_SAMPLES_PER_LEVEL)"
+  remote "$cname" \
+    "mkdir -p \$HOME/aegon-run && \
+     cd \$HOME/aegon-run && \
+     $REMOTE_BIN_DIR/aegon_lookup_bench \
+       --shard-log-capacity $SHARD_LOG_CAPACITY \
+       --kzh-k $KZH_K \
+       --setup-seed $SETUP_SEED \
+       --endpoints $csv \
+       --db-url redis://$db_ip:$REDIS_PORT \
+       --preload-counts $LOOKUP_PRELOAD_COUNT \
+       --samples-per-level $LOOKUP_SAMPLES_PER_LEVEL \
+       --output $REMOTE_LOOKUP_OUT" \
+    stream
+  log "retrieving $REMOTE_LOOKUP_OUT -> $LOCAL_LOOKUP_OUT"
+  scp_from "$cname" "$REMOTE_LOOKUP_OUT" "$LOCAL_LOOKUP_OUT"
+  log "lookup bench JSON saved to $LOCAL_LOOKUP_OUT"
+}
+
 cmd_logs() {
   require_project
   local idx="${1:-0}"
@@ -541,6 +644,110 @@ cmd_logs() {
     log "[$name] tail -f /tmp/aegon-shard.log (Ctrl-C to stop)"
     remote "$name" "tail -f /tmp/aegon-shard.log" stream
   fi
+}
+
+probe_one() {
+  # Single-host status probe. $1 = instance name, $2 = expected
+  # process name pattern (truncated to 15 chars to match
+  # /proc/<pid>/comm — pgrep -x is what we use). Writes one line to
+  # stdout with the form:
+  #   "[name] OK  pid=N rss=NMB freeMB=N oom=0 tail=..."
+  # or
+  #   "[name] BAD reason=... pid=... freeMB=... oom=...   tail=..."
+  # Exits non-zero on BAD so the watchdog aggregator can count
+  # failures via wait $pid && ... || failed=$((failed+1)).
+  local name="$1"
+  local proc="$2"
+  local out
+  out="$(remote "$name" "set +e; \
+    pid=\$(pgrep -x ${proc} | head -1); \
+    free=\$(free -m | awk '/^Mem:/ {print \$7}'); \
+    oom=\$(sudo dmesg 2>/dev/null | grep -ciE 'out of memory|killed process|invoked oom-killer' || echo 0); \
+    tail=\$(tail -n 1 /tmp/aegon-shard.log 2>/dev/null | head -c 80); \
+    if [ -z \"\$pid\" ]; then \
+      echo \"BAD reason=process-dead pid=- freeMB=\$free oom=\$oom tail=\$tail\"; \
+      exit 1; \
+    fi; \
+    rss=\$(ps -o rss= -p \$pid 2>/dev/null | awk '{print int(\$1/1024)}'); \
+    if [ \"\$oom\" -gt 0 ] 2>/dev/null; then \
+      echo \"BAD reason=oom-in-dmesg pid=\$pid rssMB=\$rss freeMB=\$free oom=\$oom tail=\$tail\"; \
+      exit 1; \
+    fi; \
+    echo \"OK  pid=\$pid rssMB=\$rss freeMB=\$free oom=0 tail=\$tail\"; \
+    exit 0" 2>/dev/null)"
+  local rc=$?
+  if [[ -z "$out" ]]; then
+    out="BAD reason=ssh-failed-or-no-output"
+    rc=1
+  fi
+  printf "[%-28s] %s\n" "$name" "$out"
+  return $rc
+}
+
+cmd_watchdog() {
+  # Parallel health probe across every VM in the cluster. Use this:
+  #   * once before a long phase (`watchdog`) to sanity-check no host
+  #     died between deploy and bench
+  #   * in a loop in the background during long phases:
+  #       while true; do ./bench-cluster.sh watchdog; sleep 60; done \
+  #           >> /tmp/aegon-watchdog.log 2>&1 &
+  # Exits 0 only if every host probe came back OK. Lines beginning
+  # with "BAD" are the ones to look at — they include the reason
+  # (process-dead / oom-in-dmesg / ssh-failed), the PID it expected,
+  # the available memory, and the last line of /tmp/aegon-shard.log
+  # (often the panic backtrace or OOM message).
+  #
+  # NOTE: `sudo dmesg` is needed on recent Ubuntu (kernel.dmesg_restrict=1).
+  # If the deploy account doesn't have passwordless sudo for dmesg, the
+  # check silently becomes "oom=0" and only the process-dead check fires.
+  # That's still useful — a real OOM kill takes the process down — but
+  # consider patching sudoers for full coverage on long-running benches.
+  require_project
+  require_power_of_two "$N_SHARDS"
+
+  log "watchdog: probing $((N_SHARDS + 2)) hosts in parallel"
+  local tmpdir; tmpdir="$(mktemp -d)"
+  local -a pids=()
+  for ((i = 0; i < N_SHARDS; i++)); do
+    local name; name="$(shard_name "$i")"
+    ( probe_one "$name" "aegon_shard_se" > "$tmpdir/shard-$i" ; echo $? > "$tmpdir/shard-$i.rc" ) &
+    pids+=("$!")
+  done
+  local cname; cname="$(coord_name)"
+  # Coord can be running either bench binary; check whichever exists.
+  # We pass the longer match prefix that both bench bins share.
+  ( probe_one "$cname" "aegon_coordinat" > "$tmpdir/coord" ; echo $? > "$tmpdir/coord.rc" ) &
+  pids+=("$!")
+  local dname; dname="$(db_name)"
+  ( probe_one "$dname" "redis-server"   > "$tmpdir/db"    ; echo $? > "$tmpdir/db.rc"    ) &
+  pids+=("$!")
+
+  for pid in "${pids[@]}"; do
+    wait "$pid" 2>/dev/null || true
+  done
+
+  # Replay outputs in deterministic order (shard-0 .. shard-N, coord, db)
+  # and tally failures.
+  local failed=0
+  for ((i = 0; i < N_SHARDS; i++)); do
+    cat "$tmpdir/shard-$i"
+    local rc; rc="$(cat "$tmpdir/shard-$i.rc" 2>/dev/null || echo 1)"
+    (( rc != 0 )) && failed=$((failed+1))
+  done
+  cat "$tmpdir/coord"
+  local rc; rc="$(cat "$tmpdir/coord.rc" 2>/dev/null || echo 1)"
+  (( rc != 0 )) && failed=$((failed+1))
+  cat "$tmpdir/db"
+  rc="$(cat "$tmpdir/db.rc" 2>/dev/null || echo 1)"
+  (( rc != 0 )) && failed=$((failed+1))
+  rm -rf "$tmpdir"
+
+  if (( failed > 0 )); then
+    log "watchdog: $failed host(s) BAD"
+    return 1
+  fi
+  log "watchdog: all $((N_SHARDS + 2)) hosts OK"
+  return 0
 }
 
 cmd_down() {
@@ -599,6 +806,14 @@ usage: $0 <subcommand>
                    already-uploaded binaries + on-disk SRS cache + FLUSHALL.
                    Cheap per-call (~30 s) — use in (prefill,batch) sweeps.
   bench            Run aegon_coordinator_bench on the coordinator, fetch JSON
+  lookup-bench     Run aegon_lookup_bench on the coordinator (publishes
+                   LOOKUP_PRELOAD_COUNT labels then samples
+                   server/client lookup_label, lookup_value,
+                   lookup_history), fetch JSON
+  watchdog         Parallel health probe across every VM (shards + coord +
+                   db): checks process liveness, free memory, dmesg OOM
+                   marks. Exits non-zero if any host is BAD. Wrap in a
+                   loop during long phases.
   logs N           Tail the shard log on $SHARD_TAG-N
   down             Delete every instance + the VPC
 
@@ -621,6 +836,8 @@ main() {
     deploy)         cmd_deploy ;;
     restart-shards) cmd_restart_shards ;;
     bench)          cmd_bench ;;
+    lookup-bench)   cmd_lookup_bench ;;
+    watchdog)       cmd_watchdog ;;
     logs)           cmd_logs "$@" ;;
     down)           cmd_down ;;
     ""|-h|--help|help) usage ;;

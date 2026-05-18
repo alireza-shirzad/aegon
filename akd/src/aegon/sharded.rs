@@ -596,10 +596,59 @@ pub struct StoredValueHistoryEntry<E: Pairing, P: AegonPcs<E>> {
 
 /// `lookup_history(label)` response: up to `HISTORY_WINDOW` entries,
 /// most-recent first (matches Redis LPUSH+LRANGE 0 N-1 ordering).
+///
+/// `freshness` (when present) attests "no publish has touched this
+/// slot since `entries[0].epoch`". It is freshly computed by the
+/// owning shard at lookup time — the only part of this bundle that
+/// is **not** a pure Redis/Rocks read.
 #[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
 pub struct ShardedValueHistory<E: Pairing, P: AegonPcs<E>> {
     pub label: Vec<u8>,
     pub entries: Vec<StoredValueHistoryEntry<E, P>>,
+    /// Live opening of the latest `rand_value_poly` at the label's
+    /// slot, anchored under the live sharded root. `None` iff
+    /// `entries.is_empty()` (nothing to attest freshness against).
+    pub freshness: Option<FreshnessAttestation<E, P>>,
+}
+
+/// "No-change since the most recent history entry" attestation.
+///
+/// Each publish updates `rand_value_poly` only at the slots it
+/// touched (the rest of the polynomial is invariant under the
+/// chain-blinding homomorphism — `delta_value_poly` is zero outside
+/// the touched slots, so `new_rand_value = prev_rand_value` outside
+/// them). Therefore: if the slot's `rand_value` evaluation right
+/// after the most recent value-change in `entries[0]` equals the
+/// live evaluation **now**, no publish in between can have written
+/// to this slot.
+///
+/// The verifier in `verify_lookup_history` checks:
+///   1. The opening verifies under `shard_commit.rand_value_commitment`.
+///   2. The opening's evaluation equals `entries[0].rand_value_post_eval`.
+///   3. The Merkle path reconstructs the live sharded root the
+///      caller separately trusts (typically: pinned against the
+///      coordinator's `current_commitment()`).
+///
+/// (1) + (2) bind the live state to the latest history entry; (3)
+/// is the freshness anchor.
+#[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
+pub struct FreshnessAttestation<E: Pairing, P: AegonPcs<E>> {
+    /// Shard that owns the slot. Matches `entries[0].shard_id`.
+    pub shard_id: u32,
+    /// Slot bits within the shard. Matches `entries[0].slot_bits`.
+    pub slot_bits: Vec<bool>,
+    /// `rand_value_live(slot)` — the live shard's rand_value poly
+    /// evaluated at the slot.
+    pub rand_value_current_eval: E::ScalarField,
+    pub rand_value_current_proof: P::Proof,
+    /// Live per-shard `EpochCommitment` for `shard_id`. Carries
+    /// `rand_value_commitment` (used) plus the other per-shard
+    /// commitments (unused for verification but kept so the leaf
+    /// hash reproduces under the live root).
+    pub shard_commit: EpochCommitment<E, P>,
+    /// Merkle path from `shard_commit` (at position `shard_id`) up
+    /// to the live sharded root.
+    pub merkle_path: Vec<EpochDigest>,
 }
 
 /// One probe's worth of consistency evidence: openings of `rand_index`
@@ -1596,8 +1645,19 @@ where
                     post_merkle_path: post_merkle_path.clone(),
                 };
                 let mut entry_bytes = Vec::new();
+                // Uncompressed on purpose: each entry is ~30 G1Affine
+                // points, and compressed reads pay a Tonelli-Shanks
+                // sqrt per point on the lookup_history path
+                // (~25 µs/point ≈ 1 ms/entry, dominating that RPC).
+                // Uncompressed roughly doubles per-entry Redis bytes
+                // (~15 KB → ~30 KB at production proof shapes) but
+                // cuts deserialize cost ~10×. The gRPC wire to the
+                // client still uses compressed encoding — only Redis
+                // storage changes. See the matching
+                // `deserialize_uncompressed_unchecked` in
+                // `lookup_history`.
                 entry
-                    .serialize_compressed(&mut entry_bytes)
+                    .serialize_uncompressed(&mut entry_bytes)
                     .map_err(|e| AegonError::Database(format!("serialize value history entry: {e}")))?;
                 let history_key = key_value_history(label);
                 ops.push(DbOp::LPush {
@@ -1781,6 +1841,7 @@ where
             return Ok(ShardedValueHistory {
                 label: label.clone(),
                 entries: Vec::new(),
+                freshness: None,
             });
         };
         // Fetch the whole window in one round-trip. HISTORY_WINDOW is
@@ -1795,15 +1856,59 @@ where
         let mut entries: Vec<StoredValueHistoryEntry<E, P>> =
             Vec::with_capacity(raw_entries.len());
         for bytes in raw_entries {
-            let entry = StoredValueHistoryEntry::<E, P>::deserialize_compressed(&bytes[..])
-                .map_err(|e| {
-                    AegonError::Database(format!("decode value history entry: {e}"))
-                })?;
+            // Matches the `serialize_uncompressed` write side in
+            // `persist_publish_to_db`. `*_unchecked` skips the
+            // group-element subgroup check on each curve point — safe
+            // here because we wrote these bytes ourselves at the most
+            // recent publish_phase_2 and the entries never leave our
+            // own Redis until being returned to the verifier (who
+            // re-verifies the openings cryptographically anyway).
+            let entry =
+                StoredValueHistoryEntry::<E, P>::deserialize_uncompressed_unchecked(&bytes[..])
+                    .map_err(|e| {
+                        AegonError::Database(format!("decode value history entry: {e}"))
+                    })?;
             entries.push(entry);
         }
+        // Freshness attestation: an opening of the LIVE rand_value
+        // poly at the slot of the most recent entry, anchored under
+        // the live sharded root. The shard's `rand_value` evaluation
+        // at a slot is invariant under any publish that does not
+        // touch that slot (the chain-blinding delta is zero
+        // off-support), so a verifier seeing the same evaluation
+        // here as in `entries[0].rand_value_post_eval` learns that
+        // no publish has touched the slot since then. This is the
+        // only field of the response that isn't a pure DB read —
+        // it costs one shard gRPC round-trip + one PCS open.
+        let freshness = if let Some(latest) = entries.first() {
+            let shard_id = latest.shard_id;
+            if (shard_id as usize) >= self.shards.len() {
+                return Err(AegonError::Config(format!(
+                    "lookup_history: latest entry's shard_id {shard_id} out of range \
+                     (have {} shards)",
+                    self.shards.len()
+                )));
+            }
+            let current = self.current_commitment();
+            let (eval, proof) = self.shards[shard_id as usize]
+                .open_rand_value_at_slot_current(&latest.slot_bits)?;
+            let merkle_path = build_merkle_path(&current.per_shard, shard_id as usize);
+            let shard_commit = current.per_shard[shard_id as usize].clone();
+            Some(FreshnessAttestation {
+                shard_id,
+                slot_bits: latest.slot_bits.clone(),
+                rand_value_current_eval: eval,
+                rand_value_current_proof: proof,
+                shard_commit,
+                merkle_path,
+            })
+        } else {
+            None
+        };
         Ok(ShardedValueHistory {
             label: label.clone(),
             entries,
+            freshness,
         })
     }
 
@@ -2120,10 +2225,24 @@ where
 /// pairs parallel to `history.entries` — handy for the caller's
 /// bulletin-board cross-check step. `Err` signals a per-entry failure
 /// (caller decides whether to reject the whole bundle or keep going).
+/// Output of [`verify_lookup_history`].
+///
+/// `entry_roots` reconstructs the sharded root at `(epoch-1, epoch)`
+/// for each history entry — one tuple per `entries` slot, same order
+/// (most recent first). `live_root`, when present, is the sharded
+/// root reconstructed from the freshness attestation; pair it with
+/// the coordinator's `current_commitment().sharded_root` to confirm
+/// "this history is current as of right now".
+#[derive(Clone, Debug)]
+pub struct VerifiedLookupHistory {
+    pub entry_roots: Vec<(EpochDigest, EpochDigest)>,
+    pub live_root: Option<EpochDigest>,
+}
+
 pub fn verify_lookup_history<E, P, H>(
     ctx: &ShardedVerifierContext<E, P>,
     history: &ShardedValueHistory<E, P>,
-) -> Result<Vec<(EpochDigest, EpochDigest)>, AegonError>
+) -> Result<VerifiedLookupHistory, AegonError>
 where
     E: Pairing,
     P: AegonPcs<E>,
@@ -2205,7 +2324,66 @@ where
         }
         roots.push((prev_root, post_root));
     }
-    Ok(roots)
+
+    // Freshness attestation. Must be present iff there's at least
+    // one history entry. Cross-checks the live `rand_value(slot)`
+    // against the most recent entry's `rand_value_post_eval`.
+    let live_root = match (&history.freshness, history.entries.first()) {
+        (None, None) => None,
+        (None, Some(_)) => {
+            return Err(AegonError::Verification(
+                "history has entries but no freshness attestation",
+            ));
+        },
+        (Some(_), None) => {
+            return Err(AegonError::Verification(
+                "history has a freshness attestation but no entries",
+            ));
+        },
+        (Some(fr), Some(latest)) => {
+            if fr.shard_id != latest.shard_id || fr.slot_bits != latest.slot_bits {
+                return Err(AegonError::Verification(
+                    "freshness attestation references a different (shard, slot) than the latest entry",
+                ));
+            }
+            let live_root = verify_merkle_path::<E, P>(
+                &fr.shard_commit,
+                fr.shard_id as usize,
+                &fr.merkle_path,
+            );
+            // Live `rand_value(slot)` opens under the live shard commit.
+            let point = bool_index_to_point::<E::ScalarField>(&fr.slot_bits);
+            let mut tr_live = IOPTranscript::<E::ScalarField>::new(b"aegon.rand_value.open");
+            let ok_live = P::verify(
+                &ctx.inner.verifier_param,
+                &fr.shard_commit.rand_value_commitment,
+                &point,
+                &fr.rand_value_current_eval,
+                &fr.rand_value_current_proof,
+                &mut tr_live,
+            )?;
+            if !ok_live {
+                return Err(AegonError::Verification(
+                    "freshness rand_value opening did not verify",
+                ));
+            }
+            // No-change-since: rand_value at this slot is invariant
+            // under any publish that does not touch the slot. Equal
+            // evaluations ⇒ no publish has touched this slot since
+            // the most recent entry's epoch.
+            if fr.rand_value_current_eval != latest.rand_value_post_eval {
+                return Err(AegonError::Verification(
+                    "freshness check failed: live rand_value differs from latest entry's post-update value — a subsequent publish modified this slot but was not recorded in the history window",
+                ));
+            }
+            Some(live_root)
+        },
+    };
+
+    Ok(VerifiedLookupHistory {
+        entry_roots: roots,
+        live_root,
+    })
 }
 
 /// Backward-compat wrapper that verifies both halves of the original

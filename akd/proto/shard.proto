@@ -32,6 +32,11 @@ service ShardService {
   rpc OpenValueAtSlot(SlotRequest) returns (OpenResponse);
   rpc OpenRandIndexAtSlotInEpoch(SlotEpochRequest) returns (OpenResponse);
   rpc OpenRandValueAtSlotInEpoch(SlotEpochRequest) returns (OpenResponse);
+  // Opens the live (current-epoch) rand_value polynomial at a slot.
+  // Used by `lookup_history`'s freshness attestation: the returned
+  // evaluation lets the verifier check that no publish has touched
+  // this slot since the most recent history entry's epoch.
+  rpc OpenRandValueAtSlotCurrent(SlotRequest) returns (OpenResponse);
 
   // Initial commitment — used by the coordinator at setup time to
   // build the epoch-0 Merkle root.

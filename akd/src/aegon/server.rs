@@ -1321,6 +1321,30 @@ where
         )
     }
 
+    /// Open the live `rand_value_poly` at `slot_bits`. Unlike the
+    /// `_in_epoch` variant this does not require the epoch to have
+    /// been retained in `epoch_history` — it opens against the
+    /// currently-running commitment + state, which is always
+    /// available. Used by `lookup_history` to ship the verifier a
+    /// "no change since the latest history entry" attestation: the
+    /// returned evaluation should match `rand_value_post_eval` of
+    /// the most recent history entry whenever no subsequent publish
+    /// has touched this slot.
+    pub fn open_rand_value_at_slot_current(
+        &self,
+        slot_bits: &[bool],
+    ) -> Result<(E::ScalarField, P::Proof), AegonError> {
+        open_at_point::<E, P>(
+            &self.prover_param,
+            &self.rand_value_poly,
+            &self.rand_value_commitment,
+            &self.rand_value_state,
+            slot_bits,
+            &self.dims,
+            b"aegon.rand_value.open",
+        )
+    }
+
     fn set_value(&mut self, usize_index: usize, value: E::ScalarField) {
         if value.is_zero() {
             self.value_poly.evaluations.remove(&usize_index);

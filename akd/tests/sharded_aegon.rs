@@ -421,13 +421,59 @@ fn rocks_backend_publish_lookup_history_round_trip() {
     assert_eq!(bob_hist.entries[0].value_bytes, b"bob-v1");
 
     // Verify every entry cryptographically. `verify_lookup_history`
-    // re-anchors merkle paths and runs three PCS opens per entry,
-    // returning the reconstructed (prev_root, post_root) for each.
-    let alice_roots = verify_lookup_history::<Bn254, Pcs, Sha256Hash>(&ctx, &alice_hist)
+    // re-anchors merkle paths, runs three PCS opens per entry, AND
+    // — new — runs one freshness opening per bundle and cross-checks
+    // it against the latest entry's `rand_value_post_eval`. The
+    // returned `live_root` is what the caller compares against the
+    // current sharded root.
+    let alice_verified = verify_lookup_history::<Bn254, Pcs, Sha256Hash>(&ctx, &alice_hist)
         .expect("verify alice history");
-    assert_eq!(alice_roots.len(), 2);
-    let _ = verify_lookup_history::<Bn254, Pcs, Sha256Hash>(&ctx, &bob_hist)
+    assert_eq!(alice_verified.entry_roots.len(), 2);
+    let bob_verified = verify_lookup_history::<Bn254, Pcs, Sha256Hash>(&ctx, &bob_hist)
         .expect("verify bob history");
+    assert_eq!(bob_verified.entry_roots.len(), 1);
+
+    // Freshness must be present and the reconstructed live root must
+    // match the coordinator's current sharded root. Bob's bundle is
+    // the interesting one: bob's slot was untouched in publish v2
+    // (only alice + carol updated), so the freshness attestation
+    // proves "bob's value hasn't changed since v1 even though epoch
+    // is now 2". Alice's bundle similarly proves "no further change
+    // since v2".
+    let current_root = server.current_commitment().merkle_root;
+    let bob_live_root = bob_verified.live_root.expect("bob freshness present");
+    assert_eq!(
+        bob_live_root, current_root,
+        "bob freshness anchors under the current sharded root"
+    );
+    let alice_live_root = alice_verified.live_root.expect("alice freshness present");
+    assert_eq!(
+        alice_live_root, current_root,
+        "alice freshness anchors under the current sharded root"
+    );
+
+    // Tamper case: flip one byte of the freshness evaluation and
+    // confirm verification rejects with the "no-change-since" error
+    // path. This is the test for the actual freshness *check*, not
+    // just the path arithmetic.
+    {
+        let mut tampered = bob_hist.clone();
+        let fr = tampered
+            .freshness
+            .as_mut()
+            .expect("bob freshness present pre-tamper");
+        // Add 1 to the field element so it can't accidentally equal
+        // the legitimate value.
+        fr.rand_value_current_eval += <Bn254 as Pairing>::ScalarField::from(1u64);
+        let err = verify_lookup_history::<Bn254, Pcs, Sha256Hash>(&ctx, &tampered)
+            .expect_err("tampered freshness must be rejected");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("freshness")
+                && (msg.contains("did not verify") || msg.contains("differs")),
+            "expected freshness rejection, got: {msg}"
+        );
+    }
 
     // Lookup the latest value via the regular `lookup` API to make
     // sure RocksDB-backed value:/routing: keys round-trip end-to-end

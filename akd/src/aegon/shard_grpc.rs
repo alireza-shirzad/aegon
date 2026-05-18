@@ -132,6 +132,15 @@ where
         epoch: u64,
     ) -> Result<(E::ScalarField, P::Proof), AegonError>;
 
+    /// Open the live `rand_value_poly` at `slot_bits`. Mirrors
+    /// `Aegon::open_rand_value_at_slot_current`. Used by
+    /// `ShardedAegon::lookup_history` to attach a freshness
+    /// attestation to the history bundle.
+    fn open_rand_value_at_slot_current(
+        &self,
+        slot_bits: &[bool],
+    ) -> Result<(E::ScalarField, P::Proof), AegonError>;
+
     fn current_commitment(&self) -> EpochCommitment<E, P>;
 
     /// Per-shard verifier context. Only really needed at coordinator
@@ -209,6 +218,13 @@ where
         epoch: u64,
     ) -> Result<(E::ScalarField, P::Proof), AegonError> {
         Aegon::open_rand_value_at_slot_in_epoch(self, slot_bits, epoch)
+    }
+
+    fn open_rand_value_at_slot_current(
+        &self,
+        slot_bits: &[bool],
+    ) -> Result<(E::ScalarField, P::Proof), AegonError> {
+        Aegon::open_rand_value_at_slot_current(self, slot_bits)
     }
 
     fn current_commitment(&self) -> EpochCommitment<E, P> {
@@ -519,6 +535,21 @@ where
         let aegon = self.aegon.read().await;
         let (eval, proof) = aegon
             .open_rand_value_at_slot_in_epoch(&slot, r.epoch)
+            .map_err(err_to_status)?;
+        Ok(Response::new(OpenResponse {
+            evaluation: encode(&eval).map_err(err_to_status)?,
+            proof: encode(&proof).map_err(err_to_status)?,
+        }))
+    }
+
+    async fn open_rand_value_at_slot_current(
+        &self,
+        req: Request<SlotRequest>,
+    ) -> Result<Response<OpenResponse>, Status> {
+        let slot: Vec<bool> = decode(&req.into_inner().slot_bits).map_err(err_to_status)?;
+        let aegon = self.aegon.read().await;
+        let (eval, proof) = aegon
+            .open_rand_value_at_slot_current(&slot)
             .map_err(err_to_status)?;
         Ok(Response::new(OpenResponse {
             evaluation: encode(&eval).map_err(err_to_status)?,
@@ -886,6 +917,27 @@ where
                     .lock()
                     .await
                     .open_rand_value_at_slot_in_epoch(req)
+                    .await
+            }
+        })?;
+        let inner = resp.into_inner();
+        Ok((decode(&inner.evaluation)?, decode(&inner.proof)?))
+    }
+
+    fn open_rand_value_at_slot_current(
+        &self,
+        slot_bits: &[bool],
+    ) -> Result<(E::ScalarField, P::Proof), AegonError> {
+        let req = SlotRequest {
+            slot_bits: encode(&slot_bits.to_vec())?,
+        };
+        let resp = self.with_retry(move |client| {
+            let req = req.clone();
+            async move {
+                client
+                    .lock()
+                    .await
+                    .open_rand_value_at_slot_current(req)
                     .await
             }
         })?;

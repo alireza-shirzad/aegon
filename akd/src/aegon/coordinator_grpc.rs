@@ -568,16 +568,23 @@ where
     ///   * `H_F(value_bytes) == value_post_eval`, so the inline
     ///     value bytes match the polynomial commitment's bound hash.
     ///
-    /// Caller responsibility: cross-check the returned sharded roots
-    /// against the bulletin board. This API doesn't pin them — the
-    /// trust anchor lives outside the coordinator.
+    /// What the client verifies bundle-wide (freshness):
+    ///   * Live `rand_value(slot)` opens under the live shard
+    ///     commitment, and its evaluation equals the latest entry's
+    ///     `rand_value_post_eval` — i.e. no publish has touched the
+    ///     slot since the most recent recorded value-change. The
+    ///     reconstructed `live_root` is returned for cross-check
+    ///     against the coordinator's current published commitment.
+    ///
+    /// Caller responsibility: cross-check the returned roots against
+    /// the bulletin board (historical entries + live). This API
+    /// doesn't pin them — the trust anchor lives outside the
+    /// coordinator.
     pub fn lookup_history(
         &self,
         label: &Label,
-    ) -> Result<
-        (ShardedValueHistory<E, P>, Vec<(EpochDigestForHistory, EpochDigestForHistory)>),
-        AegonError,
-    > {
+    ) -> Result<(ShardedValueHistory<E, P>, super::sharded::VerifiedLookupHistory), AegonError>
+    {
         let req = LookupHistoryRequest {
             label: label.clone(),
         };
@@ -591,12 +598,8 @@ where
         })?;
         let inner = resp.into_inner();
         let history: ShardedValueHistory<E, P> = decode(&inner.history)?;
-        // Verify every entry. `verify_lookup_history` returns the
-        // reconstructed (prev_root, post_root) for each entry — those
-        // are the values the caller cross-checks against the
-        // bulletin board.
-        let roots = verify_lookup_history::<E, P, H>(&self.verifier_ctx, &history)?;
-        Ok((history, roots))
+        let verified = verify_lookup_history::<E, P, H>(&self.verifier_ctx, &history)?;
+        Ok((history, verified))
     }
 }
 

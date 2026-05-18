@@ -58,8 +58,9 @@ use std::time::{Duration, Instant};
 
 use akd::aegon::coordinator_grpc::{
     proto::{
-        coordinator_service_client::CoordinatorServiceClient, Empty, LookupLabelRequest,
-        LookupLabelResponse, LookupValueRequest, LookupValueResponse,
+        coordinator_service_client::CoordinatorServiceClient, Empty, LookupHistoryRequest,
+        LookupHistoryResponse, LookupLabelRequest, LookupLabelResponse, LookupValueRequest,
+        LookupValueResponse,
     },
     CoordinatorServer,
 };
@@ -75,6 +76,33 @@ use tokio::sync::RwLock as AsyncRwLock;
 
 type Pcs = KZHK<Bn254>;
 type Sharded = ShardedAegon<Bn254, Pcs, Sha256Hash>;
+
+/// Realistic application sizing for this bench:
+/// labels are 12-byte ASCII phone numbers in E.164 form
+/// (`+1` + 10 digits, e.g. `+10000000123`) and values are 256-byte
+/// random buffers that stand in for a 2048-bit RSA public key. The
+/// goal isn't to use _correct_ RSA bytes — the AKD only sees the byte
+/// string — but to make the wire-size / hash-cost / DB-footprint
+/// numbers reflect what a real deployment would see, instead of the
+/// ~10-byte `bench-u{i}` / `bench-v{i}` that the old bench used.
+const RSA_VALUE_LEN: usize = 256;
+
+fn phone_label(idx: u64) -> Vec<u8> {
+    // E.164 +1NNNNNNNNNN. The 10-digit space is 10^10 which comfortably
+    // covers the ~100K labels this bench publishes.
+    format!("+1{:010}", idx % 10_000_000_000).into_bytes()
+}
+
+fn rsa_value(idx: u64) -> Vec<u8> {
+    // Deterministic per-idx so a lookup_value returns the same bytes
+    // every run. Seed includes a fixed constant so we don't accidentally
+    // collide with another bench's RNG stream.
+    use ark_std::rand::RngCore;
+    let mut rng = ChaCha20Rng::seed_from_u64(0xCAFE_C0DE ^ idx);
+    let mut v = vec![0u8; RSA_VALUE_LEN];
+    rng.fill_bytes(&mut v);
+    v
+}
 
 /// Read this process's resident set size (kB) from /proc/self/status.
 /// Returns None on non-Linux or if the field can't be parsed. Used by
@@ -389,12 +417,7 @@ fn main() -> ExitCode {
         while current_count < target {
             let batch_end = (current_count + args.publish_batch_size).min(target);
             let updates: Vec<(Vec<u8>, Vec<u8>)> = (current_count..batch_end)
-                .map(|i| {
-                    (
-                        format!("bench-u{i}").into_bytes(),
-                        format!("bench-v{i}").into_bytes(),
-                    )
-                })
+                .map(|i| (phone_label(i as u64), rsa_value(i as u64)))
                 .collect();
             let t = Instant::now();
             // Same rationale as the lookup paths: blocking_write from
@@ -452,8 +475,8 @@ fn main() -> ExitCode {
             let idx = ((sample_idx as u64).wrapping_mul(2_654_435_761)
                 ^ (level_idx as u64).wrapping_mul(11_400_714_819_323_198_485))
                 % (current_count as u64);
-            let label = format!("bench-u{idx}").into_bytes();
-            let value = format!("bench-v{idx}").into_bytes();
+            let label = phone_label(idx);
+            let value = rsa_value(idx);
 
             // (a) Server-direct lookup_label. Read lock only — the
             // server-direct path is the lower bound on what any
@@ -546,6 +569,39 @@ fn main() -> ExitCode {
                 return ExitCode::from(1);
             }
 
+            // (e) Server-direct lookup_history. Same blocking_read
+            // pattern as (a)/(b). Returns up to HISTORY_WINDOW entries
+            // most-recent first; at this preload level each sampled
+            // label has been published exactly once so we expect
+            // entries.len() == 1.
+            let t = Instant::now();
+            let server_history_result = {
+                let s = shared.blocking_read();
+                s.lookup_history(&label)
+            };
+            let server_history_ns = t.elapsed().as_nanos() as u64;
+            let history = match server_history_result {
+                Ok(h) => h,
+                Err(e) => {
+                    eprintln!("error: server-direct lookup_history at level {target}: {e}");
+                    return ExitCode::from(1);
+                },
+            };
+
+            // (f) Client lookup_history via raw tonic RPC (no verify).
+            let history_req = LookupHistoryRequest {
+                label: label.clone(),
+            };
+            let t = Instant::now();
+            let mut rc_history = raw_client.clone();
+            let client_history_result =
+                driver_rt.block_on(async move { rc_history.lookup_history(history_req).await });
+            let client_history_ns = t.elapsed().as_nanos() as u64;
+            if let Err(e) = client_history_result {
+                eprintln!("error: raw RPC lookup_history at level {target}: {e}");
+                return ExitCode::from(1);
+            }
+
             // ---- wire-size + application-size accounting ------------
             // Reproduce the responses the gRPC server would send (the
             // server's `encode` helper is private, but it's just
@@ -588,34 +644,60 @@ fn main() -> ExitCode {
             let value_wire_bytes_empty = value_resp_empty.encoded_len();
             let value_wire_bytes_with_value = value_resp_with_value.encoded_len();
 
+            // History wire size: encode the same bundle the server
+            // ships back. Each entry carries 3 opening proofs + the
+            // post/pre commits + per-entry value bytes, so the wire
+            // size grows roughly linearly in `history.entries.len()`
+            // up to HISTORY_WINDOW.
+            let mut history_bytes: Vec<u8> = Vec::with_capacity(history.uncompressed_size());
+            if let Err(e) = history.serialize_uncompressed(&mut history_bytes) {
+                eprintln!("error: serialize history: {e}");
+                return ExitCode::from(1);
+            }
+            let history_resp = LookupHistoryResponse {
+                history: history_bytes.clone(),
+            };
+            let history_wire_bytes = history_resp.encoded_len();
+            let history_entries = history.entries.len();
+
             // "proof overhead" per the user's spec: the gap between
             // the bytes shipped to the client and the underlying
             // application-level payload (label for the label call,
-            // value for the value call).
+            // value for the value call; for history, the payload is
+            // n_entries × value_size since each entry carries one
+            // value snapshot).
             let label_size_bytes = label.len();
             let value_size_bytes = value.len();
+            let history_payload_bytes = history_entries * value_size_bytes;
             let label_proof_overhead_bytes =
                 label_wire_bytes.saturating_sub(label_size_bytes);
             let value_proof_overhead_bytes =
                 value_wire_bytes_with_value.saturating_sub(value_size_bytes);
+            let history_proof_overhead_bytes =
+                history_wire_bytes.saturating_sub(history_payload_bytes);
 
             samples_json.push(format!(
-                "        {{\n          \"sample_idx\": {sample_idx},\n          \"label_idx\": {idx},\n          \"server_lookup_label_ns\": {server_label_ns},\n          \"server_lookup_value_ns\": {server_value_ns},\n          \"client_lookup_label_ns\": {client_label_ns},\n          \"client_lookup_value_ns\": {client_value_ns},\n          \"label_size_bytes\": {label_size_bytes},\n          \"value_size_bytes\": {value_size_bytes},\n          \"label_wire_bytes\": {label_wire_bytes},\n          \"value_wire_bytes_empty_value\": {value_wire_bytes_empty},\n          \"value_wire_bytes_with_value\": {value_wire_bytes_with_value},\n          \"label_proof_field_bytes\": {label_proof_field},\n          \"value_proof_field_bytes\": {value_proof_field},\n          \"label_slot_field_bytes\": {label_slot_field},\n          \"label_proof_overhead_bytes\": {label_proof_overhead_bytes},\n          \"value_proof_overhead_bytes\": {value_proof_overhead_bytes}\n        }}",
+                "        {{\n          \"sample_idx\": {sample_idx},\n          \"label_idx\": {idx},\n          \"server_lookup_label_ns\": {server_label_ns},\n          \"server_lookup_value_ns\": {server_value_ns},\n          \"server_lookup_history_ns\": {server_history_ns},\n          \"client_lookup_label_ns\": {client_label_ns},\n          \"client_lookup_value_ns\": {client_value_ns},\n          \"client_lookup_history_ns\": {client_history_ns},\n          \"label_size_bytes\": {label_size_bytes},\n          \"value_size_bytes\": {value_size_bytes},\n          \"history_entries\": {history_entries},\n          \"label_wire_bytes\": {label_wire_bytes},\n          \"value_wire_bytes_empty_value\": {value_wire_bytes_empty},\n          \"value_wire_bytes_with_value\": {value_wire_bytes_with_value},\n          \"history_wire_bytes\": {history_wire_bytes},\n          \"label_proof_field_bytes\": {label_proof_field},\n          \"value_proof_field_bytes\": {value_proof_field},\n          \"history_proof_field_bytes\": {history_proof_field},\n          \"label_slot_field_bytes\": {label_slot_field},\n          \"label_proof_overhead_bytes\": {label_proof_overhead_bytes},\n          \"value_proof_overhead_bytes\": {value_proof_overhead_bytes},\n          \"history_proof_overhead_bytes\": {history_proof_overhead_bytes}\n        }}",
                 label_proof_field = label_proof_bytes.len(),
                 value_proof_field = value_proof_bytes.len(),
+                history_proof_field = history_bytes.len(),
                 label_slot_field = slot_bytes.len(),
             ));
 
             if sample_idx == 0 || (sample_idx + 1) % 10 == 0 {
                 eprintln!(
-                    "  sample {}: server_label={:.2}ms server_value={:.2}ms client_label={:.2}ms client_value={:.2}ms label_wire={}B value_wire={}B",
+                    "  sample {}: server_label={:.2}ms server_value={:.2}ms server_history={:.2}ms client_label={:.2}ms client_value={:.2}ms client_history={:.2}ms label_wire={}B value_wire={}B history_wire={}B (entries={})",
                     sample_idx,
                     server_label_ns as f64 / 1e6,
                     server_value_ns as f64 / 1e6,
+                    server_history_ns as f64 / 1e6,
                     client_label_ns as f64 / 1e6,
                     client_value_ns as f64 / 1e6,
+                    client_history_ns as f64 / 1e6,
                     label_wire_bytes,
                     value_wire_bytes_with_value,
+                    history_wire_bytes,
+                    history_entries,
                 );
             }
         }

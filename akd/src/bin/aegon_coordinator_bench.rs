@@ -50,6 +50,26 @@ use rand_chacha::ChaCha20Rng;
 type Pcs = KZHK<Bn254>;
 type Sharded = ShardedAegon<Bn254, Pcs, Sha256Hash>;
 
+/// Realistic application sizing: labels are 12-byte ASCII phone
+/// numbers (`+1` + 10 digits), values are 256-byte RSA-pubkey-sized
+/// random buffers. The AKD doesn't care about content — these are
+/// just bytes — but the wire-size / DB-footprint numbers reflect a
+/// real deployment instead of the old `b{...}-u{i}` / `v-{i}`
+/// placeholders.
+const RSA_VALUE_LEN: usize = 256;
+
+fn phone_label(idx: u64) -> Vec<u8> {
+    format!("+1{:010}", idx % 10_000_000_000).into_bytes()
+}
+
+fn rsa_value(idx: u64) -> Vec<u8> {
+    use ark_std::rand::RngCore;
+    let mut rng = ChaCha20Rng::seed_from_u64(0xCAFE_C0DE ^ idx);
+    let mut v = vec![0u8; RSA_VALUE_LEN];
+    rng.fill_bytes(&mut v);
+    v
+}
+
 #[derive(Debug, Parser)]
 #[command(
     name = "aegon_coordinator_bench",
@@ -200,12 +220,18 @@ fn main() -> ExitCode {
         );
         let mut samples_ms: Vec<f64> = Vec::with_capacity(args.samples_per_batch);
         for sample_idx in 0..args.samples_per_batch {
-            let updates: Vec<(Vec<u8>, Vec<u8>)> = (0..batch_size as u32)
+            // Per-(batch_size, sample_idx) disjoint namespace mapped
+            // into the E.164 phone-number space. The arithmetic gives
+            // each (batch_size, sample_idx) pair a 100K-entry window
+            // — enough headroom for batch_size up to ~65K — and the
+            // batch_size component spaces different sizes far apart
+            // so a sweep never collides on the open-addressing trail.
+            let updates: Vec<(Vec<u8>, Vec<u8>)> = (0..batch_size as u64)
                 .map(|i| {
-                    (
-                        format!("b{batch_size}-s{sample_idx}-u{i}").into_bytes(),
-                        format!("v-{i}").into_bytes(),
-                    )
+                    let idx = (batch_size as u64) * 10_000_000
+                        + (sample_idx as u64) * 100_000
+                        + i;
+                    (phone_label(idx), rsa_value(idx))
                 })
                 .collect();
             let t = Instant::now();
