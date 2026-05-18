@@ -486,6 +486,12 @@ impl<E: Pairing> KZHKState<E> {
         self.tau.as_ref().unwrap()
     }
 
+    /// Non-panicking variant of [`Self::get_tau`]: returns `None` on
+    /// non-hiding state (no tau was sampled at commit time).
+    pub fn maybe_tau(&self) -> Option<&E::ScalarField> {
+        self.tau.as_ref()
+    }
+
     /// Upper bound on the committed polynomial's non-zero count, or `None`
     /// if it wasn't recorded.
     pub fn get_sparsity(&self) -> Option<usize> {
@@ -1123,5 +1129,70 @@ where
                 *x *= c;
             });
         },
+    }
+}
+
+/// Opening-point-agnostic precomputed input to the Sigma-protocol
+/// `open_zk` (Appendix D). Produced in advance by a dedicated masking
+/// server and consumed by a shard at the moment of opening: the shard
+/// supplies the actual `(commitment, polynomial, point, state)` and
+/// turns the package into a hiding opening without itself sampling or
+/// committing the masking polynomial.
+///
+/// Concretely a package carries everything that depends only on
+/// `(prover_param, num_vars)`:
+///
+/// * `r_poly`  — sparse masking polynomial `r(X)` with the structured
+///   `k * N^{1/k}` non-zero coefficients prescribed by Lemmas 4–5.
+/// * `r_hide`  — Pedersen commitment `R_hide = C(r) + rho*h` to that
+///   polynomial.
+/// * `r_state` — the prover state for `r`: `tau = rho` plus the
+///   precomputed Boolean aux table the non-zk opener needs to produce
+///   `D_j` vectors for `r` at any point.
+/// * `rho`     — the hiding scalar used to blind `R_hide`, retained so
+///   the consumer can compute `rho_prime = alpha*tau_f + rho` at
+///   open-time.
+///
+/// What the consumer does on top of a package at open-time:
+/// 1. Open `r` at the query point using `r_poly`/`r_state` (cheap —
+///    `r` has `k * N^{1/k}` non-zero coefficients).
+/// 2. Derive the Fiat-Shamir challenge `alpha` from
+///    `(commitment, point, value, r_hide)` — point-dependent, so
+///    intentionally outside the package.
+/// 3. Combine `alpha * non_zk_opening + r_opening` and set
+///    `rho_prime = alpha * tau_f + rho`.
+///
+/// The masking server never sees the opening point, the committed
+/// polynomial, or the consumer's `tau_f`. ZK is preserved as long as
+/// each package is consumed at most once — the open-once contract is
+/// the consumer's responsibility.
+#[derive(Clone, Debug, PartialEq, Eq, CanonicalSerialize, CanonicalDeserialize)]
+pub struct KZHKMaskingPackage<E: Pairing> {
+    /// Number of variables of `r_poly`. Must match the consumer's
+    /// polynomial `num_vars`; the masking server queues packages
+    /// per-`num_vars` and the consumer requests the size it needs.
+    pub num_vars: usize,
+    /// Sparse masking polynomial `r(X)`.
+    pub r_poly: ark_poly::SparseMultilinearExtension<E::ScalarField>,
+    /// Hiding commitment `R_hide = C(r) + rho*h`.
+    pub r_hide: KZHKCommitment<E>,
+    /// Prover state for `r` — carries `tau = rho` and the Boolean aux
+    /// table used by `open_non_zk` to open `r` at any point.
+    pub r_state: KZHKState<E>,
+    /// Hiding scalar `rho` used to blind `R_hide`. Retained explicitly
+    /// (even though it is also `*r_state.get_tau()`) so a consumer can
+    /// access it without unwrap noise.
+    pub rho: E::ScalarField,
+}
+
+impl<E: Pairing> KZHKMaskingPackage<E> {
+    pub fn new(
+        num_vars: usize,
+        r_poly: ark_poly::SparseMultilinearExtension<E::ScalarField>,
+        r_hide: KZHKCommitment<E>,
+        r_state: KZHKState<E>,
+        rho: E::ScalarField,
+    ) -> Self {
+        Self { num_vars, r_poly, r_hide, r_state, rho }
     }
 }

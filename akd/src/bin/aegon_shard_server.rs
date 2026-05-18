@@ -121,6 +121,17 @@ struct Args {
     /// across runs; vary it to get a different fill pattern.
     #[arg(long, default_value_t = 0)]
     prefill_seed: u64,
+
+    /// Optional address of the cluster's masking server (e.g.
+    /// `http://10.0.0.5:50061`). When set, the shard fetches a one-
+    /// shot `KZHKMaskingPackage` from the masking server before every
+    /// value-side opening (lookup, freshness attestation, history
+    /// re-mask) and produces a hiding opening via
+    /// `P::open_zk_with_package` / `P::remask_with_package`. Leave
+    /// unset for tests; value-side openings then fall back to
+    /// generating a fresh masking package inline.
+    #[arg(long)]
+    masking_addr: Option<String>,
 }
 
 #[tokio::main]
@@ -208,6 +219,22 @@ async fn main() -> ExitCode {
         },
         (None, None) => unreachable!("checked above"),
     };
+
+    // Wire up the cluster's masking server (if any) so the shard's
+    // value-side openings fetch one-shot ZK packages from it instead
+    // of generating them inline. Done before prefill / serve so the
+    // very first opening that hits the shard uses the masking
+    // server.
+    if let Some(addr) = &args.masking_addr {
+        eprintln!("connecting to masking server at {addr}");
+        match akd::aegon::masking::MaskingClient::<Bn254, Pcs>::connect(addr.clone()) {
+            Ok(client) => aegon.set_masking_client(std::sync::Arc::new(client)),
+            Err(e) => {
+                eprintln!("error connecting to masking server '{addr}': {e}");
+                return ExitCode::from(1);
+            },
+        }
+    }
 
     // Benchmark-only prefill. Runs after setup but before binding the
     // gRPC socket — we want the polynomials populated by the time the

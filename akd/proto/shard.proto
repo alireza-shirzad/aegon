@@ -41,9 +41,31 @@ service ShardService {
   // slot. Used by `lookup_label_history`'s freshness attestation.
   rpc OpenRandIndexAtSlotCurrent(SlotRequest) returns (OpenResponse);
 
+  // Re-mask a publish-time non-ZK value-history entry into a hiding
+  // (ZK) one. The coordinator calls this during `lookup_history` for
+  // each stored entry it reads from the DB — publish stores plain
+  // proofs (the masking server is not on the publish hot path), and
+  // the masking-server protocol is applied at user-facing time on
+  // the shard that owns the slot.
+  rpc RemaskValueHistoryEntry(RemaskValueHistoryEntryRequest)
+      returns (RemaskValueHistoryEntryResponse);
+
   // Initial commitment — used by the coordinator at setup time to
   // build the epoch-0 Merkle root.
   rpc CurrentCommitment(Empty) returns (CommitmentResponse);
+}
+
+message RemaskValueHistoryEntryRequest {
+  // Canonical-serialized StoredValueHistoryEntry<E, P> (uncompressed).
+  bytes entry_uncompressed = 1;
+}
+
+message RemaskValueHistoryEntryResponse {
+  // Canonical-serialized StoredValueHistoryEntry<E, P> with the three
+  // value-side proofs replaced by hiding openings produced via the
+  // masking-server protocol. Evaluations, commitments, merkle paths,
+  // and the tau snapshots are passed through unchanged.
+  bytes entry_uncompressed = 1;
 }
 
 message PublishPhase1Request {

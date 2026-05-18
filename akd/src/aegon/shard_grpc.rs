@@ -148,6 +148,17 @@ where
         slot_bits: &[bool],
     ) -> Result<(E::ScalarField, P::Proof), AegonError>;
 
+    /// Re-mask a publish-time non-ZK value-history entry into a
+    /// hiding one. The coordinator calls this during
+    /// `ShardedAegon::lookup_history` for every stored entry it
+    /// reads from the DB before serving the bundle to a user — the
+    /// masking-server protocol is applied at user-facing time, not
+    /// at publish time.
+    fn remask_value_history_entry(
+        &self,
+        entry: super::sharded::StoredValueHistoryEntry<E, P>,
+    ) -> Result<super::sharded::StoredValueHistoryEntry<E, P>, AegonError>;
+
     fn current_commitment(&self) -> EpochCommitment<E, P>;
 
     /// Per-shard verifier context. Only really needed at coordinator
@@ -239,6 +250,21 @@ where
         slot_bits: &[bool],
     ) -> Result<(E::ScalarField, P::Proof), AegonError> {
         Aegon::open_rand_index_at_slot_current(self, slot_bits)
+    }
+
+    fn remask_value_history_entry(
+        &self,
+        entry: super::sharded::StoredValueHistoryEntry<E, P>,
+    ) -> Result<super::sharded::StoredValueHistoryEntry<E, P>, AegonError> {
+        // Currently a pass-through: publish-time openings already go
+        // through the PCS's hiding path under a hiding SRS, so the
+        // history-lookup path returns them as-is. The RPC is kept on
+        // the trait + wire as a hook for a future
+        // "re-mask stored proofs at user-facing time" variant — when
+        // the system stops doing inline hiding at publish-time and
+        // moves that work behind the masking server too, this impl
+        // grows the per-opening remask logic.
+        Ok(entry)
     }
 
     fn current_commitment(&self) -> EpochCommitment<E, P> {
@@ -585,6 +611,20 @@ where
         Ok(Response::new(OpenResponse {
             evaluation: encode(&eval).map_err(err_to_status)?,
             proof: encode(&proof).map_err(err_to_status)?,
+        }))
+    }
+
+    async fn remask_value_history_entry(
+        &self,
+        req: Request<proto::RemaskValueHistoryEntryRequest>,
+    ) -> Result<Response<proto::RemaskValueHistoryEntryResponse>, Status> {
+        let entry: super::sharded::StoredValueHistoryEntry<E, P> =
+            decode(&req.into_inner().entry_uncompressed).map_err(err_to_status)?;
+        let aegon = self.aegon.read().await;
+        let remasked = ShardHandle::<E, P, H>::remask_value_history_entry(&*aegon, entry)
+            .map_err(err_to_status)?;
+        Ok(Response::new(proto::RemaskValueHistoryEntryResponse {
+            entry_uncompressed: encode(&remasked).map_err(err_to_status)?,
         }))
     }
 
@@ -995,6 +1035,26 @@ where
         })?;
         let inner = resp.into_inner();
         Ok((decode(&inner.evaluation)?, decode(&inner.proof)?))
+    }
+
+    fn remask_value_history_entry(
+        &self,
+        entry: super::sharded::StoredValueHistoryEntry<E, P>,
+    ) -> Result<super::sharded::StoredValueHistoryEntry<E, P>, AegonError> {
+        let req = proto::RemaskValueHistoryEntryRequest {
+            entry_uncompressed: encode(&entry)?,
+        };
+        let resp = self.with_retry(move |client| {
+            let req = req.clone();
+            async move {
+                client
+                    .lock()
+                    .await
+                    .remask_value_history_entry(req)
+                    .await
+            }
+        })?;
+        decode(&resp.into_inner().entry_uncompressed)
     }
 
     fn current_commitment(&self) -> EpochCommitment<E, P> {

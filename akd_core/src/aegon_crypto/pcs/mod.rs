@@ -41,6 +41,27 @@ pub trait PolynomialCommitmentScheme<E: Pairing> {
         + Send
         + Default
         + Sync;
+    /// Opening-point-agnostic auxiliary that a dedicated masking server
+    /// can precompute in bulk and a prover consumes at open-time to
+    /// produce a hiding opening. PCSs that don't support the
+    /// masking-server protocol leave this as `()`.
+    type MaskingPackage: Clone
+        + CanonicalSerialize
+        + CanonicalDeserialize
+        + Debug
+        + Send
+        + Sync;
+    /// Per-polynomial hiding-state snapshot needed to re-mask a stored
+    /// non-ZK opening into a ZK one (see
+    /// [`Self::remask_with_package`]). For Pedersen-MSM-based hiding
+    /// PCSs this is the polynomial's blinding scalar `tau` at the time
+    /// the non-ZK opening was produced.
+    type HidingScalar: Clone
+        + CanonicalSerialize
+        + CanonicalDeserialize
+        + Debug
+        + Send
+        + Sync;
 
     fn gen_srs_for_testing<R: Rng>(
         conf: Self::Config,
@@ -58,6 +79,31 @@ pub trait PolynomialCommitmentScheme<E: Pairing> {
         prover_param: impl Borrow<Self::ProverParam>,
         poly: &Self::Polynomial,
     ) -> Result<(Self::Commitment, Self::State), PCSError>;
+
+    /// Explicit hiding commitment: produces `C = <f, H_1> + tau*h` and
+    /// returns the polynomial's `tau` inside the state (the `Some(tau)`
+    /// branch of [`Self::HidingScalar`]). Used by callers that want
+    /// hiding for one polynomial regardless of how other polynomials
+    /// against the same SRS are committed — Aegon commits its value
+    /// polynomials this way so the masking-server protocol has
+    /// `tau_f` to plug into `rho_prime = alpha*tau_f + rho`.
+    fn commit_zk(
+        _prover_param: impl Borrow<Self::ProverParam>,
+        _poly: &Self::Polynomial,
+    ) -> Result<(Self::Commitment, Self::State), PCSError> {
+        unimplemented!("PCS::commit_zk has no default — implement on hiding-capable PCSs")
+    }
+
+    /// Explicit plain commitment: `C = <f, H_1>` with no hiding term.
+    /// The state's `tau` is `None`. Aegon commits its label-side
+    /// polynomials this way so they carry no hiding overhead even
+    /// against an SRS that *would* support hiding.
+    fn commit_non_zk(
+        _prover_param: impl Borrow<Self::ProverParam>,
+        _poly: &Self::Polynomial,
+    ) -> Result<(Self::Commitment, Self::State), PCSError> {
+        unimplemented!("PCS::commit_non_zk has no default — implement on PCSs that distinguish hiding from non-hiding commits")
+    }
 
     /// Block decomposition the PCS uses to map a multilinear polynomial's
     /// `2^num_vars` evaluations into its commitment table. The returned
@@ -155,6 +201,73 @@ pub trait PolynomialCommitmentScheme<E: Pairing> {
         _transcript: &mut IOPTranscript<E::ScalarField>,
     ) -> Result<bool, PCSError> {
         unimplemented!()
+    }
+
+    /// Explicit non-ZK opener. The default [`Self::open`] auto-dispatches
+    /// to the hiding variant whenever the SRS is hiding; this entry
+    /// point lets callers ask for a plain opening regardless (publish-
+    /// time stored openings that will be re-masked later go through
+    /// here). PCSs without a ZK variant can just delegate to `open`.
+    fn open_non_zk(
+        _prover_param: impl Borrow<Self::ProverParam>,
+        _commitment: &Self::Commitment,
+        _polynomial: DenseOrSparseMLERef<'_, E::ScalarField>,
+        _point: &Self::Point,
+        _state: &Self::State,
+    ) -> Result<(Self::Proof, Self::Evaluation), PCSError> {
+        unimplemented!("PCS::open_non_zk has no default — implement on hiding PCSs that need the masking-server protocol")
+    }
+
+    /// Get the hiding scalar `tau` for a polynomial's state. For PCSs
+    /// whose [`Self::HidingScalar`] is `()` (non-hiding PCSs), this
+    /// returns `()`. Used by the publish path to snapshot the per-
+    /// epoch `tau` so the history-lookup path can re-mask stored
+    /// openings.
+    fn get_hiding_scalar(_state: &Self::State) -> Self::HidingScalar {
+        unimplemented!("PCS::get_hiding_scalar has no default — implement on hiding PCSs that need the masking-server protocol")
+    }
+
+    /// Producer-side of the masking-server protocol: build an
+    /// opening-point-agnostic auxiliary that a consumer can later
+    /// turn into a hiding opening without sampling its own masking
+    /// polynomial.
+    fn generate_masking_package(
+        _prover_param: impl Borrow<Self::ProverParam>,
+        _num_vars: usize,
+    ) -> Result<Self::MaskingPackage, PCSError> {
+        unimplemented!("PCS::generate_masking_package has no default — implement on hiding PCSs that need the masking-server protocol")
+    }
+
+    /// Consumer-side of the masking-server protocol: hiding-open
+    /// `polynomial` at `point` using a precomputed package.
+    fn open_zk_with_package(
+        _prover_param: impl Borrow<Self::ProverParam>,
+        _commitment: &Self::Commitment,
+        _polynomial: DenseOrSparseMLERef<'_, E::ScalarField>,
+        _point: &Self::Point,
+        _state: &Self::State,
+        _transcript: &mut IOPTranscript<E::ScalarField>,
+        _package: &Self::MaskingPackage,
+    ) -> Result<(Self::Proof, Self::Evaluation), PCSError> {
+        unimplemented!("PCS::open_zk_with_package has no default — implement on hiding PCSs that need the masking-server protocol")
+    }
+
+    /// Re-mask an already-computed non-ZK opening into a hiding one
+    /// using a precomputed package and the polynomial's per-epoch
+    /// hiding scalar `tau_f`. Used by the history-lookup path to
+    /// upgrade publish-time stored plain openings without re-opening
+    /// the polynomial.
+    fn remask_with_package(
+        _prover_param: impl Borrow<Self::ProverParam>,
+        _commitment: &Self::Commitment,
+        _point: &Self::Point,
+        _value: &E::ScalarField,
+        _non_zk_proof: Self::Proof,
+        _tau_f: &Self::HidingScalar,
+        _transcript: &mut IOPTranscript<E::ScalarField>,
+        _package: &Self::MaskingPackage,
+    ) -> Result<Self::Proof, PCSError> {
+        unimplemented!("PCS::remask_with_package has no default — implement on hiding PCSs that need the masking-server protocol")
     }
 }
 

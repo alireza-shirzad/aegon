@@ -3,7 +3,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build_server(true)
         .build_client(true)
         .compile_protos(
-            &["proto/shard.proto", "proto/coordinator.proto"],
+            &[
+                "proto/shard.proto",
+                "proto/coordinator.proto",
+                "proto/masking.proto",
+            ],
             &["proto"],
         )?;
     Ok(())

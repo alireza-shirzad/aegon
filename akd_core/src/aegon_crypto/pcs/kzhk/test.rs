@@ -613,3 +613,110 @@ fn test_sparse_boolean_zk_k5() -> Result<(), PCSError> {
     test_single_helper(15, true, true, true, 5)?;
     Ok(())
 }
+
+/// Masking-server protocol: `generate_masking_package` produces an
+/// opening-point-agnostic auxiliary, and `open_zk_with_package`
+/// consumes it to produce a verifying hiding opening. End result
+/// must verify against the same SRS as a vanilla `open_zk` would.
+#[test]
+fn masking_package_open_zk_round_trip() -> Result<(), PCSError> {
+    let nv = 8;
+    let k = 2;
+    let mut rng = test_rng();
+    let poly =
+        DenseOrSparseMLE::Sparse(SparseMultilinearExtension::<Fr>::rand(nv, &mut rng));
+    let params = KZHK::<E>::gen_srs_for_testing(KZHKConfig::new(k, true), &mut rng, nv)?;
+    let (ck, vk) = KZHK::trim(params, None, Some(nv))?;
+    let point: Vec<Fr> = (0..nv).map(|_| Fr::rand(&mut rng)).collect();
+
+    let (com, mut state) = KZHK::<E>::commit(&ck, &poly)?;
+    KZHK::<E>::update_state(&ck, &poly, &com, &mut state)?;
+
+    // Producer side (masking server): builds the package in isolation,
+    // without ever seeing the polynomial, commitment, or point.
+    let package =
+        <KZHK<E> as PolynomialCommitmentScheme<E>>::generate_masking_package(&ck, nv)?;
+
+    // Consumer side (shard): opens the polynomial with the package.
+    let mut prover_transcript = IOPTranscript::new(b"test_masking_pkg");
+    let (proof, value) = <KZHK<E> as PolynomialCommitmentScheme<E>>::open_zk_with_package(
+        &ck,
+        &com,
+        poly.as_ref(),
+        &point,
+        &state,
+        &mut prover_transcript,
+        &package,
+    )?;
+
+    // Verifier-side: the proof is a valid hiding opening of `f` at `point`.
+    let mut verif_transcript = IOPTranscript::new(b"test_masking_pkg");
+    assert!(KZHK::<E>::verify(
+        &vk,
+        &com,
+        &point,
+        &value,
+        &proof,
+        &mut verif_transcript,
+    )?);
+    Ok(())
+}
+
+/// `remask_with_package` upgrades a precomputed non-ZK opening into
+/// a hiding one. The resulting proof must verify like any other
+/// hiding opening; this is the primitive the history-lookup path
+/// would use to upgrade DB-stored plain openings on demand.
+#[test]
+fn masking_package_remask_non_zk_proof() -> Result<(), PCSError> {
+    let nv = 8;
+    let k = 2;
+    let mut rng = test_rng();
+    let poly =
+        DenseOrSparseMLE::Sparse(SparseMultilinearExtension::<Fr>::rand(nv, &mut rng));
+    let params = KZHK::<E>::gen_srs_for_testing(KZHKConfig::new(k, true), &mut rng, nv)?;
+    let (ck, vk) = KZHK::trim(params, None, Some(nv))?;
+    let point: Vec<Fr> = (0..nv).map(|_| Fr::rand(&mut rng)).collect();
+
+    let (com, mut state) = KZHK::<E>::commit(&ck, &poly)?;
+    KZHK::<E>::update_state(&ck, &poly, &com, &mut state)?;
+
+    // Produce a plain non-ZK opening of `f` at `point`. The history-
+    // lookup remask path stores exactly this shape at publish time.
+    let (non_zk_proof, value) = <KZHK<E> as PolynomialCommitmentScheme<E>>::open_non_zk(
+        &ck,
+        &com,
+        poly.as_ref(),
+        &point,
+        &state,
+    )?;
+    let tau_f =
+        <KZHK<E> as PolynomialCommitmentScheme<E>>::get_hiding_scalar(&state);
+
+    // Remask using a fresh package. The verifier accepts the result
+    // as a hiding opening of `f` at `point` against `com`.
+    let package =
+        <KZHK<E> as PolynomialCommitmentScheme<E>>::generate_masking_package(&ck, nv)?;
+    let mut prover_transcript = IOPTranscript::new(b"test_remask_pkg");
+    let proof = <KZHK<E> as PolynomialCommitmentScheme<E>>::remask_with_package(
+        &ck,
+        &com,
+        &point,
+        &value,
+        non_zk_proof,
+        &tau_f,
+        &mut prover_transcript,
+        &package,
+    )?;
+
+    let mut verif_transcript = IOPTranscript::new(b"test_remask_pkg");
+    assert!(KZHK::<E>::verify(
+        &vk,
+        &com,
+        &point,
+        &value,
+        &proof,
+        &mut verif_transcript,
+    )?);
+    Ok(())
+}
+

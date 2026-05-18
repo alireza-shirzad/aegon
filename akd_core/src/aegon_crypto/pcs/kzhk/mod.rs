@@ -111,6 +111,8 @@ where
     type Proof = KZHKOpeningProof<E>;
     type BatchProof = KZHKOpeningProof<E>;
     type State = KZHKState<E>;
+    type MaskingPackage = crate::aegon_crypto::pcs::kzhk::structs::KZHKMaskingPackage<E>;
+    type HidingScalar = E::ScalarField;
 
     /// Generates (or loads) a KZH-k SRS for testing.
     ///
@@ -337,6 +339,144 @@ where
             transcript,
         )
     }
+
+    /// Public-trait shim onto the (crate-private) `open_non_zk` so
+    /// callers that want a plain opening even from a hiding SRS can
+    /// reach it through the generic `P::` interface.
+    fn open_non_zk(
+        prover_param: impl Borrow<Self::ProverParam>,
+        commitment: &Self::Commitment,
+        polynomial: DenseOrSparseMLERef<'_, E::ScalarField>,
+        point: &Self::Point,
+        state: &Self::State,
+    ) -> Result<(Self::Proof, Self::Evaluation), PCSError> {
+        Self::open_non_zk(prover_param, commitment, polynomial, point, state)
+    }
+
+    /// Public-trait shim onto the (crate-private) `commit_zk`. Used
+    /// by Aegon to commit value-side polynomials with hiding
+    /// (`C = <f, H_1> + tau*h`) even when label-side polys against
+    /// the same SRS use plain commits.
+    fn commit_zk(
+        prover_param: impl Borrow<Self::ProverParam>,
+        poly: &Self::Polynomial,
+    ) -> Result<(Self::Commitment, Self::State), PCSError> {
+        Self::commit_zk(prover_param, poly)
+    }
+
+    /// Public-trait shim onto the (crate-private) `commit_non_zk`.
+    /// Used by Aegon to commit label-side polynomials plain — no
+    /// hiding overhead — even when value-side polys against the
+    /// same SRS are hiding.
+    fn commit_non_zk(
+        prover_param: impl Borrow<Self::ProverParam>,
+        poly: &Self::Polynomial,
+    ) -> Result<(Self::Commitment, Self::State), PCSError> {
+        Self::commit_non_zk(prover_param, poly)
+    }
+
+    fn get_hiding_scalar(state: &Self::State) -> Self::HidingScalar {
+        // `state.tau` is `None` on non-hiding (`zk=false`) SRS — return
+        // zero so callers can capture per-epoch hiding scalars
+        // unconditionally without panicking on plain mode. The remask
+        // path is a no-op in non-hiding mode anyway (it checks
+        // `is_zk()` and short-circuits), so the zero is never used.
+        state
+            .maybe_tau()
+            .copied()
+            .unwrap_or_else(<E::ScalarField as Zero>::zero)
+    }
+
+    fn generate_masking_package(
+        prover_param: impl Borrow<Self::ProverParam>,
+        num_vars: usize,
+    ) -> Result<Self::MaskingPackage, PCSError> {
+        let pp = prover_param.borrow();
+        // A masking package only makes sense against a hiding SRS:
+        // the polynomial's commitment carries its own commit-time
+        // `tau_f * h` term, and `rho_prime = alpha * tau_f + rho`
+        // requires `tau_f` to be defined. On a non-hiding SRS
+        // (`state.tau = None`), the consumer can't construct a valid
+        // hiding opening from a masking package — callers fall back
+        // to a plain non-ZK opening instead.
+        assert!(
+            pp.is_zk(),
+            "generate_masking_package: prover param must be hiding (zk SRS)"
+        );
+        let r_poly = rand_sparse_mle(
+            num_vars,
+            pp.get_hiding_sparsity().unwrap(),
+            &mut test_rng(),
+        );
+        let r_poly_wrapped = DenseOrSparseMLE::Sparse(r_poly.clone());
+        let (r_hide, mut r_state) = Self::commit(pp, &r_poly_wrapped)?;
+        let rho = *r_state.get_tau();
+        Self::update_state(pp, &r_poly_wrapped, &r_hide, &mut r_state)?;
+        Ok(crate::aegon_crypto::pcs::kzhk::structs::KZHKMaskingPackage::new(
+            num_vars, r_poly, r_hide, r_state, rho,
+        ))
+    }
+
+    fn open_zk_with_package(
+        prover_param: impl Borrow<Self::ProverParam>,
+        commitment: &Self::Commitment,
+        polynomial: DenseOrSparseMLERef<'_, E::ScalarField>,
+        point: &Self::Point,
+        state: &Self::State,
+        transcript: &mut IOPTranscript<E::ScalarField>,
+        package: &Self::MaskingPackage,
+    ) -> Result<(Self::Proof, Self::Evaluation), PCSError> {
+        let pp = prover_param.borrow();
+        assert_eq!(
+            package.num_vars,
+            polynomial.num_vars(),
+            "open_zk_with_package: package num_vars {} != polynomial num_vars {}",
+            package.num_vars,
+            polynomial.num_vars(),
+        );
+        let (non_zk_opening, non_zk_value) =
+            Self::open_non_zk(pp, commitment, polynomial, point, state)?;
+        // `tau_f` is the polynomial's commit-time blinding scalar
+        // (Appendix D notation), fixed at commit time and threaded
+        // through every opening. The masking package's own `rho`
+        // blinds the masking polynomial `r`; both terms appear in
+        // `rho_prime = alpha * tau_f + rho` so the verifier can
+        // de-randomise the hiding offset of `C_lin`.
+        let proof = Self::apply_masking_package(
+            pp,
+            commitment,
+            point,
+            &non_zk_value,
+            non_zk_opening,
+            state.get_tau(),
+            transcript,
+            package,
+        )?;
+        Ok((proof, non_zk_value))
+    }
+
+    fn remask_with_package(
+        prover_param: impl Borrow<Self::ProverParam>,
+        commitment: &Self::Commitment,
+        point: &Self::Point,
+        value: &E::ScalarField,
+        non_zk_proof: Self::Proof,
+        tau_f: &Self::HidingScalar,
+        transcript: &mut IOPTranscript<E::ScalarField>,
+        package: &Self::MaskingPackage,
+    ) -> Result<Self::Proof, PCSError> {
+        let pp = prover_param.borrow();
+        Self::apply_masking_package(
+            pp,
+            commitment,
+            point,
+            value,
+            non_zk_proof,
+            tau_f,
+            transcript,
+            package,
+        )
+    }
 }
 
 impl<E: Pairing> KZHK<E> {
@@ -475,6 +615,36 @@ impl<E: Pairing> KZHK<E> {
         output_opening.set_y_r(y_r);
         output_opening.set_rho_prime(rho_prime);
         Ok((output_opening, non_zk_value))
+    }
+
+    /// Shared core of the masking-server consumer path: given a
+    /// precomputed non-ZK opening and a masking package, produce the
+    /// linearized ZK opening. Mirrors steps 3–7 of [`Self::open_zk`].
+    fn apply_masking_package(
+        prover_param: &KZHKProverParam<E>,
+        commitment: &KZHKCommitment<E>,
+        point: &[E::ScalarField],
+        value: &E::ScalarField,
+        non_zk_opening: KZHKOpeningProof<E>,
+        tau_f: &E::ScalarField,
+        transcript: &mut IOPTranscript<E::ScalarField>,
+        package: &crate::aegon_crypto::pcs::kzhk::structs::KZHKMaskingPackage<E>,
+    ) -> Result<KZHKOpeningProof<E>, PCSError> {
+        let r_poly_wrapped = DenseOrSparseMLE::Sparse(package.r_poly.clone());
+        let (r_opening, y_r) = Self::open_non_zk(
+            prover_param,
+            &package.r_hide,
+            r_poly_wrapped.as_ref(),
+            point,
+            &package.r_state,
+        )?;
+        let alpha = Self::derive_alpha(transcript, commitment, point, value, &package.r_hide)?;
+        let rho_prime = alpha * tau_f + package.rho;
+        let mut output_opening = non_zk_opening * alpha + r_opening;
+        output_opening.set_r_hide(package.r_hide.clone());
+        output_opening.set_y_r(y_r);
+        output_opening.set_rho_prime(rho_prime);
+        Ok(output_opening)
     }
 
     /// Fiat-Shamir derivation of the sigma-protocol challenge `alpha`.
@@ -619,7 +789,18 @@ impl<E: Pairing> KZHK<E> {
             g2_terms.extend(verifier_param.get_v_mat()[j].iter().cloned());
 
             let prod = E::multi_pairing(g1_terms, g2_terms);
-            debug_assert!(prod.is_zero());
+            if !prod.is_zero() {
+                // Pairing identity at level `j` rejected: either the
+                // committed `D_j` row doesn't correspond to a valid
+                // partial evaluation, or the upstream `C_{j-1}` we're
+                // checking it against doesn't either. Could equally
+                // come from a tampered proof or from a tampered
+                // `(commitment, value, R_hide)` triple feeding
+                // `verify_zk`'s `C_lin` reconstruction. Either way,
+                // it's a rejection — not a programmer bug — so we
+                // surface `Ok(false)` rather than `debug_assert!`.
+                return Ok(false);
+            }
 
             let eq_poly = build_eq_x_r(point_part).unwrap();
             cj = msm::<E::G1>(&proof.get_d()[j], &eq_poly.evaluations).into_affine();
@@ -637,12 +818,14 @@ impl<E: Pairing> KZHK<E> {
         )
         .unwrap()
         .into_affine();
-        assert_eq!(cj, alleged_last_cj);
+        if cj != alleged_last_cj {
+            return Ok(false);
+        }
         drop(cj_check_guard);
         // Evaluation Check
         let eval_check_span = tracing::debug_span!("KZH::Verify::EvalCheck");
         let eval_check_guard = eval_check_span.enter();
-        let _p = match proof.get_f() {
+        let eval_ok = match proof.get_f() {
             DenseOrSparseMLE::Dense(f) => {
                 fix_last_variables(f, &decomposed_point[k - 1])[0] == *value
             },
@@ -651,7 +834,7 @@ impl<E: Pairing> KZHK<E> {
             },
         };
         drop(eval_check_guard);
-        Ok(true)
+        Ok(eval_ok)
     }
 
     /// Batch verifier: sums commitments and values and delegates to

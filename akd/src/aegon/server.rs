@@ -78,6 +78,17 @@ where
     prover_param: P::ProverParam,
     verifier_param: P::VerifierParam,
 
+    /// Optional client to the cluster's masking server. When set,
+    /// every value-side opening fetches a one-shot
+    /// [`P::MaskingPackage`] from the server and uses
+    /// [`P::open_zk_with_package`] to mint a hiding opening. When
+    /// `None` and the SRS is hiding, value-side openings fall back to
+    /// generating a fresh masking package in-process — useful for
+    /// tests that don't want to spin up a masking server. When `None`
+    /// and the SRS is non-hiding, value-side openings degrade to
+    /// plain non-ZK openings.
+    masking_client: Option<std::sync::Arc<super::masking::MaskingClient<E, P>>>,
+
     epoch: u64,
 
     // Live polynomials.
@@ -281,14 +292,21 @@ where
         let rand_index_poly = zero_poly();
         let rand_value_poly = zero_poly();
 
+        // Per-polynomial commit dispatch:
+        //   * label side (index, rand_index) — always plain
+        //     `C = <f, H_1>`, no hiding overhead, regardless of SRS.
+        //   * value side (value, rand_value) — hiding
+        //     `C = <f, H_1> + tau*h` whenever the SRS supports it,
+        //     so the masking-server protocol has the polynomial's
+        //     `tau_f` to plug into `rho_prime = alpha*tau_f + rho`.
         let (index_commitment, index_state) =
-            commit_with_aux::<E, P>(&prover_param, &index_poly)?;
+            commit_with_aux_non_zk::<E, P>(&prover_param, &index_poly)?;
         let (value_commitment, value_state) =
-            commit_with_aux::<E, P>(&prover_param, &value_poly)?;
+            commit_with_aux_value_side::<E, P>(&prover_param, &value_poly)?;
         let (rand_index_commitment, rand_index_state) =
-            commit_with_aux::<E, P>(&prover_param, &rand_index_poly)?;
+            commit_with_aux_non_zk::<E, P>(&prover_param, &rand_index_poly)?;
         let (rand_value_commitment, rand_value_state) =
-            commit_with_aux::<E, P>(&prover_param, &rand_value_poly)?;
+            commit_with_aux_value_side::<E, P>(&prover_param, &rand_value_poly)?;
 
         let mut epoch_history = BTreeMap::new();
         epoch_history.insert(
@@ -310,6 +328,7 @@ where
             dims,
             prover_param,
             verifier_param,
+            masking_client: None,
             epoch: 0,
             index_poly,
             value_poly,
@@ -330,6 +349,18 @@ where
             pending: None,
             _phantom: PhantomData,
         })
+    }
+
+    /// Wire up a [`super::masking::MaskingClient`] so this shard's
+    /// value-side openings fetch one-shot masking packages from the
+    /// cluster's masking server (instead of generating them inline).
+    /// Call before binding the gRPC socket; the field is consulted on
+    /// every value-side open.
+    pub fn set_masking_client(
+        &mut self,
+        client: std::sync::Arc<super::masking::MaskingClient<E, P>>,
+    ) {
+        self.masking_client = Some(client);
     }
 
     pub fn verifier_param(&self) -> P::VerifierParam {
@@ -438,6 +469,7 @@ where
             dims,
             prover_param,
             verifier_param,
+            masking_client: None,
             epoch: ckpt.epoch,
             index_poly,
             value_poly,
@@ -511,9 +543,13 @@ where
         }
         // Recommit the populated data polynomials. Rand polys stay at
         // zero — there's been no publish, so the chain randomness is
-        // still zero.
-        let (com_i, state_i) = commit_with_aux::<E, P>(&self.prover_param, &self.index_poly)?;
-        let (com_v, state_v) = commit_with_aux::<E, P>(&self.prover_param, &self.value_poly)?;
+        // still zero. Per-polynomial commit dispatch matches
+        // `Aegon::init`: label side plain, value side hiding (when
+        // SRS supports it).
+        let (com_i, state_i) =
+            commit_with_aux_non_zk::<E, P>(&self.prover_param, &self.index_poly)?;
+        let (com_v, state_v) =
+            commit_with_aux_value_side::<E, P>(&self.prover_param, &self.value_poly)?;
         self.index_commitment = com_i;
         self.index_state = state_i;
         self.value_commitment = com_v;
@@ -792,10 +828,16 @@ where
         // Commit + aux the delta polynomials (size `batch`). Cost is
         // `O(batch)` for `P::commit` and `O(k · batch)` for the
         // per-row aux fill inside `commit_with_aux`.
+        // Same per-polynomial dispatch as init: delta_index is
+        // label-side (plain), delta_value is value-side (hiding when
+        // SRS supports it). Both feed the homomorphic combine
+        // `new_com = prev_com + delta_com` and `new_state = prev_state +
+        // delta_state` — for the hiding case, this carries
+        // `tau_new = tau_prev + tau_delta` through `iadd_scaled`.
         let (delta_index_com, delta_index_state) =
-            commit_with_aux::<E, P>(&self.prover_param, &delta_index_poly)?;
+            commit_with_aux_non_zk::<E, P>(&self.prover_param, &delta_index_poly)?;
         let (delta_value_com, delta_value_state) =
-            commit_with_aux::<E, P>(&self.prover_param, &delta_value_poly)?;
+            commit_with_aux_value_side::<E, P>(&self.prover_param, &delta_value_poly)?;
 
         // Homomorphism on commitments and on the prover state:
         //   new_com   = prev_com   + delta_com
@@ -915,8 +957,15 @@ where
             Vec::with_capacity(new_label_slots.len());
         let mut pre_rand_value: Vec<(E::ScalarField, P::Proof)> =
             Vec::with_capacity(new_label_slots.len());
+        // Publish-time openings:
+        // * `rand_index` is label-side, plain commit ⇒ plain opening.
+        // * `rand_value` is value-side, hiding commit ⇒ goes through
+        //   auto-dispatching `P::open`, which produces an inline ZK
+        //   opening under a hiding SRS. The masking-server protocol
+        //   is intentionally NOT on the publish hot path ("not in
+        //   the publish"); inline sampling is fine here.
         for slot_bits in &new_label_slots {
-            pre_rand_index.push(open_at_point::<E, P>(
+            pre_rand_index.push(open_at_point_non_zk::<E, P>(
                 &self.prover_param,
                 &prev_rand_index_poly,
                 &prev_rand_index_com,
@@ -1010,7 +1059,8 @@ where
         let mut post_value: Vec<(E::ScalarField, P::Proof)> =
             Vec::with_capacity(new_label_slots.len());
         for slot_bits in &new_label_slots {
-            post_rand_index.push(open_at_point::<E, P>(
+            // `rand_index` is label-side (plain commit ⇒ plain open).
+            post_rand_index.push(open_at_point_non_zk::<E, P>(
                 &self.prover_param,
                 &self.rand_index_poly,
                 &new_rand_index_com,
@@ -1019,6 +1069,8 @@ where
                 &self.dims,
                 b"aegon.rand_index.open",
             )?);
+            // `rand_value` / `value` are value-side (hiding commit ⇒
+            // inline-ZK opening via auto-dispatch).
             post_rand_value.push(open_at_point::<E, P>(
                 &self.prover_param,
                 &self.rand_value_poly,
@@ -1245,12 +1297,133 @@ where
             .unwrap_or(false)
     }
 
+    /// Re-mask a publish-time **non-ZK** opening into a hiding (ZK)
+    /// one. Used by the history-lookup path: every
+    /// [`crate::aegon::sharded::StoredValueHistoryEntry`] carries
+    /// three plain proofs computed at publish time; before the
+    /// coordinator hands the entry to a user it asks the owning
+    /// shard to upgrade each plain proof via this helper.
+    ///
+    /// Inputs mirror the masking-server protocol: `commitment` is
+    /// the polynomial's commitment at the same epoch as the stored
+    /// proof; `non_zk_proof` and `tau_f` are the snapshot the
+    /// publish stored; `slot_bits` is the original opening point;
+    /// `transcript_label` matches the one the publish-time open
+    /// used.
+    pub fn remask_value_side_proof(
+        &self,
+        commitment: &P::Commitment,
+        slot_bits: &[bool],
+        value: &E::ScalarField,
+        non_zk_proof: P::Proof,
+        tau_f: &P::HidingScalar,
+        transcript_label: &'static [u8],
+    ) -> Result<P::Proof, AegonError> {
+        // Same hiding-SRS requirement as `open_value_side_at_point`:
+        // remask needs the polynomial's commit-time `tau_f` to be
+        // defined. On a non-hiding SRS, just pass the plain proof
+        // through.
+        if !self.prover_param.is_zk() {
+            return Ok(non_zk_proof);
+        }
+        let point = bool_index_to_point::<E::ScalarField>(slot_bits);
+        let package = match &self.masking_client {
+            Some(client) => client
+                .fetch_package(self.log_capacity)
+                .map_err(|e| AegonError::Config(format!("masking fetch: {e}")))?,
+            None => P::generate_masking_package(&self.prover_param, self.log_capacity)?,
+        };
+        let mut tr = IOPTranscript::<E::ScalarField>::new(transcript_label);
+        let proof = P::remask_with_package(
+            &self.prover_param,
+            commitment,
+            &point,
+            value,
+            non_zk_proof,
+            tau_f,
+            &mut tr,
+            &package,
+        )?;
+        Ok(proof)
+    }
+
+    /// Helper: hiding-open `poly` at `slot_bits` using the masking-
+    /// server protocol. Used by every value-side opening that goes to
+    /// users (value-poly lookups + rand_value-poly freshness +
+    /// rand_value-poly consistency openings).
+    ///
+    /// If `self.masking_client` is set, fetches a one-shot package
+    /// from the masking server. Otherwise (typical for tests) it
+    /// generates a package inline against `self.prover_param` — only
+    /// works when the SRS is hiding, but tests are the only path that
+    /// hits the fallback.
+    fn open_value_side_at_point(
+        &self,
+        poly: &SparseMultilinearExtension<E::ScalarField>,
+        com: &P::Commitment,
+        state: &P::State,
+        slot_bits: &[bool],
+        transcript_label: &'static [u8],
+    ) -> Result<(E::ScalarField, P::Proof), AegonError> {
+        // The masking-server protocol requires a hiding SRS: the
+        // polynomial's commit-time `tau_f` is needed to compute
+        // `rho_prime = alpha * tau_f + rho`. On a non-hiding SRS the
+        // commitment has no `tau_f * h` term, so the consumer can't
+        // construct a valid ZK opening from a masking package —
+        // fall back to a plain non-ZK opening. Keeps tests that run
+        // with `private = false` working without a masking server,
+        // while production (hiding SRS + masking client) always goes
+        // through the ZK path.
+        if !self.prover_param.is_zk() {
+            return open_at_point_non_zk::<E, P>(
+                &self.prover_param,
+                poly,
+                com,
+                state,
+                slot_bits,
+                &self.dims,
+                transcript_label,
+            );
+        }
+        let point = bool_index_to_point::<E::ScalarField>(slot_bits);
+        let usize_idx = bool_index_to_usize(slot_bits, &self.dims);
+        let evaluation = poly
+            .evaluations
+            .get(&usize_idx)
+            .copied()
+            .unwrap_or_else(<E::ScalarField as Zero>::zero);
+        let package = match &self.masking_client {
+            Some(client) => client
+                .fetch_package(self.log_capacity)
+                .map_err(|e| AegonError::Config(format!("masking fetch: {e}")))?,
+            None => P::generate_masking_package(&self.prover_param, self.log_capacity)?,
+        };
+        let mut tr = IOPTranscript::<E::ScalarField>::new(transcript_label);
+        let (proof, _) = P::open_zk_with_package(
+            &self.prover_param,
+            com,
+            DenseOrSparseMLERef::Sparse(poly),
+            &point,
+            state,
+            &mut tr,
+            &package,
+        )?;
+        Ok((evaluation, proof))
+    }
+
     /// Open the current `index_poly` commitment at `slot_bits`.
+    /// Label-side opening: auto-dispatch on SRS hiding-ness. Under a
+    /// hiding SRS this is still ZK (via the PCS's inline sampling) —
+    /// the masking-server protocol is intentionally value-side only,
+    /// so labels skip the round-trip and pay the inline cost instead.
     pub fn open_index_at_slot(
         &self,
         slot_bits: &[bool],
     ) -> Result<(E::ScalarField, P::Proof), AegonError> {
-        open_at_point::<E, P>(
+        // Label commitments are plain (no `tau*h`), so the opening
+        // must be plain too — match `commit_with_aux_non_zk` in
+        // `init`/`restore`.
+        open_at_point_non_zk::<E, P>(
             &self.prover_param,
             &self.index_poly,
             &self.index_commitment,
@@ -1262,24 +1435,25 @@ where
     }
 
     /// Open the current `value_poly` commitment at `slot_bits`.
+    /// Value-side opening — hiding (ZK) via the masking-server
+    /// protocol.
     pub fn open_value_at_slot(
         &self,
         slot_bits: &[bool],
     ) -> Result<(E::ScalarField, P::Proof), AegonError> {
-        open_at_point::<E, P>(
-            &self.prover_param,
+        self.open_value_side_at_point(
             &self.value_poly,
             &self.value_commitment,
             &self.value_state,
             slot_bits,
-            &self.dims,
             b"aegon.value.open",
         )
     }
 
     /// Open `rand_index_poly` at `slot_bits` for some retained `epoch`.
     /// Used by sharded consistency proofs to open both `s0` and the
-    /// current epoch at the same probe point.
+    /// current epoch at the same probe point. Label-side opening:
+    /// auto-dispatches on SRS hiding-ness (inline-ZK under hiding).
     pub fn open_rand_index_at_slot_in_epoch(
         &self,
         slot_bits: &[bool],
@@ -1289,7 +1463,8 @@ where
             .epoch_history
             .get(&epoch)
             .ok_or(AegonError::InvalidEpoch(epoch))?;
-        open_at_point::<E, P>(
+        // Label-side: plain commit ⇒ plain opening.
+        open_at_point_non_zk::<E, P>(
             &self.prover_param,
             &snap.rand_index_poly,
             &snap.rand_index_commitment,
@@ -1301,6 +1476,8 @@ where
     }
 
     /// Open `rand_value_poly` at `slot_bits` for some retained `epoch`.
+    /// Value-side opening — hiding (ZK) via the masking-server
+    /// protocol.
     pub fn open_rand_value_at_slot_in_epoch(
         &self,
         slot_bits: &[bool],
@@ -1310,13 +1487,11 @@ where
             .epoch_history
             .get(&epoch)
             .ok_or(AegonError::InvalidEpoch(epoch))?;
-        open_at_point::<E, P>(
-            &self.prover_param,
+        self.open_value_side_at_point(
             &snap.rand_value_poly,
             &snap.rand_value_commitment,
             &snap.rand_value_state,
             slot_bits,
-            &self.dims,
             b"aegon.rand_value.open",
         )
     }
@@ -1326,21 +1501,18 @@ where
     /// been retained in `epoch_history` — it opens against the
     /// currently-running commitment + state, which is always
     /// available. Used by `lookup_history` to ship the verifier a
-    /// "no change since the latest history entry" attestation: the
-    /// returned evaluation should match `rand_value_post_eval` of
-    /// the most recent history entry whenever no subsequent publish
-    /// has touched this slot.
+    /// "no change since the latest history entry" attestation.
+    /// Value-side opening — hiding (ZK) via the masking-server
+    /// protocol.
     pub fn open_rand_value_at_slot_current(
         &self,
         slot_bits: &[bool],
     ) -> Result<(E::ScalarField, P::Proof), AegonError> {
-        open_at_point::<E, P>(
-            &self.prover_param,
+        self.open_value_side_at_point(
             &self.rand_value_poly,
             &self.rand_value_commitment,
             &self.rand_value_state,
             slot_bits,
-            &self.dims,
             b"aegon.rand_value.open",
         )
     }
@@ -1348,16 +1520,14 @@ where
     /// Open the live `rand_index_poly` at `slot_bits`. Label-side
     /// mirror of [`open_rand_value_at_slot_current`]. Used by
     /// `lookup_label_history` to ship the verifier a "no change
-    /// since placement" attestation: under the system's current
-    /// invariant that labels are placed exactly once, the returned
-    /// evaluation should always equal `rand_index_eval` of the
-    /// stored placement record — any mismatch implies a publish
-    /// has written `index_poly` at this slot since placement.
+    /// since placement" attestation. Label-side opening: auto-
+    /// dispatches on SRS hiding-ness (inline-ZK under hiding).
     pub fn open_rand_index_at_slot_current(
         &self,
         slot_bits: &[bool],
     ) -> Result<(E::ScalarField, P::Proof), AegonError> {
-        open_at_point::<E, P>(
+        // Label-side: plain commit ⇒ plain opening.
+        open_at_point_non_zk::<E, P>(
             &self.prover_param,
             &self.rand_index_poly,
             &self.rand_index_commitment,
@@ -1382,45 +1552,30 @@ where
             .get(label)
             .ok_or_else(|| AegonError::UnknownLabel(label.clone()))?;
 
+        // Label-side: plain commit ⇒ plain index-probe openings.
         let mut probes = Vec::with_capacity(*ctr0 as usize + 1);
         for ctr in 0..=*ctr0 {
             let probe_bits = H::h_bits(ctr, label, self.log_capacity);
-            let probe_point = bool_index_to_point::<E::ScalarField>(&probe_bits);
-            let usize_idx = bool_index_to_usize(&probe_bits, &self.dims);
-            let evaluation = self
-                .index_poly
-                .evaluations
-                .get(&usize_idx)
-                .copied()
-                .unwrap_or_else(<E::ScalarField as Zero>::zero);
-            let mut tr = IOPTranscript::<E::ScalarField>::new(b"aegon.index.open");
-            let (proof, _) = P::open(
+            let (evaluation, proof) = open_at_point_non_zk::<E, P>(
                 &self.prover_param,
+                &self.index_poly,
                 &self.index_commitment,
-                DenseOrSparseMLERef::Sparse(&self.index_poly),
-                &probe_point,
                 &self.index_state,
-                &mut tr,
+                &probe_bits,
+                &self.dims,
+                b"aegon.index.open",
             )?;
             probes.push((evaluation, proof));
         }
 
-        let value_point = bool_index_to_point::<E::ScalarField>(bool_index);
-        let usize_idx = bool_index_to_usize(bool_index, &self.dims);
-        let value_evaluation = self
-            .value_poly
-            .evaluations
-            .get(&usize_idx)
-            .copied()
-            .unwrap_or_else(<E::ScalarField as Zero>::zero);
-        let mut tr = IOPTranscript::<E::ScalarField>::new(b"aegon.value.open");
-        let (value_proof, _) = P::open(
-            &self.prover_param,
+        // Value-side: the value-poly opening goes to the user, so
+        // it's hiding (ZK) via the masking-server protocol.
+        let (value_evaluation, value_proof) = self.open_value_side_at_point(
+            &self.value_poly,
             &self.value_commitment,
-            DenseOrSparseMLERef::Sparse(&self.value_poly),
-            &value_point,
             &self.value_state,
-            &mut tr,
+            bool_index,
+            b"aegon.value.open",
         )?;
 
         Ok(LookupProof {
@@ -1460,7 +1615,8 @@ where
             let probe_bits = H::h_bits(ctr, label, self.log_capacity);
             let point = bool_index_to_point::<E::ScalarField>(&probe_bits);
 
-            let pair = open_pair::<E, P>(
+            // Label-side: plain commit ⇒ plain pair-opening.
+            let pair = open_pair_non_zk::<E, P>(
                 &self.prover_param,
                 &point,
                 &snap_s0.rand_index_poly,
@@ -1469,7 +1625,6 @@ where
                 &self.rand_index_poly,
                 &self.rand_index_commitment,
                 &self.rand_index_state,
-                b"aegon.rand_index.open",
             )?;
             index_witnesses.push(pair);
         }
@@ -1534,6 +1689,45 @@ where
     Ok((evaluation, proof))
 }
 
+/// Explicit non-ZK opener — always produces a plain
+/// `({D_j}, f_tail)` proof regardless of whether the SRS is hiding.
+/// Used for:
+/// * label-side openings (the masking-server protocol is value-side
+///   only, so the label-side stays cheap and non-hiding by design),
+/// * publish-time stored openings (the user-facing
+///   "the masking server is not called in the publish path" rule —
+///   stored value-side openings get re-masked at history-lookup time
+///   via [`P::remask_with_package`]).
+fn open_at_point_non_zk<E, P>(
+    pp: &P::ProverParam,
+    poly: &SparseMultilinearExtension<E::ScalarField>,
+    com: &P::Commitment,
+    state: &P::State,
+    slot_bits: &[bool],
+    dims: &[usize],
+    _transcript_label: &'static [u8],
+) -> Result<(E::ScalarField, P::Proof), AegonError>
+where
+    E: Pairing,
+    P: AegonPcs<E>,
+{
+    let point = bool_index_to_point::<E::ScalarField>(slot_bits);
+    let usize_idx = bool_index_to_usize(slot_bits, dims);
+    let evaluation = poly
+        .evaluations
+        .get(&usize_idx)
+        .copied()
+        .unwrap_or_else(<E::ScalarField as Zero>::zero);
+    let (proof, _) = P::open_non_zk(
+        pp,
+        com,
+        DenseOrSparseMLERef::Sparse(poly),
+        &point,
+        state,
+    )?;
+    Ok((evaluation, proof))
+}
+
 /// `commit` followed by `update_state`. KZH-k splits commitment from
 /// per-row aux precomputation; PCSs that don't need aux state can
 /// override `update_state` to a no-op. We always call it so every
@@ -1557,6 +1751,53 @@ where
 {
     let wrapped = DenseOrSparseMLE::Sparse(poly.clone());
     let (com, mut state) = P::commit(pp, &wrapped)?;
+    P::update_state(pp, &wrapped, &com, &mut state)?;
+    Ok((com, state))
+}
+
+/// Plain (non-hiding) variant of [`commit_with_aux`] used for the
+/// **label-side** polynomials (`index_poly`, `rand_index_poly`).
+/// Label polys carry no hiding overhead — no `tau*h` blinding in the
+/// commitment, no `tau` in the state — regardless of whether the SRS
+/// would otherwise support hiding. The masking-server protocol is
+/// value-side only.
+fn commit_with_aux_non_zk<E, P>(
+    pp: &P::ProverParam,
+    poly: &SparseMultilinearExtension<E::ScalarField>,
+) -> Result<(P::Commitment, P::State), AegonError>
+where
+    E: Pairing,
+    P: AegonPcs<E>,
+{
+    let wrapped = DenseOrSparseMLE::Sparse(poly.clone());
+    let (com, mut state) = P::commit_non_zk(pp, &wrapped)?;
+    P::update_state(pp, &wrapped, &com, &mut state)?;
+    Ok((com, state))
+}
+
+/// Hiding variant of [`commit_with_aux`] used for the **value-side**
+/// polynomials (`value_poly`, `rand_value_poly`) when the SRS
+/// supports hiding. Produces `C = <f, H_1> + tau*h` and stores the
+/// polynomial's `tau` in the state — the masking-server protocol
+/// reads it back as `tau_f` to compute `rho_prime = alpha*tau_f + rho`
+/// at open time. Falls back to plain commit when the SRS is
+/// non-hiding so test code using a plain SRS still works (value
+/// openings just become non-ZK in that case).
+fn commit_with_aux_value_side<E, P>(
+    pp: &P::ProverParam,
+    poly: &SparseMultilinearExtension<E::ScalarField>,
+) -> Result<(P::Commitment, P::State), AegonError>
+where
+    E: Pairing,
+    P: AegonPcs<E>,
+    P::ProverParam: akd_core::aegon_crypto::pcs::PCSGlobalParam,
+{
+    let wrapped = DenseOrSparseMLE::Sparse(poly.clone());
+    let (com, mut state) = if pp.is_zk() {
+        P::commit_zk(pp, &wrapped)?
+    } else {
+        P::commit_non_zk(pp, &wrapped)?
+    };
     P::update_state(pp, &wrapped, &com, &mut state)?;
     Ok((com, state))
 }
@@ -1633,6 +1874,46 @@ where
         point,
         state_s1,
         &mut tr1,
+    )?;
+    Ok(RandPair {
+        eval_s0,
+        proof_s0,
+        eval_s1,
+        proof_s1,
+    })
+}
+
+/// Label-side variant of [`open_pair`]: always plain (non-ZK)
+/// openings, regardless of SRS hiding-ness. Used for `rand_index`
+/// pair openings in `build_consistency_proof` — label-side commits
+/// are plain, so their openings must be plain too.
+fn open_pair_non_zk<E, P>(
+    pp: &P::ProverParam,
+    point: &Vec<E::ScalarField>,
+    poly_s0: &SparseMultilinearExtension<E::ScalarField>,
+    com_s0: &P::Commitment,
+    state_s0: &P::State,
+    poly_s1: &SparseMultilinearExtension<E::ScalarField>,
+    com_s1: &P::Commitment,
+    state_s1: &P::State,
+) -> Result<RandPair<E, P>, AegonError>
+where
+    E: Pairing,
+    P: AegonPcs<E>,
+{
+    let (proof_s0, eval_s0) = P::open_non_zk(
+        pp,
+        com_s0,
+        DenseOrSparseMLERef::Sparse(poly_s0),
+        point,
+        state_s0,
+    )?;
+    let (proof_s1, eval_s1) = P::open_non_zk(
+        pp,
+        com_s1,
+        DenseOrSparseMLERef::Sparse(poly_s1),
+        point,
+        state_s1,
     )?;
     Ok(RandPair {
         eval_s0,

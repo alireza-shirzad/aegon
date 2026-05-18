@@ -2000,6 +2000,12 @@ where
             // recent publish_phase_2 and the entries never leave our
             // own DB until being returned to the verifier (who
             // re-verifies the openings cryptographically anyway).
+            //
+            // Stored proofs are already hiding (ZK via the PCS's
+            // inline sampling at publish_phase_2 under a hiding SRS).
+            // The masking-server protocol is value-side **live**
+            // openings only (lookup + freshness); the history path
+            // serves the publish-time proofs as-is.
             let entry =
                 StoredValueHistoryEntry::<E, P>::deserialize_uncompressed_unchecked(&bytes[..])
                     .map_err(|e| {

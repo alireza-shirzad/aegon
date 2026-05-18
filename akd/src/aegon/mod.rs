@@ -20,6 +20,7 @@ pub mod db;
 pub mod error;
 pub(crate) mod fs;
 pub mod hash;
+pub mod masking;
 pub mod presets;
 pub mod server;
 pub mod shard_grpc;
