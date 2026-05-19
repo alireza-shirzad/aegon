@@ -32,7 +32,10 @@ pub mod types;
 pub mod verify;
 
 pub use audit::verify_invariance;
-pub use config::{AegonConfig, VerifierContext};
+pub use config::{
+    shard_log_capacity_from_true, true_log_capacity_from_shard, AegonConfig, VerifierContext,
+    LOG2_OVER_PROVISIONING_FACTOR, OVER_PROVISIONING_FACTOR,
+};
 pub use consistency::verify_consistency;
 pub use db::DbSource;
 pub use error::AegonError;

@@ -386,9 +386,28 @@ fn main() -> ExitCode {
             prefilled_count: target_count,
             batches,
         });
+
+        // Incremental JSON flush: re-render and overwrite `--out` after
+        // EVERY completed stage so a crash on the next stage doesn't
+        // discard the work we just spent minutes/hours producing.
+        // Cheap (the JSON is small and we re-render from in-memory
+        // state). Errors here are non-fatal — we log them and keep
+        // going, since the next stage's flush will retry the write.
+        let json = render_json(&args, k, log_n_shards, &stage_records);
+        match std::fs::write(&args.out, json.as_bytes()) {
+            Ok(()) => eprintln!(
+                "[publish-bench] flushed {} ({} stage(s) so far)",
+                args.out.display(),
+                stage_records.len()
+            ),
+            Err(e) => eprintln!(
+                "[publish-bench] WARN: incremental write to '{}' failed: {e}",
+                args.out.display()
+            ),
+        }
     }
 
-    // ---- emit JSON ----
+    // ---- final emit (also serves as the success exit signal) ----
     let json = render_json(&args, k, log_n_shards, &stage_records);
     match std::fs::write(&args.out, json.as_bytes()) {
         Ok(()) => eprintln!("[publish-bench] wrote {}", args.out.display()),

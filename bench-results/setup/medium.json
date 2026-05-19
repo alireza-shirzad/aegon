@@ -1,0 +1,14 @@
+{
+  "label": "medium",
+  "shard_log_capacity": 28,
+  "kzh_k": 9,
+  "setup_seed": 0,
+  "gen_duration_secs": 268.505691,
+  "trim_duration_secs": 0.000001,
+  "compute_secs": 268.505692,
+  "communication_secs": 0.0,
+  "universal_params_bytes": 18408340565,
+  "prover_param_bytes": 18408340373,
+  "verifier_param_bytes": 1337933,
+  "h_t_entries": [268435456, 16777216, 2097152, 262144, 32768, 4096, 512, 64, 8]
+}

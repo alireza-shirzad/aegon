@@ -24,6 +24,47 @@ use ark_ec::pairing::Pairing;
 
 use super::types::AegonPcs;
 
+/// Over-provisioning factor `α`: the ratio between the underlying
+/// polynomial's hypercube size (`2^shard_log_capacity`) and the
+/// dictionary's *true* user-facing capacity. With `α = 4`, a shard's
+/// polynomial holds 4× as many slots as the dictionary will ever
+/// store entries — open-addressing probe lengths degrade once the
+/// load factor exceeds `1/α`, so we provision four slots per user.
+///
+/// All sizing computations in the benches and the cluster scripts go
+/// through this constant (or [`LOG2_OVER_PROVISIONING_FACTOR`]) so a
+/// single edit retunes the whole system.
+pub const OVER_PROVISIONING_FACTOR: usize = 4;
+
+/// `log2(OVER_PROVISIONING_FACTOR)`. Defined separately as a
+/// compile-time constant so we can do `shard_log_capacity =
+/// true_log_capacity + LOG2_OVER_PROVISIONING_FACTOR` without runtime
+/// `ilog2` calls. The `const _:` assertion below keeps the two in
+/// sync at compile time.
+pub const LOG2_OVER_PROVISIONING_FACTOR: usize = 2;
+
+const _: () = {
+    assert!(
+        1usize << LOG2_OVER_PROVISIONING_FACTOR == OVER_PROVISIONING_FACTOR,
+        "LOG2_OVER_PROVISIONING_FACTOR must equal log2(OVER_PROVISIONING_FACTOR)"
+    );
+};
+
+/// Convert a dictionary's *true* (user-facing) log capacity to the
+/// corresponding *shard* (over-provisioned, hypercube) log capacity:
+/// `shard_log_capacity = true_log_capacity + LOG2_OVER_PROVISIONING_FACTOR`.
+pub const fn shard_log_capacity_from_true(true_log_capacity: usize) -> usize {
+    true_log_capacity + LOG2_OVER_PROVISIONING_FACTOR
+}
+
+/// Inverse of [`shard_log_capacity_from_true`]: derive the user-facing
+/// log capacity from the over-provisioned shard hypercube size.
+/// Saturates at 0 (a shard with `shard_log_capacity <
+/// LOG2_OVER_PROVISIONING_FACTOR` is degenerate but we don't panic).
+pub const fn true_log_capacity_from_shard(shard_log_capacity: usize) -> usize {
+    shard_log_capacity.saturating_sub(LOG2_OVER_PROVISIONING_FACTOR)
+}
+
 /// Server-side configuration. Built once, consumed by `Aegon::setup`
 /// and `Aegon::init`.
 ///
@@ -80,11 +121,19 @@ impl<E: Pairing, P: AegonPcs<E>> AegonConfig<E, P> {
     /// can hold before open-addressing starts colliding.
     ///
     /// Note: `2^log_capacity` is the *theoretical* capacity. In
-    /// practice you want a load factor ≤ 1/4 (paper §5.1), so plan
-    /// for `2^log_capacity / 4` actual entries before probe lengths
-    /// degrade.
+    /// practice you want a load factor ≤ `1/OVER_PROVISIONING_FACTOR`,
+    /// so plan for `2^log_capacity / OVER_PROVISIONING_FACTOR` actual
+    /// entries before probe lengths degrade. See
+    /// [`OVER_PROVISIONING_FACTOR`].
     pub fn dictionary_capacity(&self) -> u64 {
         1u64 << self.log_capacity
+    }
+
+    /// True (user-facing) capacity = `dictionary_capacity /
+    /// OVER_PROVISIONING_FACTOR`. The dictionary is sized to comfortably
+    /// hold this many entries before open-addressing trails grow.
+    pub fn true_capacity(&self) -> u64 {
+        self.dictionary_capacity() >> LOG2_OVER_PROVISIONING_FACTOR
     }
 }
 

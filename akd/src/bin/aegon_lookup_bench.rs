@@ -1326,9 +1326,82 @@ fn main() -> ExitCode {
             audit_block = audit_block,
         );
         level_reports.push(level_block);
+
+        // Incremental JSON flush after EVERY completed stage. Cheap
+        // (the JSON is rendered from in-memory state), and means a
+        // mid-run crash at a later stage doesn't destroy the data
+        // we've already paid for. Errors here are non-fatal; the next
+        // stage's flush (or the final write below) retries.
+        let json = render_levels_json(
+            &args,
+            &preload_counts,
+            local_mode,
+            effective_n_shards,
+            log_n_shards,
+            k,
+            setup_ms,
+            initial_prefill_ms,
+            &level_reports,
+        );
+        match File::create(&args.output)
+            .and_then(|mut f| f.write_all(json.as_bytes()))
+        {
+            Ok(()) => eprintln!(
+                "[lookup-bench] flushed {} ({} level(s) so far)",
+                args.output.display(),
+                level_reports.len()
+            ),
+            Err(e) => eprintln!(
+                "[lookup-bench] WARN: incremental write to {:?} failed: {e}",
+                args.output
+            ),
+        }
     }
 
-    // ---- write JSON ---------------------------------------------------
+    // ---- final write (also serves as the success exit signal) -------
+    let json = render_levels_json(
+        &args,
+        &preload_counts,
+        local_mode,
+        effective_n_shards,
+        log_n_shards,
+        k,
+        setup_ms,
+        initial_prefill_ms,
+        &level_reports,
+    );
+    let mut f = match File::create(&args.output) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("error: cannot create output {:?}: {e}", args.output);
+            return ExitCode::from(1);
+        },
+    };
+    if let Err(e) = f.write_all(json.as_bytes()) {
+        eprintln!("error: cannot write output: {e}");
+        return ExitCode::from(1);
+    }
+    eprintln!("wrote {:?}", args.output);
+    ExitCode::SUCCESS
+}
+
+/// Render the full bench JSON for whatever level_reports we currently
+/// have. Called both from inside the per-stage loop (for the
+/// incremental crash-survival flush) and once more after the loop
+/// exits. Pulled out into a free function rather than a closure so
+/// it can borrow `args` immutably while the loop body still
+/// owns mutable state elsewhere.
+fn render_levels_json(
+    args: &Args,
+    preload_counts: &[usize],
+    local_mode: bool,
+    effective_n_shards: usize,
+    log_n_shards: usize,
+    k: usize,
+    setup_ms: f64,
+    initial_prefill_ms: f64,
+    level_reports: &[String],
+) -> String {
     let endpoints_json = args
         .endpoints
         .iter()
@@ -1356,7 +1429,7 @@ fn main() -> ExitCode {
         Some(v) => v.to_string(),
         None => "null".to_string(),
     };
-    let json = format!(
+    format!(
         concat!(
             "{{\n",
             "  \"params\": {{\n",
@@ -1403,19 +1476,5 @@ fn main() -> ExitCode {
         setup_ms = setup_ms,
         initial_prefill_ms = initial_prefill_ms,
         levels = level_reports.join(",\n"),
-    );
-
-    let mut f = match File::create(&args.output) {
-        Ok(f) => f,
-        Err(e) => {
-            eprintln!("error: cannot create output {:?}: {e}", args.output);
-            return ExitCode::from(1);
-        },
-    };
-    if let Err(e) = f.write_all(json.as_bytes()) {
-        eprintln!("error: cannot write output: {e}");
-        return ExitCode::from(1);
-    }
-    eprintln!("wrote {:?}", args.output);
-    ExitCode::SUCCESS
+    )
 }

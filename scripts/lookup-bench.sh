@@ -1,39 +1,46 @@
 #!/usr/bin/env bash
-# lookup-bench.sh — local lookup + publish combined bench
-# driver for the small + medium regimes.
+# lookup-bench.sh — local lookup + publish + audit bench driver
+# for the small regime only.
 #
-# At each fill_percent stage:
-#   1. Top up the lookup-sampleable namespace to `floor(2^true_cap × pct/100)`
-#      via publish (anonymous bulk filler is added once at startup via
-#      --initial-prefill-count, so the dict already sits at the target
-#      fill level when each stage begins — the lookup namespace is the
-#      portion of the dict we know how to sample).
-#   2. Run lookup-bench samples (server + client × {label, value,
-#      value-history, label-history}) and record data/proof/total wire
+# Walks fill_percents (0,30,60,90 by default) by invoking the bench
+# binary once per fill_percent. Each invocation:
+#   1. Bulk-prefills the dict to the target fill via --initial-prefill-count
+#      (anonymous entries — not lookup-sampleable).
+#   2. Tops up a small lookup-sampleable namespace via publish.
+#   3. Runs lookup samples (server + client × {label, value,
+#      value-history, label-history}) and records data/proof/total wire
 #      sizes per the user's spec.
-#   3. Run publish-bench (sweep batch sizes for that regime) on a
-#      disjoint namespace so it doesn't pollute future-stage lookup
-#      samples.
+#   4. Runs publish-bench (sweep batch sizes for that regime) on a
+#      disjoint namespace so it doesn't pollute the lookup samples.
+#   5. Runs the audit check `verify_sharded_invariance` for the most
+#      recent N+1 epochs.
+#
+# Emits ${OUT_DIR}/${regime}_fill${pct}.json per stage. Per-stage
+# invocation matches the cluster path (bench-cluster.sh
+# cmd_lookup_bench), so plot scripts treat local and cluster data
+# uniformly.
 #
 # Regime sizing mirrors publish-bench.sh / setup-bench.sh:
 #
 #   regime  | shard_log_cap | true_log_cap | publish batch sizes
 #   --------|---------------|--------------|---------------------------
 #   small   | 22            | 20           | 2,4,8,16,32,64
-#   medium  | 28            | 26           | 64,128,512,1024,2048,4096
 #
-# Fill percentages (vs. true capacity): 0, 30, 60, 90 — walked in one
-# process per regime. The initial bulk prefill brings the dict to the
-# *highest* requested fill_pct minus a small headroom; subsequent
-# stages publish only the small lookup-sampleable namespace and the
-# publish-bench's own samples.
+# Fill percentages (vs. true capacity): 0, 30, 60, 90 — set
+# FILL_PERCENTS to override. True capacity for any regime is the
+# shard polynomial size divided by `OVER_PROVISIONING_FACTOR` (= 4);
+# see `akd/src/aegon/config.rs`.
 #
-# Note: the planetary regime is the cluster path —
-#   ./scripts/bench-cluster.sh lookup-bench
+# The medium (2-shard) and large (128-shard) regimes both run on a
+# real cluster:
+#   N_SHARDS=2   ./scripts/bench-cluster.sh lookup-bench   # medium
+#   N_SHARDS=128 ./scripts/bench-cluster.sh lookup-bench   # large
 #
 # Tunables (env):
 #   OUT_DIR             output directory (default /tmp/aegon-lookup)
 #   FILL_PERCENTS       comma-separated overrides (default 0,30,60,90)
+#   LOOKUP_NS_SIZE      lookup-sampleable namespace size at each
+#                       stage > 0 (default 1000)
 #   LOOKUP_SAMPLES      lookup samples per stage (default 20)
 #   PUBLISH_SAMPLES     publish bench samples per batch (default 3)
 #   AUDIT_SAMPLES       per-stage `verify_sharded_invariance` samples
@@ -43,12 +50,12 @@
 #   COORD_LISTEN        loopback for in-process coordinator (default
 #                       127.0.0.1:50190)
 #   SKIP_SMALL          set to 1 to skip the small regime
-#   SKIP_MEDIUM        set to 1 to skip the medium regime
 
 set -euo pipefail
 
 OUT_DIR="${OUT_DIR:-/tmp/aegon-lookup}"
 FILL_PERCENTS="${FILL_PERCENTS:-0,30,60,90}"
+LOOKUP_NS_SIZE="${LOOKUP_NS_SIZE:-1000}"
 LOOKUP_SAMPLES="${LOOKUP_SAMPLES:-20}"
 PUBLISH_SAMPLES="${PUBLISH_SAMPLES:-3}"
 AUDIT_SAMPLES="${AUDIT_SAMPLES:-5}"
@@ -65,52 +72,25 @@ log "building aegon_lookup_bench (release)"
 LB="$REPO_ROOT/target/release/aegon_lookup_bench"
 [[ -x "$LB" ]] || { echo "binary missing: $LB" >&2; exit 1; }
 
-# Compute the largest fill_pct we'll ever climb to. We bulk-prefill
-# *up to* that target minus a per-stage lookup-namespace headroom, so
-# each stage's lookup-sampleable count = target_total - initial_prefill
-# is a manageable few thousand.
-max_fill_pct() {
-  local IFS=','
-  local max=0
-  for p in $1; do
-    if (( p > max )); then max=$p; fi
-  done
-  echo "$max"
-}
-MAX_PCT="$(max_fill_pct "$FILL_PERCENTS")"
-
-# Per-regime: lookup-namespace size at the *highest* fill_pct. Below
-# that fill_pct, fewer labels are needed; the bench computes the
-# sampleable count per stage as (target - initial_prefill).
-#   small/medium: 1000 sampleable labels at MAX_PCT is comfortable
-#                  for `--samples-per-level 20`.
-LOOKUP_NAMESPACE_SIZE_SMALL=1000
-LOOKUP_NAMESPACE_SIZE_MEDIUM=1000
-
-run_one() {
+run_one_fill() {
   local label="$1"
   local shard_log_capacity="$2"
   local true_log_capacity="$3"
   local publish_batches="$4"
-  local lookup_ns_size="$5"
-  local out="$OUT_DIR/${label}.json"
+  local fill_pct="$5"
+
   local true_cap=$((1 << true_log_capacity))
-  # initial bulk prefill = floor(true_cap × MAX_PCT / 100) − lookup_ns_size,
-  # clamped to ≥ 0. Below MAX_PCT, the bench publishes nothing because
-  # initial_prefill already exceeds target (sampleable count clamped to 0
-  # at those stages — they still run the publish bench).
-  local max_target=$(( true_cap * MAX_PCT / 100 ))
-  local prefill=$(( max_target - lookup_ns_size ))
+  local target=$(( true_cap * fill_pct / 100 ))
+  local prefill=$(( target - LOOKUP_NS_SIZE ))
   if (( prefill < 0 )); then prefill=0; fi
-  log "$label: shard_log_capacity=$shard_log_capacity true_log_capacity=$true_log_capacity"
-  log "$label:   true_capacity=2^$true_log_capacity=$true_cap"
-  log "$label:   max_fill_pct=$MAX_PCT%  max_target=$max_target  initial_prefill=$prefill"
-  log "$label:   publish_batches=$publish_batches"
+
+  local out="$OUT_DIR/${label}_fill${fill_pct}.json"
+  log "$label fill=${fill_pct}%: true_cap=$true_cap target=$target initial_prefill=$prefill lookup_ns=$LOOKUP_NS_SIZE"
   "$LB" \
     --shard-log-capacity "$shard_log_capacity" \
     --true-log-capacity "$true_log_capacity" \
     --n-shards 1 \
-    --fill-percents "$FILL_PERCENTS" \
+    --fill-percents "$fill_pct" \
     --initial-prefill-count "$prefill" \
     --prefill-seed "$PREFILL_SEED" \
     --setup-seed "$SETUP_SEED" \
@@ -120,24 +100,29 @@ run_one() {
     --audit-samples "$AUDIT_SAMPLES" \
     --coordinator-listen "$COORD_LISTEN" \
     --output "$out"
-  log "$label: wrote $out"
+  log "$label fill=${fill_pct}%: wrote $out"
+}
+
+run_regime() {
+  local label="$1"
+  local shard_log_capacity="$2"
+  local true_log_capacity="$3"
+  local publish_batches="$4"
+  IFS=',' read -ra fill_pcts <<< "$FILL_PERCENTS"
+  for pct in "${fill_pcts[@]}"; do
+    run_one_fill "$label" "$shard_log_capacity" "$true_log_capacity" "$publish_batches" "$pct"
+  done
 }
 
 if [[ "${SKIP_SMALL:-0}" != "1" ]]; then
-  run_one "small"  22 20 "2,4,8,16,32,64"          "$LOOKUP_NAMESPACE_SIZE_SMALL"
+  run_regime "small"  22 20 "2,4,8,16,32,64"
 else
   log "small: skipped via SKIP_SMALL=1"
 fi
 
-if [[ "${SKIP_MEDIUM:-0}" != "1" ]]; then
-  run_one "medium" 28 26 "64,128,512,1024,2048,4096" "$LOOKUP_NAMESPACE_SIZE_MEDIUM"
-else
-  log "medium: skipped via SKIP_MEDIUM=1"
-fi
-
 log "done. JSON records in $OUT_DIR/"
 log ""
-log "for the planetary regime (2^32 dict / 32 shards / publish batches 4096..131072), run:"
-log "    PROJECT=<gcp-project> ./scripts/bench-cluster.sh up"
-log "    PROJECT=<gcp-project> ./scripts/bench-cluster.sh deploy"
-log "    PROJECT=<gcp-project> ./scripts/bench-cluster.sh lookup-bench"
+log "for the medium (2-shard) and large (128-shard) regimes, run:"
+log "    PROJECT=<gcp-project> N_SHARDS=2   ./scripts/bench-cluster.sh up   # medium"
+log "    PROJECT=<gcp-project> N_SHARDS=128 ./scripts/bench-cluster.sh up   # large"
+log "and chain through deploy / lookup-bench / down."

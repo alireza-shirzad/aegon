@@ -1,24 +1,23 @@
 #!/usr/bin/env bash
 # publish-bench.sh — local publish-time + commit-size benchmark
-# driver for the small + medium regimes.
+# driver for the small regime only.
 #
 # Sweeps (fill_percent × batch_size) on a single in-process shard
-# and emits one JSON per regime. The planetary regime needs the
-# real cluster — drive it via
-#   ./scripts/bench-cluster.sh publish-bench
-# which writes a JSON in the same schema.
+# and emits one JSON. The medium and large regimes both require
+# real clusters — drive them via
+#   N_SHARDS=2   ./scripts/bench-cluster.sh publish-bench   # medium
+#   N_SHARDS=128 ./scripts/bench-cluster.sh publish-bench   # large
+# which write JSONs in the same schema.
 #
 # Regime sizing matches `setup-bench.sh` and the project standard:
 #
 #   regime  | shard_log_cap | true_log_cap | kzh_k | n_shards | batch sizes
 #   --------|---------------|--------------|-------|----------|---------------------------
 #   small   | 22            | 20           | auto  | 1        | 2,4,8,16,32,64
-#   medium  | 28            | 26           | auto  | 1        | 64,128,512,1024,2048,4096
 #
 # Fill percentages (vs. true capacity): 0, 30, 60, 90 — all four
-# walked in one process per regime, with the in-process shard
-# rebuilt fresh between stages so each stage starts from a clean
-# epoch-0 state.
+# walked in one process, with the in-process shard rebuilt fresh
+# between stages so each stage starts from a clean epoch-0 state.
 #
 # Tunables (env):
 #   OUT_DIR          output directory (default /tmp/aegon-publish)
@@ -27,14 +26,9 @@
 #   SETUP_SEED       SRS RNG seed (default 42)
 #   PREFILL_SEED     prefill RNG seed base (default 1)
 #   SKIP_SMALL       set to 1 to skip the small regime
-#   SKIP_MEDIUM      set to 1 to skip the medium regime
 #
-# Note on cost: medium's 90%-fill stage prefills ~60M random
-# (slot, h_label, h_value) entries and commits the resulting
-# polynomial — this takes time. End-to-end medium run (all four
-# fills, six batches each) is typically tens of minutes; the
-# small regime is single-digit minutes. Defer the planetary
-# regime to the cluster path.
+# True capacity for any regime is the shard polynomial size divided
+# by `OVER_PROVISIONING_FACTOR` (= 4); see `akd/src/aegon/config.rs`.
 
 set -euo pipefail
 
@@ -79,17 +73,11 @@ else
   log "small: skipped via SKIP_SMALL=1"
 fi
 
-if [[ "${SKIP_MEDIUM:-0}" != "1" ]]; then
-  run_one "medium" 28 26 "64,128,512,1024,2048,4096"
-else
-  log "medium: skipped via SKIP_MEDIUM=1"
-fi
-
 log "done. JSON records in $OUT_DIR/"
 log ""
-log "for the planetary regime (2^32 dict / 32 shards / batches 4096..131072), run:"
-log "    PROJECT=<gcp-project> ./scripts/bench-cluster.sh up"
-log "    PROJECT=<gcp-project> ./scripts/bench-cluster.sh deploy"
-log "    PROJECT=<gcp-project> ./scripts/bench-cluster.sh publish-bench"
-log "(walks the same fill_percents = 0/30/60/90 by restarting shards"
-log "between stages and emits one JSON per fill level.)"
+log "for the medium (2-shard) and large (128-shard) regimes, run:"
+log "    PROJECT=<gcp-project> N_SHARDS=2   ./scripts/bench-cluster.sh up   # medium"
+log "    PROJECT=<gcp-project> N_SHARDS=128 ./scripts/bench-cluster.sh up   # large"
+log "and chain through deploy / publish-bench / down. The cluster path"
+log "walks the same fill_percents = 0/30/60/90 by restarting shards"
+log "between stages and emits one JSON per fill level."

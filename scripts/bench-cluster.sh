@@ -25,9 +25,9 @@
 # Required env (or defaults):
 #   PROJECT             GCP project ID                (no default; required)
 #   ZONE                GCE zone                      (us-central1-f)
-#   N_SHARDS            number of shards (power of 2) (32)
-#   SHARD_LOG_CAPACITY  log_2 slots per shard         (29)
-#   KZH_K               KZH-k block parameter         (10 — optimal_kzh_k(29))
+#   N_SHARDS            number of shards (power of 2) (128)
+#   SHARD_LOG_CAPACITY  log_2 slots per shard         (27)
+#   KZH_K               KZH-k block parameter         (9 — optimal_kzh_k(27))
 #   TOTAL_PRELOAD_LOG2  log_2 of total prefilled users (8 → 2^8=256 split across shards)
 #   BATCH_SIZES         comma-separated sweep sizes   (2,4,8,...,16384)
 #   SAMPLES_PER_BATCH   timed publishes per batch     (1)
@@ -36,16 +36,20 @@
 #   SHARD_MACHINE_TYPE  GCE machine type for shards   (n2-standard-16 — 64 GB RAM)
 #   COORD_MACHINE_TYPE  GCE machine type coordinator  (n2-standard-4)
 #
-# At the defaults above (N_SHARDS=32, SHARD_LOG_CAPACITY=29, KZH_K=10):
-#   * Each shard's KZH-k SRS at log_cap=29 / kzh_k=10 is dominated by
-#     H_1: 2^29 entries × 64 B = 32 GiB. Plus H_2..H_10 (smaller),
-#     working set, and KZH aux state during the in-process SRS gen
-#     pass, peak memory lands around ~40-45 GiB.
-#   * n2-standard-16 (64 GB RAM) has empirically been enough for this;
-#     n2-highmem-16 (128 GB) is overkill but the safe choice if
-#     you've changed the per-shard log_cap upward or are stacking
-#     multiple shards per machine.
-#   * 32 × n2-standard-16 ≈ $25/hr. Run `down` aggressively.
+# At the defaults above (N_SHARDS=128, SHARD_LOG_CAPACITY=27, KZH_K=9,
+# PUBLISH_TRUE_LOG_CAP=32):
+#   * Each shard owns one 2^27-slot polynomial (α=4 over-provisioning of
+#     a 2^25-entry per-shard slice — total dictionary 2^32 entries).
+#   * Per-shard KZH-k SRS at log_cap=27 / kzh_k=9: ~8.6 GiB on disk,
+#     same in RAM during gen. Per-shard peak memory at the 90% fill
+#     stage (~30 M entries/shard, the heaviest workload) lands around
+#     ~50-55 GiB — fits in 64 GiB with margin.
+#   * 128 × n2-standard-16 ≈ $100/hr on-demand; ~$30/hr with 3-year
+#     committed-use. Tear down promptly when not benching.
+#   * Previous defaults (32 shards × log_cap=29) exceeded n2-standard-16
+#     RAM at 60%+ fill. The 128/27 split keeps all four fill stages
+#     (0/30/60/90%) on commodity n2-standard-16 with no per-stage
+#     reconfiguration.
 #   * Redis is provisioned on its own small VM. In the current
 #     architecture (coord-owns-everything), the shard's `--db-url` is
 #     a no-op and the shard prefill writes nothing to Redis — the
@@ -62,9 +66,9 @@ set -euo pipefail
 
 PROJECT="${PROJECT:-}"
 ZONE="${ZONE:-us-central1-f}"
-N_SHARDS="${N_SHARDS:-32}"
-SHARD_LOG_CAPACITY="${SHARD_LOG_CAPACITY:-29}"
-KZH_K="${KZH_K:-10}"
+N_SHARDS="${N_SHARDS:-128}"
+SHARD_LOG_CAPACITY="${SHARD_LOG_CAPACITY:-27}"
+KZH_K="${KZH_K:-9}"
 # Default: 2^8 = 256 users preloaded total, evenly split across shards.
 # This is the "light preload" baseline used by the 2^34-capacity bench.
 TOTAL_PRELOAD_LOG2="${TOTAL_PRELOAD_LOG2:-8}"
@@ -133,6 +137,32 @@ prefill_per_shard() {
   python3 -c "print(2**${TOTAL_PRELOAD_LOG2} // ${N_SHARDS})"
 }
 
+wait_for_ssh() {
+  # Probe SSH on `$1` until it succeeds or we hit the timeout.
+  # cmd_deploy + setup-bench's first SSH calls can fire before
+  # cloud-init's sshd is fully up (the IAP tunnel returns
+  # "Failed to connect to port 22"), so retry instead of bailing.
+  #
+  # Each probe is wrapped in `timeout` because IAP's start-iap-tunnel
+  # subprocess can hang silently (no timeout flag of its own) if the
+  # tunnel handshake never completes — we've seen this strand the
+  # whole deploy phase indefinitely.
+  local instance="$1"
+  local max_tries="${2:-30}"
+  local per_try_secs="${3:-25}"
+  local i
+  for ((i = 1; i <= max_tries; i++)); do
+    if timeout "$per_try_secs" gcloud compute ssh "$instance" \
+         --zone="$ZONE" --tunnel-through-iap --quiet --command="true" \
+         >/dev/null 2>&1; then
+      log "[$instance] SSH ready after $i attempt(s)"
+      return 0
+    fi
+    sleep 5
+  done
+  die "[$instance] SSH not ready after $((max_tries * (per_try_secs + 5)))s"
+}
+
 remote() {
   local instance="$1"
   local cmd="$2"
@@ -145,10 +175,15 @@ remote() {
     # gcloud client cleans up — kill it after a short grace window.
     # Portable timeout (macOS has neither `timeout` nor `gtimeout`
     # out of the box): background gcloud, sleep, send SIGTERM.
+    #
+    # 120s grace: IAP tunnel handshake alone can take 10-20s and on
+    # cold sessions we've seen 30-60s. Cutting the SSH session before
+    # the remote shell reaches `nohup ... &` leaves the shard server
+    # un-launched and silently absent at bootstrap time.
     gcloud compute ssh "$instance" --zone="$ZONE" --tunnel-through-iap \
       --quiet --command="$cmd" &
     local _ssh_pid=$!
-    ( sleep 30 && kill "$_ssh_pid" 2>/dev/null ) &
+    ( sleep 120 && kill "$_ssh_pid" 2>/dev/null ) &
     local _watchdog_pid=$!
     wait "$_ssh_pid" 2>/dev/null || true
     kill "$_watchdog_pid" 2>/dev/null || true
@@ -409,6 +444,18 @@ restart_shard() {
   # coordinator runs `bench-cluster.sh bootstrap`; on subsequent boots
   # (e.g. `restart-shards`) the cache hits and the shard reaches Ready
   # without needing the bootstrap actor.
+  #
+  # After spawning, we poll /dev/tcp/127.0.0.1/$SRS_PORT for up to 60s
+  # to confirm the server is actually listening before declaring
+  # restart_shard a success. Without this verification, a SIGTERM'd
+  # ssh session (from fire-and-forget) can leave the shell killed
+  # before `nohup &` runs, and we silently report "started" with no
+  # process — which then makes bootstrap fail with mysterious
+  # "transport error" cascades.
+  #
+  # NOTE: not fire-and-forget. We wait for either readiness or the
+  # 60s budget to elapse; either way the remote shell exits and the
+  # IAP tunnel tears down naturally.
   remote "$name" "if [ -f /tmp/aegon-shard.pid ]; then \
       kill \$(cat /tmp/aegon-shard.pid) 2>/dev/null || true; \
     fi; \
@@ -430,8 +477,14 @@ restart_shard() {
       > /tmp/aegon-shard.log 2>&1 < /dev/null & \
     echo \$! > /tmp/aegon-shard.pid; \
     disown 2>/dev/null || true; \
-    exit 0" \
-    fire-and-forget
+    for poll in \$(seq 1 60); do \
+      if exec 9<>/dev/tcp/127.0.0.1/$SRS_PORT 2>/dev/null; then \
+        exec 9<&-; exec 9>&-; \
+        echo READY; exit 0; \
+      fi; \
+      sleep 1; \
+    done; \
+    echo FAILED; tail -n 30 /tmp/aegon-shard.log 2>/dev/null; exit 1"
 }
 
 cmd_deploy() {
@@ -482,6 +535,7 @@ cmd_deploy() {
   # would be visible to open-addressing and we'd see false "occupied"
   # for empty polynomial slots.
   local dname; dname="$(db_name)"
+  wait_for_ssh "$dname"
   log "[$dname] installing + (re)starting redis on :$REDIS_PORT"
   # Wait for unattended-upgrades (which runs at boot on fresh Ubuntu
   # images) to release the apt lock. Without this, the install line
@@ -489,6 +543,10 @@ cmd_deploy() {
   #   E: Could not get lock /var/lib/dpkg/lock-frontend.
   # 90 s is generous: cloud-init's unattended-upgrades pass typically
   # takes 30-60 s on a fresh n2-standard-2.
+  # We hand apt itself a long lock-wait via DPkg::Lock::Timeout so
+  # it blocks (instead of bailing) when cloud-init's
+  # unattended-upgrades pass is still holding the dpkg lock. The
+  # leading fuser poll is a fast-path; the timeout backstops it.
   remote "$dname" "set -e; \
     for i in \$(seq 1 90); do \
       if ! sudo fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 \
@@ -498,7 +556,8 @@ cmd_deploy() {
       sleep 1; \
     done; \
     if ! dpkg -s redis-server >/dev/null 2>&1; then \
-      sudo apt-get update -qq && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq redis-server; \
+      sudo apt-get -o DPkg::Lock::Timeout=600 update -qq && \
+      sudo DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=600 install -y -qq redis-server; \
     fi; \
     sudo sed -i 's/^bind .*/bind 0.0.0.0/' /etc/redis/redis.conf; \
     sudo sed -i 's/^protected-mode .*/protected-mode no/' /etc/redis/redis.conf; \
@@ -523,6 +582,7 @@ cmd_deploy() {
   for ((i = 0; i < N_SHARDS; i++)); do
     local name; name="$(shard_name "$i")"
     (
+      wait_for_ssh "$name"
       log "[$name] uploading aegon_shard_server"
       scp_to "$name" "$remote_bin_dir/aegon_shard_server"
       remote "$name" "sudo mkdir -p $REMOTE_BIN_DIR && \
@@ -544,6 +604,7 @@ cmd_deploy() {
 
   # ---- push to coordinator ----
   local cname; cname="$(coord_name)"
+  wait_for_ssh "$cname"
   log "[$cname] uploading aegon_coordinator_bench + aegon_srs_bootstrap"
   scp_to "$cname" "$remote_bin_dir/aegon_coordinator_bench"
   scp_to "$cname" "$remote_bin_dir/aegon_srs_bootstrap"
@@ -622,6 +683,15 @@ cmd_bootstrap() {
   require_project
   require_power_of_two "$N_SHARDS"
 
+  # Pre-flight: verify every shard's SRS port is listening before we
+  # invoke the bootstrap actor. The distributed-SRS protocol requires
+  # all N_SHARDS to be reachable simultaneously (each shard peer-pulls
+  # H_t slabs from every other shard); a single dead shard cascades
+  # into all-shards-exit and a 30-min bootstrap timeout. We pay one
+  # short probe pass up front and restart any dead shards before
+  # touching the trapdoors.
+  wait_for_shards_ready
+
   local cname; cname="$(coord_name)"
   local srs_csv; srs_csv="$(srs_endpoints_csv)"
   log "srs endpoints (first 2 shown): $(echo "$srs_csv" | cut -d, -f1-2),..."
@@ -636,7 +706,60 @@ cmd_bootstrap() {
   log "bootstrap done. cluster ready for ./scripts/bench-cluster.sh bench"
 }
 
-# Setup-time + comm-bytes benchmark for the planetary regime.
+# Probe every shard's SRS port from the coordinator (which can reach
+# private IPs over the internal VPC). Restart any that aren't
+# listening. Loops up to `max_passes` times so a flaky shard gets
+# multiple chances. Aborts with `die` only if a shard fails to come
+# up after all attempts — the right signal to surface a real fault
+# (e.g. an OOM panic) rather than retrying forever.
+wait_for_shards_ready() {
+  local max_passes="${1:-3}"
+  local pass
+  local cname; cname="$(coord_name)"
+  local per_shard; per_shard="$(prefill_per_shard)"
+  local db_ip; db_ip="$(db_internal_ip)"
+  for ((pass = 1; pass <= max_passes; pass++)); do
+    log "[ready-barrier] pass $pass/$max_passes: probing all $N_SHARDS shards on :$SRS_PORT"
+    # One single ssh-to-coordinator that runs a parallel probe of all shards.
+    local dead_list
+    dead_list="$(remote "$cname" "
+      dead=''
+      for i in \$(seq 0 $((N_SHARDS - 1))); do
+        ip=\$(getent hosts ${SHARD_TAG}-\$i | awk '{print \$1}')
+        if [ -z \"\$ip\" ] || ! timeout 2 bash -c \"</dev/tcp/\$ip/$SRS_PORT\" 2>/dev/null; then
+          dead=\"\$dead \$i\"
+        fi
+      done
+      echo \"DEAD:\$dead\"
+    " 2>/dev/null | grep '^DEAD:' | sed 's/^DEAD://')"
+    dead_list="$(echo "$dead_list" | xargs)"  # trim
+    if [[ -z "$dead_list" ]]; then
+      log "[ready-barrier] all $N_SHARDS shards listening on :$SRS_PORT ✓"
+      return 0
+    fi
+    local dead_count; dead_count="$(echo "$dead_list" | wc -w)"
+    log "[ready-barrier] $dead_count shard(s) not listening: $dead_list"
+    log "[ready-barrier] restarting dead shards..."
+    local -a restart_pids=()
+    for i in $dead_list; do
+      local name; name="$(shard_name "$i")"
+      (
+        restart_shard "$name" "$i" "$per_shard" "$db_ip"
+      ) &
+      restart_pids+=("$!")
+    done
+    local restart_failed=0
+    for pid in "${restart_pids[@]}"; do
+      wait "$pid" || restart_failed=$((restart_failed + 1))
+    done
+    if (( restart_failed > 0 )); then
+      log "[ready-barrier] WARN: $restart_failed restart_shard call(s) returned non-zero; re-probing anyway"
+    fi
+  done
+  die "[ready-barrier] shards still not ready after $max_passes passes"
+}
+
+# Setup-time + comm-bytes benchmark for the large regime.
 #
 # Differs from `bootstrap` in three ways:
 #   1. Forces shards to skip prefill (`PREFILL_COUNT=0`) so the
@@ -655,7 +778,7 @@ cmd_bootstrap() {
 # bootstrap). After it completes, the cluster is "Ready" but
 # polynomials are empty — `restart-shards` with a non-zero
 # TOTAL_PRELOAD_LOG2 puts it back into a benchable state, OR run
-# `down` to tear it down once the planetary numbers are in hand.
+# `down` to tear it down once the large-regime numbers are in hand.
 REMOTE_SETUP_BENCH_OUT="/tmp/aegon-setup-bench.json"
 LOCAL_SETUP_BENCH_OUT="${LOCAL_SETUP_BENCH_OUT:-/tmp/aegon-setup-bench.json}"
 cmd_setup_bench() {
@@ -719,7 +842,7 @@ cmd_setup_bench() {
   log "setup-bench JSON saved to $LOCAL_SETUP_BENCH_OUT"
 }
 
-# Publish-time + commit-size benchmark for the planetary regime.
+# Publish-time + commit-size benchmark for the large regime.
 #
 # Walks PUBLISH_FILL_PERCENTS (default 0,30,60,90), restarting shards
 # between stages with the per-shard prefill_count needed to hit that
@@ -858,7 +981,7 @@ cmd_publish_bench() {
          --out $remote_out" \
       stream
 
-    local local_out="$LOCAL_PUBLISH_BENCH_DIR/publish-${fill_pct}pct.json"
+    local local_out="$LOCAL_PUBLISH_BENCH_DIR/${LOCAL_OUT_NAME_PREFIX:-}publish-${fill_pct}pct.json"
     log "[$fill_pct%] retrieving $remote_out -> $local_out"
     scp_from "$cname" "$remote_out" "$local_out"
     log "[$fill_pct%] done"
@@ -905,7 +1028,7 @@ cmd_bench() {
 #     label-history})
 #   - data + proof + total payload sizes per lookup type
 #   - publish-bench sweep over LOOKUP_PUBLISH_BATCH_SIZES (default
-#     matches PUBLISH_BATCH_SIZES — 4096..131072 for planetary)
+#     matches PUBLISH_BATCH_SIZES — 4096..131072 for large)
 #
 # Why scp the binary fresh each time: the deploy step only pushes
 # aegon_coordinator_bench, not aegon_lookup_bench. If you're running
@@ -1028,7 +1151,7 @@ cmd_lookup_bench() {
          --output $remote_out" \
       stream
 
-    local local_out="$LOCAL_LOOKUP_BENCH_DIR/lookup-${fill_pct}pct.json"
+    local local_out="$LOCAL_LOOKUP_BENCH_DIR/${LOCAL_OUT_NAME_PREFIX:-}lookup-${fill_pct}pct.json"
     log "[$fill_pct%] retrieving $remote_out -> $local_out"
     scp_from "$cname" "$remote_out" "$local_out"
     log "[$fill_pct%] done"
@@ -1216,13 +1339,13 @@ usage: $0 <subcommand>
                    shards finish distributed SRS gen + prefill. On
                    cache hit (re-runs with the same seed) the
                    bootstrap completes in seconds.
-  setup-bench      Planetary-regime setup benchmark. Wipes every
+  setup-bench      Large-regime setup benchmark. Wipes every
                    shard's SRS cache, restarts shards with
                    prefill_count=0, then runs aegon_srs_bootstrap with
                    metrics gathering. Outputs one JSON record with
                    per-shard phase timestamps + inbound/outbound
                    slab bytes + pk/vk/universal sizes.
-  publish-bench    Planetary-regime publish-time + commit-size bench.
+  publish-bench    Large-regime publish-time + commit-size bench.
                    Walks PUBLISH_FILL_PERCENTS (default 0,30,60,90),
                    restarting shards per stage with the per-shard
                    prefill count for that fill level. For each stage,
@@ -1237,7 +1360,7 @@ usage: $0 <subcommand>
                    Cache hit makes the bootstrap step a no-op too, so
                    follow with `bootstrap` then `bench`.
   bench            Run aegon_coordinator_bench on the coordinator, fetch JSON
-  lookup-bench     Planetary-regime combined lookup + publish bench.
+  lookup-bench     Large-regime combined lookup + publish bench.
                    Walks LOOKUP_FILL_PERCENTS (default mirrors
                    PUBLISH_FILL_PERCENTS = 0,30,60,90), restarting
                    shards per stage with the matching per-shard
@@ -1271,7 +1394,8 @@ Optional env: ZONE, N_SHARDS, SHARD_LOG_CAPACITY, KZH_K,
               SHARD_MACHINE_TYPE, COORD_MACHINE_TYPE,
               LOCAL_BENCH_OUT
 
-At defaults (32 shards × n2-highmem-16): ~\$38/hr. Tear down promptly.
+At defaults (128 shards × n2-standard-16): ~\$100/hr list, ~\$30/hr with
+3-year committed-use discount. Run \`down\` aggressively when idle.
 EOF
 }
 
