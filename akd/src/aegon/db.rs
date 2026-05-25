@@ -316,6 +316,47 @@ impl RocksDb {
         // arkworks bytes which still have some structure). Level 0
         // stays uncompressed to keep flush latency tight.
         opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
+
+        // ---- write-throughput tuning for the publish hot path ----
+        //
+        // Each publish emits a ~98 K-op WriteBatch (value, routing,
+        // slot, history, label_placement, value_history). At
+        // batch=16384 that lands in ~1.5 s of inline write time, plus
+        // bursty compaction stalls if the L0 level saturates faster
+        // than background compactions can drain it. Defaults targeted
+        // small embedded workloads — we need to widen the runway.
+
+        // Use all 4 coord vCPUs for compaction + flush threads. Per
+        // rocksdb docs, this should be set early before any other
+        // background-job knobs (which override the per-pool sizes).
+        opts.increase_parallelism(4);
+        // Bigger memtable → fewer L0 flushes per publish. 256 MB
+        // holds ~200 K small ops (estimated 1 KB each post-LZ4) — a
+        // couple of publishes at batch=16384 before any flush.
+        opts.set_write_buffer_size(256 * 1024 * 1024);
+        // More concurrent memtables = the writer doesn't block while
+        // a flush is in flight.
+        opts.set_max_write_buffer_number(4);
+        // Bigger SST files at every level = fewer files overall and
+        // less metadata churn during compactions. 128 MB is the
+        // recommended midpoint for SSD workloads.
+        opts.set_target_file_size_base(128 * 1024 * 1024);
+        // Raise the L0 stall + stop thresholds. Default trips
+        // slowdown at 20 / stop at 36 SST files in L0; on this
+        // workload we'd saturate that within a handful of publishes
+        // and trigger 60-120 s stalls. With the bigger memtable we
+        // also see fewer L0 files per unit work, so push the ceilings
+        // up to give background compaction more breathing room.
+        opts.set_level_zero_slowdown_writes_trigger(40);
+        opts.set_level_zero_stop_writes_trigger(60);
+        // No LRU cap on open SSTs — at 128 MB/file the full database
+        // tops out at ~few thousand files even at 90% fill, so we
+        // can afford to keep file descriptors for everything.
+        opts.set_max_open_files(-1);
+        // -1 because the coord's only writer is the bench process and
+        // mid-bench durability matters less than throughput.
+        opts.set_use_fsync(false);
+
         let inner = rocksdb::DB::open(&opts, path)
             .map_err(|e| AegonError::Database(format!("open rocksdb {path:?}: {e}")))?;
         Ok(Self { inner })
@@ -418,8 +459,18 @@ impl Db for RocksDb {
             let bytes = encode_list(&buf)?;
             wb.put(&key, &bytes);
         }
+        // WAL disabled for the bench's coordinator: every key is
+        // either reconstructable from the shards (via re-publish) or
+        // ephemeral (the bench tears the cluster down at the end). On
+        // the publish hot path, the WAL fsync per batch is the single
+        // biggest contributor to write_atomic latency on n2-standard-4
+        // (~30-50% of the 1.7 s observed). Removing it leaves the
+        // memtable as the only durability surface, which the bench is
+        // explicitly OK with.
+        let mut write_opts = rocksdb::WriteOptions::default();
+        write_opts.disable_wal(true);
         self.inner
-            .write(wb)
+            .write_opt(wb, &write_opts)
             .map_err(|e| AegonError::Database(format!("rocksdb WriteBatch ({} ops): {e}", ops.len())))
     }
 

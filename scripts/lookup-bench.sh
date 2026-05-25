@@ -99,6 +99,7 @@ run_one_fill() {
     --publish-samples-per-batch "$PUBLISH_SAMPLES" \
     --audit-samples "$AUDIT_SAMPLES" \
     --coordinator-listen "$COORD_LISTEN" \
+    --private \
     --output "$out"
   log "$label fill=${fill_pct}%: wrote $out"
 }

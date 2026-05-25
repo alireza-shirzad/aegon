@@ -83,35 +83,63 @@ SETUP_SEED="${SETUP_SEED:-42}"
 PREFILL_SEED="${PREFILL_SEED:-1}"
 SHARD_MACHINE_TYPE="${SHARD_MACHINE_TYPE:-n2-standard-16}"
 COORD_MACHINE_TYPE="${COORD_MACHINE_TYPE:-n2-standard-4}"
-REDIS_MACHINE_TYPE="${REDIS_MACHINE_TYPE:-n2-standard-2}"
+# Coordinator boot disk is shared with the RocksDB store at
+# $COORD_DB_PATH. Must fit the AKD history for the deepest fill we
+# drive. Defaults sized for 90% medium (60M entries, ~200KB/entry
+# pre-compaction): 4TB pd-ssd. For large (1.2B entries at 30%),
+# override to something proportionally bigger.
+COORD_BOOT_DISK_SIZE="${COORD_BOOT_DISK_SIZE:-4TB}"
+COORD_BOOT_DISK_TYPE="${COORD_BOOT_DISK_TYPE:-pd-ssd}"
 
 NETWORK="aegon-bench-vpc"
 FIREWALL_GRPC="aegon-bench-grpc"
 FIREWALL_SRS="aegon-bench-srs"
 FIREWALL_SSH="aegon-bench-ssh"
-FIREWALL_REDIS="aegon-bench-redis"
 SHARD_TAG="aegon-bench-shard"
 COORD_TAG="aegon-bench-coord"
-DB_TAG="aegon-bench-db"
+MASKING_TAG="aegon-bench-masking"
 SHARD_PORT=50051
-# Distributed-SRS-bootstrap port. Each shard binds aegon_shard_server's
-# SrsService here (separate listener from SHARD_PORT) so peers can pull
-# H_t slabs from each other during distributed gen, and so the
-# `aegon_srs_bootstrap` binary on the coordinator can push trapdoors +
-# poll WaitForReady. Kept distinct from SHARD_PORT so the coordinator's
-# normal shard client never accidentally hits the SRS-only listener.
-SRS_PORT=50052
-# On-shard cache directory for the assembled SRS. After the first
-# `bootstrap`, every shard caches its SRS here, so a subsequent boot
-# (e.g. via `restart-shards`) short-circuits the distributed exchange
-# and reaches Ready in seconds rather than minutes.
-SRS_CACHE_DIR='$HOME/artifacts/srs-cache'
-REDIS_PORT=6379
+# Masking server: one VM per cluster. Holds a queue of pre-built
+# `KZHKMaskingPackage`s, background producers refill the queue
+# continuously. Each shard's value-side opening fetches a package
+# from this server instead of generating one inline — turns the
+# per-lookup MSM into a sub-ms gRPC fetch.
+MASKING_PORT="${MASKING_PORT:-50061}"
+MASKING_MACHINE_TYPE="${MASKING_MACHINE_TYPE:-n2-standard-16}"
+MASKING_QUEUE_SIZE="${MASKING_QUEUE_SIZE:-512}"
+# Producer count defaults to "all cores"; the binary picks
+# `std::thread::available_parallelism()` if unset, but we pin it
+# here so the masking server's behavior is explicit.
+MASKING_PRODUCERS="${MASKING_PRODUCERS:-16}"
+# Set ENABLE_MASKING_SERVER=0 to skip the masking VM entirely
+# (shards fall back to inline package generation per opening).
+ENABLE_MASKING_SERVER="${ENABLE_MASKING_SERVER:-1}"
+# Coordinator-side RocksDB. The coordinator stores its open-
+# addressing occupancy index and per-shard state checkpoints in
+# this directory. Used by aegon_publish_bench, aegon_lookup_bench,
+# and aegon_coordinator_bench via --db-path. Lives on the
+# coordinator VM's local disk — no Redis VM, no network hop for DB
+# ops, no MULTI/EXEC transaction-size limits. We wipe it between
+# bench invocations so each run starts from a clean keyspace.
+COORD_DB_PATH="/opt/aegon/coord-db"
+# Per-shard local SRS deployment. Every shard generates its own
+# SRS in parallel during setup-bench, using the same SETUP_SEED so
+# they all converge on the same file (deterministic). The file
+# lives on local disk at $REMOTE_SRS_PATH so subsequent restarts
+# (publish-bench / lookup-bench cycles) just read it back — no
+# NFS, no broadcast, no central gen, no cascading failure. Writer
+# uses serialize_uncompressed so the read path skips the
+# per-point sqrt and finishes in ~1 min instead of ~25.
+SRS_FILENAME="cluster.srs"
+REMOTE_SRS_PATH="${REMOTE_SRS_PATH:-/opt/aegon/srs/$SRS_FILENAME}"
+REMOTE_SRS_DIR="/opt/aegon/srs"
+# LOCAL_SRS_PATH is set further below, after REPO_ROOT.
 ROUTER="aegon-bench-router"
 NAT="aegon-bench-nat"
 REGION="${ZONE%-*}"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+LOCAL_SRS_PATH="${LOCAL_SRS_PATH:-$REPO_ROOT/bench-results/srs/aegon-srs-lc${SHARD_LOG_CAPACITY}-k${KZH_K}.bin}"
 REMOTE_BIN_DIR="/opt/aegon/bin"
 REMOTE_BENCH_OUT="/tmp/aegon-bench.json"
 LOCAL_BENCH_OUT="${LOCAL_BENCH_OUT:-/tmp/aegon-bench.json}"
@@ -206,15 +234,10 @@ scp_from() {
 
 shard_name() { echo "${SHARD_TAG}-$1"; }
 coord_name() { echo "${COORD_TAG}"; }
-db_name()    { echo "${DB_TAG}"; }
+masking_name() { echo "${MASKING_TAG}"; }
 
 shard_internal_ip() {
   gcloud compute instances describe "$(shard_name "$1")" --zone="$ZONE" \
-    --format='value(networkInterfaces[0].networkIP)'
-}
-
-db_internal_ip() {
-  gcloud compute instances describe "$(db_name)" --zone="$ZONE" \
     --format='value(networkInterfaces[0].networkIP)'
 }
 
@@ -222,20 +245,6 @@ shard_endpoints_csv() {
   local out=()
   for ((i = 0; i < N_SHARDS; i++)); do
     out+=("http://$(shard_internal_ip "$i"):$SHARD_PORT")
-  done
-  local IFS=,
-  echo "${out[*]}"
-}
-
-# Same shape as `shard_endpoints_csv` but pointing at every shard's
-# distributed-SRS-bootstrap port. Consumed by `cmd_bootstrap` to tell
-# the bootstrap binary where each shard's `SrsService` listener lives
-# (and pushed through to every shard so they know each other's
-# GetSrsSlab URLs for the slab exchange phase).
-srs_endpoints_csv() {
-  local out=()
-  for ((i = 0; i < N_SHARDS; i++)); do
-    out+=("http://$(shard_internal_ip "$i"):$SRS_PORT")
   done
   local IFS=,
   echo "${out[*]}"
@@ -292,53 +301,19 @@ cmd_up() {
       --target-tags="$SHARD_TAG" >/dev/null
   fi
 
-  # ---- firewall: SRS-bootstrap port (shard <-> shard, coord -> shard) ----
-  # Two source tags here: shards talk to each other on SRS_PORT for the
-  # H_t slab exchange (every shard pulls (N-1)/N of every tensor from
-  # its peers), and the coordinator talks to shards on SRS_PORT so the
-  # `aegon_srs_bootstrap` binary running on the coord can push trapdoors
-  # and poll WaitForReady.
-  local srs_want="$SHARD_TAG,$COORD_TAG"
-  if gcloud compute firewall-rules describe "$FIREWALL_SRS" >/dev/null 2>&1; then
-    local srs_have
-    srs_have="$(gcloud compute firewall-rules describe "$FIREWALL_SRS" \
-      --format='value(sourceTags.list())' 2>/dev/null)"
-    if [[ "$srs_have" != "$srs_want" ]]; then
-      log "firewall $FIREWALL_SRS: updating source-tags to '$srs_want'"
-      gcloud compute firewall-rules update "$FIREWALL_SRS" \
-        --source-tags="$srs_want" >/dev/null
+  # ---- firewall: shards -> masking server on masking port ----
+  if [[ "$ENABLE_MASKING_SERVER" == "1" ]]; then
+    local fw_masking="aegon-bench-masking"
+    if gcloud compute firewall-rules describe "$fw_masking" >/dev/null 2>&1; then
+      log "firewall $fw_masking exists"
     else
-      log "firewall $FIREWALL_SRS already correct"
+      log "creating firewall $fw_masking (shards -> masking:$MASKING_PORT)"
+      gcloud compute firewall-rules create "$fw_masking" \
+        --network="$NETWORK" \
+        --allow="tcp:$MASKING_PORT" \
+        --source-tags="$SHARD_TAG" \
+        --target-tags="$MASKING_TAG" >/dev/null
     fi
-  else
-    log "creating firewall $FIREWALL_SRS (shard+coord -> shards:$SRS_PORT)"
-    gcloud compute firewall-rules create "$FIREWALL_SRS" \
-      --network="$NETWORK" \
-      --allow="tcp:$SRS_PORT" \
-      --source-tags="$srs_want" \
-      --target-tags="$SHARD_TAG" >/dev/null
-  fi
-
-  # ---- firewall: coordinator + shards -> redis on the DB machine ----
-  local redis_want="$COORD_TAG,$SHARD_TAG"
-  if gcloud compute firewall-rules describe "$FIREWALL_REDIS" >/dev/null 2>&1; then
-    local redis_have
-    redis_have="$(gcloud compute firewall-rules describe "$FIREWALL_REDIS" \
-      --format='value(sourceTags.list())' 2>/dev/null)"
-    if [[ "$redis_have" != "$redis_want" ]]; then
-      log "firewall $FIREWALL_REDIS: updating source-tags to '$redis_want'"
-      gcloud compute firewall-rules update "$FIREWALL_REDIS" \
-        --source-tags="$redis_want" >/dev/null
-    else
-      log "firewall $FIREWALL_REDIS already correct"
-    fi
-  else
-    log "creating firewall $FIREWALL_REDIS (coord+shards -> db:$REDIS_PORT)"
-    gcloud compute firewall-rules create "$FIREWALL_REDIS" \
-      --network="$NETWORK" \
-      --allow="tcp:$REDIS_PORT" \
-      --source-tags="$redis_want" \
-      --target-tags="$DB_TAG" >/dev/null
   fi
 
   # ---- firewall: SSH via IAP tunnel only ----
@@ -378,11 +353,17 @@ cmd_up() {
   done
 
   # ---- coordinator ----
+  # Boot disk doubles as the RocksDB volume at $COORD_DB_PATH. Must hold
+  # all of the AKD history table for the largest fill we drive — at
+  # ~200KB/entry pre-compaction (observed 2.3GB for 12k entries in the
+  # first ENOSPC failure), 90% of medium (60M entries) needs ~1-2TB
+  # compacted with 2-3x headroom for WAL/L0 spikes during warmup.
+  # 4TB pd-ssd gives that headroom and keeps I/O off the critical path.
   local cname; cname="$(coord_name)"
   if gcloud compute instances describe "$cname" --zone="$ZONE" >/dev/null 2>&1; then
     log "$cname exists, skipping"
   else
-    log "creating $cname ($COORD_MACHINE_TYPE)"
+    log "creating $cname ($COORD_MACHINE_TYPE, boot=${COORD_BOOT_DISK_SIZE} ${COORD_BOOT_DISK_TYPE})"
     gcloud compute instances create "$cname" \
       --zone="$ZONE" \
       --machine-type="$COORD_MACHINE_TYPE" \
@@ -390,28 +371,31 @@ cmd_up() {
       --no-address \
       --tags="$COORD_TAG" \
       --image-family="ubuntu-2604-lts-amd64" --image-project="ubuntu-os-cloud" \
-      --boot-disk-size=20GB >/dev/null
+      --boot-disk-size="$COORD_BOOT_DISK_SIZE" \
+      --boot-disk-type="$COORD_BOOT_DISK_TYPE" >/dev/null
   fi
 
-  # ---- database (Redis) ----
-  # Small VM — Redis is the open-addressing occupancy oracle, not a
-  # heavyweight store. Disk is sized for the prefilled keyspace: at the
-  # production target of 2^28 slot keys, each ~50 bytes serialised, the
-  # working set is ~13 GiB. 20 GB boot disk is enough headroom and lets
-  # Redis page out under memory pressure rather than OOM-killing.
-  local dname; dname="$(db_name)"
-  if gcloud compute instances describe "$dname" --zone="$ZONE" >/dev/null 2>&1; then
-    log "$dname exists, skipping"
-  else
-    log "creating $dname ($REDIS_MACHINE_TYPE) — Redis on :$REDIS_PORT"
-    gcloud compute instances create "$dname" \
-      --zone="$ZONE" \
-      --machine-type="$REDIS_MACHINE_TYPE" \
-      --network="$NETWORK" \
-      --no-address \
-      --tags="$DB_TAG" \
-      --image-family="ubuntu-2604-lts-amd64" --image-project="ubuntu-os-cloud" \
-      --boot-disk-size=20GB >/dev/null
+  # No DB VM: the coordinator stores its open-addressing index +
+  # per-shard checkpoints in a local RocksDB at $COORD_DB_PATH on
+  # its own disk. Cuts a VM, a firewall rule, and Redis's MULTI/EXEC
+  # transaction-size ceiling out of the deployment.
+
+  # ---- masking server (optional, one VM per cluster) ----
+  if [[ "$ENABLE_MASKING_SERVER" == "1" ]]; then
+    local mname; mname="$(masking_name)"
+    if gcloud compute instances describe "$mname" --zone="$ZONE" >/dev/null 2>&1; then
+      log "$mname exists, skipping"
+    else
+      log "creating $mname ($MASKING_MACHINE_TYPE)"
+      gcloud compute instances create "$mname" \
+        --zone="$ZONE" \
+        --machine-type="$MASKING_MACHINE_TYPE" \
+        --network="$NETWORK" \
+        --no-address \
+        --tags="$MASKING_TAG" \
+        --image-family="ubuntu-2604-lts-amd64" --image-project="ubuntu-os-cloud" \
+        --boot-disk-size=100GB >/dev/null
+    fi
   fi
 
   log "instances up. waiting 30s for SSH to settle..."
@@ -432,59 +416,115 @@ cmd_up() {
 # Plain `nohup ... &` keeps $! aligned with the actual shard server. The
 # SSH-session hang that setsid was trying to solve is handled by
 # `fire-and-forget` instead.
-restart_shard() {
+start_shard() {
   local name="$1"
   local i="$2"
-  local per_shard="$3"
-  local db_ip="$4"
-  local shard_prefill_seed=$((PREFILL_SEED + i))
-  log "[$name] starting shard server (shard_id=$i, prefill_count=$per_shard, prefill_seed=$shard_prefill_seed)"
-  # Distributed-SRS mode: pass `--srs-bind` + `--srs-cache-dir`. On first
-  # boot every shard sits in "awaiting-bootstrap" on SRS_PORT until the
-  # coordinator runs `bench-cluster.sh bootstrap`; on subsequent boots
-  # (e.g. `restart-shards`) the cache hits and the shard reaches Ready
-  # without needing the bootstrap actor.
+  log "[$name] starting shard server (shard_id=$i, --prefill-count 0)"
+  # Each shard is launched exactly once per benchmark, with
+  # --prefill-count 0. Per-fill_percent prefill is driven from the
+  # coordinator via the gRPC ReconfigurePrefill RPC — the bench
+  # binaries (aegon_publish_bench / aegon_lookup_bench) issue it
+  # before every stage. That removes the kill-and-restart cycle
+  # the old design needed between fills, and with it the long-
+  # lived gcloud ssh sessions whose IAP-tunnel teardown latency
+  # caused so many false-positive failures.
   #
-  # After spawning, we poll /dev/tcp/127.0.0.1/$SRS_PORT for up to 60s
-  # to confirm the server is actually listening before declaring
-  # restart_shard a success. Without this verification, a SIGTERM'd
-  # ssh session (from fire-and-forget) can leave the shell killed
-  # before `nohup &` runs, and we silently report "started" with no
-  # process — which then makes bootstrap fail with mysterious
-  # "transport error" cascades.
+  # No --db-url / --db-path: per the shard server's CLI docs
+  # ("currently a no-op" at akd/src/bin/aegon_shard_server.rs:84),
+  # the shard's DB connection is vestigial and skipped at runtime.
+  # All persistent state lives on the coordinator's RocksDB.
   #
-  # NOTE: not fire-and-forget. We wait for either readiness or the
-  # 60s budget to elapse; either way the remote shell exits and the
-  # IAP tunnel tears down naturally.
-  remote "$name" "if [ -f /tmp/aegon-shard.pid ]; then \
+  # Two short ssh calls per shard, so each session is well under
+  # any plausible IAP teardown lag:
+  #   (1) spawn — fire-and-forget kill + nohup
+  #   (2) wait_for_shard_ready — short-lived gcloud probes
+  # Optional --masking-addr: if the cluster has a masking server, point
+  # each shard at it so value-side openings fetch pre-built packages
+  # from the shared queue instead of generating one inline per open.
+  local masking_flag=""
+  if [[ "$ENABLE_MASKING_SERVER" == "1" ]]; then
+    local masking_ep
+    masking_ep="$(masking_endpoint)" || die "could not resolve masking server endpoint"
+    if [[ -n "$masking_ep" ]]; then
+      masking_flag="--masking-addr $masking_ep"
+    fi
+  fi
+  local spawn_cmd="if [ -f /tmp/aegon-shard.pid ]; then \
       kill \$(cat /tmp/aegon-shard.pid) 2>/dev/null || true; \
     fi; \
     pkill -x aegon_shard_ser 2>/dev/null || true; \
     sleep 2; \
-    mkdir -p \$HOME/aegon-run $SRS_CACHE_DIR && \
+    if [ ! -f $REMOTE_SRS_PATH ]; then \
+      echo \"FAILED: SRS file not present at $REMOTE_SRS_PATH\"; exit 1; \
+    fi; \
+    mkdir -p \$HOME/aegon-run && \
     cd \$HOME/aegon-run && \
     nohup $REMOTE_BIN_DIR/aegon_shard_server \
       --bind 0.0.0.0:$SHARD_PORT \
-      --srs-bind 0.0.0.0:$SRS_PORT \
-      --srs-cache-dir $SRS_CACHE_DIR \
+      --srs-path $REMOTE_SRS_PATH \
       --shard-log-capacity $SHARD_LOG_CAPACITY \
       --kzh-k $KZH_K \
-      --setup-seed $SETUP_SEED \
       --shard-id $i \
-      --prefill-count $per_shard \
-      --prefill-seed $shard_prefill_seed \
-      --db-url redis://$db_ip:$REDIS_PORT \
+      --prefill-count 0 \
+      --no-retain-epoch-polys \
+      --private \
+      $masking_flag \
       > /tmp/aegon-shard.log 2>&1 < /dev/null & \
     echo \$! > /tmp/aegon-shard.pid; \
     disown 2>/dev/null || true; \
-    for poll in \$(seq 1 60); do \
-      if exec 9<>/dev/tcp/127.0.0.1/$SRS_PORT 2>/dev/null; then \
-        exec 9<&-; exec 9>&-; \
-        echo READY; exit 0; \
-      fi; \
-      sleep 1; \
-    done; \
-    echo FAILED; tail -n 30 /tmp/aegon-shard.log 2>/dev/null; exit 1"
+    echo SPAWNED"
+  # `|| spawn_rc=$?` shields the assignment from `set -e` — without
+  # it, a non-zero exit from gcloud (timeout, IAP-tunnel failure,
+  # etc.) terminates the subshell before we can inspect the output
+  # or print a diagnostic, so the parent's `wait` reports a generic
+  # failure with no log trail.
+  # 300s budget: the remote bash work is ~5s (kill + nohup + echo
+  # SPAWNED), but the IAP-tunnel setup + teardown can each take
+  # tens of seconds. 120s wasn't enough headroom — slower IAP setup
+  # could eat the entire budget before the remote bash even started.
+  local spawn_out spawn_rc=0
+  spawn_out="$(timeout 300 gcloud compute ssh "$name" --zone="$ZONE" \
+    --tunnel-through-iap --quiet --command="$spawn_cmd" 2>&1)" \
+    || spawn_rc=$?
+  if [[ "$spawn_out" == *"FAILED: SRS file not present"* ]]; then
+    printf '%s\n' "$spawn_out"
+    return 1
+  fi
+  if ! grep -qE '^SPAWNED$' <<<"$spawn_out"; then
+    log "[$name] spawn ssh did not report SPAWNED (rc=$spawn_rc); output:"
+    printf '%s\n' "$spawn_out"
+    return "$spawn_rc"
+  fi
+  log "[$name] spawn OK; polling for :$SHARD_PORT"
+  wait_for_shard_ready "$name"
+}
+
+# Probe the shard's listener via short-lived gcloud sessions. Returns
+# 0 once `ss -tln` on the remote reports :$SHARD_PORT in LISTEN, or 1
+# after the per-shard deadline. We keep each gcloud call ≤30s so any
+# IAP teardown lag is bounded.
+wait_for_shard_ready() {
+  local name="$1"
+  local deadline=$((SECONDS + ${WAIT_READY_SECONDS:-1200}))
+  local probe_cmd="ss -tln 2>/dev/null | grep -qE ':$SHARD_PORT\\b' && echo READY || echo NOT_READY"
+  while (( SECONDS < deadline )); do
+    local out=""
+    # `|| true` shields the assignment from `set -e` — a probe that
+    # fails (timeout, transient IAP-tunnel hiccup) should let us
+    # keep polling, not exit the subshell.
+    out="$(timeout 30 gcloud compute ssh "$name" --zone="$ZONE" \
+      --tunnel-through-iap --quiet --command="$probe_cmd" 2>/dev/null)" \
+      || true
+    if grep -qE '^READY$' <<<"$out"; then
+      log "[$name] READY (listening on :$SHARD_PORT)"
+      return 0
+    fi
+    sleep 10
+  done
+  log "[$name] still not listening after ${WAIT_READY_SECONDS:-1200}s; tailing remote log:"
+  timeout 60 gcloud compute ssh "$name" --zone="$ZONE" --tunnel-through-iap \
+    --quiet --command="tail -n 30 /tmp/aegon-shard.log 2>/dev/null" || true
+  return 1
 }
 
 cmd_deploy() {
@@ -495,9 +535,14 @@ cmd_deploy() {
   # so the bins install a tracing-tree subscriber and emit phase spans
   # (`Aegon::PublishPhase1`, `KZH::FMAState`, `ShardedAegon::*`, ...).
   # Stderr only; the bench JSON is unaffected. Turn off for clean runs.
-  local cargo_features=""
+  # Cluster builds always opt into mimalloc — at log_capacity=27 the
+  # shard's publish path makes many short-lived large allocations
+  # (the prev/new state clones in v1 lived 4×1.2 GB at peak; the
+  # refactor cut that, but the remaining churn still hands glibc more
+  # than it returns to the OS). mimalloc trims aggressively.
+  local cargo_features="--features mimalloc_alloc"
   if [[ "${TRACING:-0}" == "1" ]]; then
-    cargo_features="--features tracing_instrument"
+    cargo_features="$cargo_features --features tracing_instrument"
     log "TRACING=1: building with tracing_instrument feature (tracing-tree subscriber)"
   fi
   local local_bin_dir="$REPO_ROOT/target/release"
@@ -514,60 +559,37 @@ cmd_deploy() {
         apt-get update >/dev/null && \
         apt-get install -y --no-install-recommends protobuf-compiler ca-certificates >/dev/null && \
         cargo build --release -p akd $cargo_features --target x86_64-unknown-linux-gnu \
-          --bin aegon_shard_server --bin aegon_coordinator_bench --bin aegon_srs_bootstrap"
+          --bin aegon_shard_server --bin aegon_coordinator_bench --bin aegon_srs_gen \
+          --bin aegon_masking_server"
     remote_bin_dir="$REPO_ROOT/target/x86_64-unknown-linux-gnu/release"
   else
-    log "building release binaries (aegon_shard_server, aegon_coordinator_bench, aegon_srs_bootstrap)"
+    log "building release binaries (aegon_shard_server, aegon_coordinator_bench, aegon_srs_gen, aegon_masking_server)"
     (cd "$REPO_ROOT" && cargo build --release -p akd $cargo_features \
-      --bin aegon_shard_server --bin aegon_coordinator_bench --bin aegon_srs_bootstrap) >/dev/null
+      --bin aegon_shard_server --bin aegon_coordinator_bench --bin aegon_srs_gen \
+      --bin aegon_masking_server) >/dev/null
   fi
   [[ -x "$remote_bin_dir/aegon_shard_server" ]]      || die "aegon_shard_server missing"
   [[ -x "$remote_bin_dir/aegon_coordinator_bench" ]] || die "aegon_coordinator_bench missing"
-  [[ -x "$remote_bin_dir/aegon_srs_bootstrap" ]]     || die "aegon_srs_bootstrap missing"
+  [[ -x "$remote_bin_dir/aegon_srs_gen" ]]           || die "aegon_srs_gen missing"
+  [[ -x "$remote_bin_dir/aegon_masking_server" ]]    || die "aegon_masking_server missing"
 
   local per_shard; per_shard="$(prefill_per_shard)"
   log "shards will prefill ${per_shard} entries each (total = 2^$TOTAL_PRELOAD_LOG2)"
 
-  # ---- DB tier: install (idempotent) + FLUSHALL ----
-  # Bring Redis up first because each shard PINGs it at startup (5s
-  # timeout) and exits if it can't reach. FLUSHALL ensures every deploy
-  # starts from a clean keyspace — otherwise a previous run's slot keys
-  # would be visible to open-addressing and we'd see false "occupied"
-  # for empty polynomial slots.
-  local dname; dname="$(db_name)"
-  wait_for_ssh "$dname"
-  log "[$dname] installing + (re)starting redis on :$REDIS_PORT"
-  # Wait for unattended-upgrades (which runs at boot on fresh Ubuntu
-  # images) to release the apt lock. Without this, the install line
-  # races with the daemon and fails with
-  #   E: Could not get lock /var/lib/dpkg/lock-frontend.
-  # 90 s is generous: cloud-init's unattended-upgrades pass typically
-  # takes 30-60 s on a fresh n2-standard-2.
-  # We hand apt itself a long lock-wait via DPkg::Lock::Timeout so
-  # it blocks (instead of bailing) when cloud-init's
-  # unattended-upgrades pass is still holding the dpkg lock. The
-  # leading fuser poll is a fast-path; the timeout backstops it.
-  remote "$dname" "set -e; \
-    for i in \$(seq 1 90); do \
-      if ! sudo fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 \
-         && ! sudo fuser /var/lib/apt/lists/lock >/dev/null 2>&1; then \
-        break; \
-      fi; \
-      sleep 1; \
-    done; \
-    if ! dpkg -s redis-server >/dev/null 2>&1; then \
-      sudo apt-get -o DPkg::Lock::Timeout=600 update -qq && \
-      sudo DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=600 install -y -qq redis-server; \
-    fi; \
-    sudo sed -i 's/^bind .*/bind 0.0.0.0/' /etc/redis/redis.conf; \
-    sudo sed -i 's/^protected-mode .*/protected-mode no/' /etc/redis/redis.conf; \
-    sudo systemctl restart redis-server; \
-    sleep 1; \
-    redis-cli -h 127.0.0.1 -p $REDIS_PORT FLUSHALL >/dev/null; \
-    redis-cli -h 127.0.0.1 -p $REDIS_PORT PING"
-
-  local db_ip; db_ip="$(db_internal_ip)"
-  log "shards + coordinator will use redis://$db_ip:$REDIS_PORT"
+  # ---- coordinator-side RocksDB directory ----
+  # Make sure the coordinator has a writable $COORD_DB_PATH for the
+  # bench binaries to point their --db-path at. The binaries
+  # themselves create the directory on first open, but we mkdir
+  # upfront so an early "permission denied" surfaces during deploy,
+  # not 30 minutes into the publish-bench warmup.
+  #
+  # wait_for_ssh first — coord may still be booting (larger boot
+  # disks like the 4TB pd-ssd take longer to ready than the default
+  # 20GB pd-balanced).
+  local cname; cname="$(coord_name)"
+  wait_for_ssh "$cname"
+  log "[$cname] preparing RocksDB directory $COORD_DB_PATH"
+  remote "$cname" "sudo mkdir -p $COORD_DB_PATH && sudo chown \$(whoami) $COORD_DB_PATH"
 
   # ---- push to every shard + start, all in parallel ----
   # Each shard generates its own SRS in-process from --setup-seed
@@ -583,13 +605,20 @@ cmd_deploy() {
     local name; name="$(shard_name "$i")"
     (
       wait_for_ssh "$name"
-      log "[$name] uploading aegon_shard_server"
+      log "[$name] uploading aegon_shard_server + aegon_srs_gen"
       scp_to "$name" "$remote_bin_dir/aegon_shard_server"
+      scp_to "$name" "$remote_bin_dir/aegon_srs_gen"
       remote "$name" "sudo mkdir -p $REMOTE_BIN_DIR && \
-        sudo mv /tmp/aegon_shard_server $REMOTE_BIN_DIR/ && \
-        sudo chmod +x $REMOTE_BIN_DIR/aegon_shard_server"
-      restart_shard "$name" "$i" "$per_shard" "$db_ip"
-      log "[$name] deploy done"
+        sudo mv /tmp/aegon_shard_server /tmp/aegon_srs_gen $REMOTE_BIN_DIR/ && \
+        sudo chmod +x $REMOTE_BIN_DIR/aegon_shard_server $REMOTE_BIN_DIR/aegon_srs_gen && \
+        sudo mkdir -p $REMOTE_SRS_DIR && \
+        sudo chown \$(whoami) $REMOTE_SRS_DIR"
+      # Per-shard local-SRS mode: don't start the shard server here.
+      # setup-bench will generate the SRS on every shard in parallel
+      # (same seed → identical files). publish-bench / lookup-bench
+      # call restart_shard per stage anyway, so deferring the start
+      # is correct.
+      log "[$name] deploy done (binaries in place; SRS not yet generated)"
     ) &
     deploy_pids+=("$!")
   done
@@ -605,18 +634,41 @@ cmd_deploy() {
   # ---- push to coordinator ----
   local cname; cname="$(coord_name)"
   wait_for_ssh "$cname"
-  log "[$cname] uploading aegon_coordinator_bench + aegon_srs_bootstrap"
+  log "[$cname] uploading aegon_coordinator_bench"
   scp_to "$cname" "$remote_bin_dir/aegon_coordinator_bench"
-  scp_to "$cname" "$remote_bin_dir/aegon_srs_bootstrap"
   remote "$cname" "sudo mkdir -p $REMOTE_BIN_DIR && \
     sudo mv /tmp/aegon_coordinator_bench $REMOTE_BIN_DIR/ && \
-    sudo mv /tmp/aegon_srs_bootstrap $REMOTE_BIN_DIR/ && \
-    sudo chmod +x $REMOTE_BIN_DIR/aegon_coordinator_bench $REMOTE_BIN_DIR/aegon_srs_bootstrap"
+    sudo chmod +x $REMOTE_BIN_DIR/aegon_coordinator_bench"
 
-  log "deploy done. shards are awaiting BootstrapSrs on :$SRS_PORT."
-  log "next: ./scripts/bench-cluster.sh bootstrap"
-  log "  (on cache hit, bootstrap completes in seconds; on cache miss it"
-  log "  pushes trapdoors + waits for distributed gen + prefill across all shards.)"
+  # Enable user-session lingering on the coord. Without this, the
+  # transient systemd-run unit that wraps aegon_lookup_bench gets
+  # placed in the user's slice (because we pass --uid=$me --gid=$me),
+  # and systemd-logind tears down the whole user@.service after the
+  # last SSH session that touched it is gone "for long enough" —
+  # observed in v2 as SIGTERM (ExecMainStatus=15) at the ~15h mark,
+  # mid-climb. Linger tells logind to keep the user manager running
+  # indefinitely, so transient user-slice units survive arbitrarily
+  # long disconnects.
+  log "[$cname] enabling logind linger so the bench unit survives 15h+"
+  remote "$cname" "sudo loginctl enable-linger \$(whoami) && loginctl show-user \$(whoami) --property=Linger --value"
+
+  # ---- push to masking server (optional) ----
+  if [[ "$ENABLE_MASKING_SERVER" == "1" ]]; then
+    local mname; mname="$(masking_name)"
+    wait_for_ssh "$mname"
+    log "[$mname] uploading aegon_masking_server + aegon_srs_gen"
+    scp_to "$mname" "$remote_bin_dir/aegon_masking_server"
+    scp_to "$mname" "$remote_bin_dir/aegon_srs_gen"
+    remote "$mname" "sudo mkdir -p $REMOTE_BIN_DIR && \
+      sudo mv /tmp/aegon_masking_server /tmp/aegon_srs_gen $REMOTE_BIN_DIR/ && \
+      sudo chmod +x $REMOTE_BIN_DIR/aegon_masking_server $REMOTE_BIN_DIR/aegon_srs_gen && \
+      sudo mkdir -p $REMOTE_SRS_DIR && \
+      sudo chown \$(whoami) $REMOTE_SRS_DIR"
+    log "[$mname] deploy done (binaries in place; SRS will be generated by start-masking)"
+  fi
+
+  log "deploy done. SRS generation happens in setup-bench."
+  log "next: ./scripts/bench-cluster.sh setup-bench"
 }
 
 # Restart every shard server with a fresh --prefill-count, reusing the
@@ -628,38 +680,136 @@ cmd_deploy() {
 # skips the cargo build, the scp uploads, and the redis re-install,
 # collapsing per-prefill cycle from ~9 min to ~30 s. The cluster must
 # already be `up` and `deploy`-ed once.
-cmd_restart_shards() {
+cmd_start_shards() {
   require_project
   require_power_of_two "$N_SHARDS"
 
-  local per_shard; per_shard="$(prefill_per_shard)"
-  log "shards will prefill ${per_shard} entries each (total = 2^$TOTAL_PRELOAD_LOG2)"
-
-  local dname; dname="$(db_name)"
-  log "[$dname] FLUSHALL"
-  remote "$dname" "redis-cli -h 127.0.0.1 -p $REDIS_PORT FLUSHALL >/dev/null && \
-                   redis-cli -h 127.0.0.1 -p $REDIS_PORT PING >/dev/null"
-
-  local db_ip; db_ip="$(db_internal_ip)"
+  # Wipe the coordinator's RocksDB so each run starts from a clean
+  # keyspace. Old open-addressing entries would otherwise be
+  # observable to plan_phase_1 and the bench would see false
+  # "slot occupied" hits.
+  local cname; cname="$(coord_name)"
+  log "[$cname] wiping $COORD_DB_PATH (clean RocksDB for the run)"
+  remote "$cname" "sudo rm -rf $COORD_DB_PATH && sudo mkdir -p $COORD_DB_PATH && sudo chown \$(whoami) $COORD_DB_PATH"
 
   local -a pids=()
   for ((i = 0; i < N_SHARDS; i++)); do
     local name; name="$(shard_name "$i")"
     (
-      restart_shard "$name" "$i" "$per_shard" "$db_ip"
-      log "[$name] restart done"
+      start_shard "$name" "$i"
+      log "[$name] start done"
     ) &
     pids+=("$!")
   done
-  log "waiting on ${#pids[@]} per-shard restarts (parallel)..."
+  log "waiting on ${#pids[@]} per-shard starts (parallel)..."
   local failed=0
   for pid in "${pids[@]}"; do
     wait "$pid" || failed=$((failed + 1))
   done
   if (( failed > 0 )); then
-    die "$failed shard restart(s) failed — inspect output above and run 'logs <i>' to debug"
+    die "$failed shard start(s) failed — inspect output above and run 'logs <i>' to debug"
   fi
-  log "all shards restarted. wait for 'aegon_shard_server listening on ...' on each."
+  log "all shards listening on :$SHARD_PORT (--prefill-count 0). Use the bench binaries to drive ReconfigurePrefill."
+}
+
+# Start the masking server on its own VM. If no SRS exists at
+# $REMOTE_SRS_PATH on the masking VM, generates it first via
+# aegon_srs_gen (same seed as the shards — deterministic identical
+# file). Then launches aegon_masking_server with a stash queue and
+# N background producers that refill the queue continuously.
+#
+# Idempotent — kills any existing aegon_masking_server first.
+# Skips entirely when ENABLE_MASKING_SERVER=0.
+cmd_start_masking() {
+  if [[ "$ENABLE_MASKING_SERVER" != "1" ]]; then
+    log "ENABLE_MASKING_SERVER=0, skipping start-masking"
+    return 0
+  fi
+  require_project
+  require_power_of_two "$N_SHARDS"
+  local log_n_shards
+  log_n_shards="$(python3 -c "import math; print(int(math.log2($N_SHARDS)))")"
+
+  local mname; mname="$(masking_name)"
+  wait_for_ssh "$mname"
+
+  # SRS: generate on-demand if not already present. Same seed +
+  # log_capacity + kzh_k as the shards → byte-identical SRS file →
+  # consumers see the same hiding scalar `h`.
+  log "[$mname] ensuring SRS at $REMOTE_SRS_PATH (generating if missing)"
+  remote "$mname" "
+    mkdir -p \$HOME/aegon-run $REMOTE_SRS_DIR
+    if [ -f $REMOTE_SRS_PATH ]; then
+      echo SRS already present
+    else
+      cd \$HOME/aegon-run && \
+        $REMOTE_BIN_DIR/aegon_srs_gen \
+          --shard-log-capacity $SHARD_LOG_CAPACITY \
+          --kzh-k $KZH_K \
+          --seed $SETUP_SEED \
+          --log-n-shards $log_n_shards \
+          --private \
+          --out $REMOTE_SRS_PATH
+    fi
+  "
+
+  # Stop any existing masking server, then launch under nohup. We
+  # don't use systemd-run because the masking server is restartable
+  # without state — if the VM reboots, a fresh queue rebuilds in
+  # seconds.
+  log "[$mname] launching aegon_masking_server :$MASKING_PORT (queue=$MASKING_QUEUE_SIZE producers=$MASKING_PRODUCERS)"
+  remote "$mname" "
+    if [ -f /tmp/aegon-masking.pid ]; then
+      kill \$(cat /tmp/aegon-masking.pid) 2>/dev/null || true
+      sleep 1
+    fi
+    pkill -x aegon_masking_se 2>/dev/null || true
+    sleep 1
+    cd \$HOME/aegon-run && \
+    nohup $REMOTE_BIN_DIR/aegon_masking_server \
+      --bind 0.0.0.0:$MASKING_PORT \
+      --num-vars $SHARD_LOG_CAPACITY \
+      --kzh-k $KZH_K \
+      --srs-path $REMOTE_SRS_PATH \
+      --queue-size $MASKING_QUEUE_SIZE \
+      --producers $MASKING_PRODUCERS \
+      > /tmp/aegon-masking.log 2>&1 < /dev/null &
+    echo \$! > /tmp/aegon-masking.pid
+    disown 2>/dev/null || true
+    echo SPAWNED
+  "
+
+  # Poll until the port is listening (gives the server time to load
+  # SRS + start producers).
+  log "[$mname] waiting for masking server to bind :$MASKING_PORT"
+  local ready=0
+  for _ in $(seq 1 60); do
+    if remote "$mname" "ss -tln | grep -q ':$MASKING_PORT '" 2>/dev/null; then
+      ready=1
+      break
+    fi
+    sleep 2
+  done
+  if (( ready == 0 )); then
+    die "[$mname] masking server did not bind within 120s — check /tmp/aegon-masking.log"
+  fi
+  log "[$mname] masking server ready on :$MASKING_PORT"
+}
+
+# Resolve the masking server's internal IP for the shards' --masking-addr.
+masking_endpoint() {
+  if [[ "$ENABLE_MASKING_SERVER" != "1" ]]; then
+    echo ""
+    return 0
+  fi
+  local mname; mname="$(masking_name)"
+  local ip
+  ip="$(gcloud compute instances describe "$mname" --zone="$ZONE" \
+    --format='value(networkInterfaces[0].networkIP)' 2>/dev/null)"
+  if [[ -z "$ip" ]]; then
+    return 1
+  fi
+  echo "http://$ip:$MASKING_PORT"
 }
 
 # Run aegon_srs_bootstrap on the coordinator to drive the distributed
@@ -680,84 +830,16 @@ cmd_restart_shards() {
 #
 # Run after `deploy` and before `bench` / `lookup-bench`.
 cmd_bootstrap() {
+  # In per-shard-local-SRS mode, "bootstrap" is just: run setup-bench
+  # (each shard generates its own SRS in parallel), then start all
+  # shards. The legacy distributed-gen path has been removed entirely.
   require_project
   require_power_of_two "$N_SHARDS"
-
-  # Pre-flight: verify every shard's SRS port is listening before we
-  # invoke the bootstrap actor. The distributed-SRS protocol requires
-  # all N_SHARDS to be reachable simultaneously (each shard peer-pulls
-  # H_t slabs from every other shard); a single dead shard cascades
-  # into all-shards-exit and a 30-min bootstrap timeout. We pay one
-  # short probe pass up front and restart any dead shards before
-  # touching the trapdoors.
-  wait_for_shards_ready
-
-  local cname; cname="$(coord_name)"
-  local srs_csv; srs_csv="$(srs_endpoints_csv)"
-  log "srs endpoints (first 2 shown): $(echo "$srs_csv" | cut -d, -f1-2),..."
-  log "[$cname] running aegon_srs_bootstrap (seed=$SETUP_SEED)"
-  remote "$cname" \
-    "$REMOTE_BIN_DIR/aegon_srs_bootstrap \
-       --shard-log-capacity $SHARD_LOG_CAPACITY \
-       --kzh-k $KZH_K \
-       --setup-seed $SETUP_SEED \
-       --shard-endpoints $srs_csv" \
-    stream
-  log "bootstrap done. cluster ready for ./scripts/bench-cluster.sh bench"
+  cmd_setup_bench
+  log "starting all shards"
+  cmd_start_shards
 }
 
-# Probe every shard's SRS port from the coordinator (which can reach
-# private IPs over the internal VPC). Restart any that aren't
-# listening. Loops up to `max_passes` times so a flaky shard gets
-# multiple chances. Aborts with `die` only if a shard fails to come
-# up after all attempts — the right signal to surface a real fault
-# (e.g. an OOM panic) rather than retrying forever.
-wait_for_shards_ready() {
-  local max_passes="${1:-3}"
-  local pass
-  local cname; cname="$(coord_name)"
-  local per_shard; per_shard="$(prefill_per_shard)"
-  local db_ip; db_ip="$(db_internal_ip)"
-  for ((pass = 1; pass <= max_passes; pass++)); do
-    log "[ready-barrier] pass $pass/$max_passes: probing all $N_SHARDS shards on :$SRS_PORT"
-    # One single ssh-to-coordinator that runs a parallel probe of all shards.
-    local dead_list
-    dead_list="$(remote "$cname" "
-      dead=''
-      for i in \$(seq 0 $((N_SHARDS - 1))); do
-        ip=\$(getent hosts ${SHARD_TAG}-\$i | awk '{print \$1}')
-        if [ -z \"\$ip\" ] || ! timeout 2 bash -c \"</dev/tcp/\$ip/$SRS_PORT\" 2>/dev/null; then
-          dead=\"\$dead \$i\"
-        fi
-      done
-      echo \"DEAD:\$dead\"
-    " 2>/dev/null | grep '^DEAD:' | sed 's/^DEAD://')"
-    dead_list="$(echo "$dead_list" | xargs)"  # trim
-    if [[ -z "$dead_list" ]]; then
-      log "[ready-barrier] all $N_SHARDS shards listening on :$SRS_PORT ✓"
-      return 0
-    fi
-    local dead_count; dead_count="$(echo "$dead_list" | wc -w)"
-    log "[ready-barrier] $dead_count shard(s) not listening: $dead_list"
-    log "[ready-barrier] restarting dead shards..."
-    local -a restart_pids=()
-    for i in $dead_list; do
-      local name; name="$(shard_name "$i")"
-      (
-        restart_shard "$name" "$i" "$per_shard" "$db_ip"
-      ) &
-      restart_pids+=("$!")
-    done
-    local restart_failed=0
-    for pid in "${restart_pids[@]}"; do
-      wait "$pid" || restart_failed=$((restart_failed + 1))
-    done
-    if (( restart_failed > 0 )); then
-      log "[ready-barrier] WARN: $restart_failed restart_shard call(s) returned non-zero; re-probing anyway"
-    fi
-  done
-  die "[ready-barrier] shards still not ready after $max_passes passes"
-}
 
 # Setup-time + comm-bytes benchmark for the large regime.
 #
@@ -781,65 +863,137 @@ wait_for_shards_ready() {
 # `down` to tear it down once the large-regime numbers are in hand.
 REMOTE_SETUP_BENCH_OUT="/tmp/aegon-setup-bench.json"
 LOCAL_SETUP_BENCH_OUT="${LOCAL_SETUP_BENCH_OUT:-/tmp/aegon-setup-bench.json}"
+
+# Per-shard local-SRS setup benchmark. Every shard generates its
+# own SRS in parallel using the same SETUP_SEED, so they all
+# converge on the same file (deterministic). No central gen, no
+# broadcast, no NFS — each shard's file lives on local disk at
+# $REMOTE_SRS_PATH and is read directly by aegon_shard_server at
+# every subsequent restart.
+#
+# Reports:
+#   * gen_seconds_per_shard — per-shard wall-clock for aegon_srs_gen
+#   * gen_seconds_max       — slowest shard (effective cluster cost,
+#                             since the benchmark blocks on the
+#                             slowest one)
+#   * gen_seconds_min/median/mean
+#   * srs_bytes             — size of the SRS file on disk
+#                             (identical across shards by construction)
+#
+# Prereq: cluster is `up + deploy`-ed (aegon_srs_gen + aegon_shard_server
+# binaries already pushed to every shard).
 cmd_setup_bench() {
   require_project
   require_power_of_two "$N_SHARDS"
 
-  # Step 1: clear the SRS cache on every shard so we measure
-  # distributed-gen wall-clock, not a cache-hit fast-path. The cache
-  # dir is shell-expanded server-side, hence the literal $HOME below.
-  log "wiping SRS cache on all shards ($SRS_CACHE_DIR)"
-  local -a wipe_pids=()
+  local log_n_shards
+  log_n_shards="$(python3 -c "import math; print(int(math.log2($N_SHARDS)))")"
+
+  # Per-shard parallel generation. Each shard runs aegon_srs_gen with
+  # the same seed and writes to its local $REMOTE_SRS_PATH. We capture
+  # each shard's gen wall-clock independently — written to a per-shard
+  # tmpfile on the local box, then sucked into a JSON array.
+  log "generating SRS on $N_SHARDS shards in parallel (seed=$SETUP_SEED, shard_log_capacity=$SHARD_LOG_CAPACITY, kzh_k=$KZH_K, log_n_shards=$log_n_shards)"
+  local tmp_dir; tmp_dir="$(mktemp -d)"
+  local i
+  local -a gen_pids=()
   for ((i = 0; i < N_SHARDS; i++)); do
     local name; name="$(shard_name "$i")"
     (
-      remote "$name" "rm -f $SRS_CACHE_DIR/aegon-srs-*.cache 2>/dev/null || true"
+      local outfile="$tmp_dir/$i.sec"
+      # `time -p` (POSIX) emits "real X.XX" on stderr, robust across
+      # bash/dash. We grep "^real " out of stderr and round.
+      local t0; t0="$(date +%s.%N)"
+      timeout 3600 gcloud compute ssh "$name" --zone="$ZONE" --tunnel-through-iap \
+        --quiet --command "mkdir -p \$HOME/aegon-run \$HOME/artifacts/srs && cd \$HOME/aegon-run && \
+          rm -f $REMOTE_SRS_PATH && \
+          $REMOTE_BIN_DIR/aegon_srs_gen \
+            --shard-log-capacity $SHARD_LOG_CAPACITY \
+            --kzh-k $KZH_K \
+            --seed $SETUP_SEED \
+            --log-n-shards $log_n_shards \
+            --private \
+            --out $REMOTE_SRS_PATH" \
+        >/dev/null 2>&1
+      local rc=$?
+      local t1; t1="$(date +%s.%N)"
+      if (( rc == 0 )); then
+        python3 -c "print(round($t1 - $t0, 3))" > "$outfile"
+        echo "[$name] SRS gen OK in $(cat "$outfile")s"
+      else
+        echo "FAIL" > "$outfile"
+        echo "[$name] SRS gen FAILED rc=$rc" >&2
+      fi
     ) &
-    wipe_pids+=("$!")
+    gen_pids+=("$!")
   done
-  for pid in "${wipe_pids[@]}"; do wait "$pid"; done
-
-  # Step 2: restart shards with prefill_count=0 so the setup-time
-  # measurement is unpolluted by post-SRS prefill work.
-  log "restarting shards with prefill_count=0 (pure setup-time measurement)"
-  local db_ip; db_ip="$(db_internal_ip)"
-  remote "$(db_name)" \
-    "redis-cli -h 127.0.0.1 -p $REDIS_PORT FLUSHALL >/dev/null && \
-     redis-cli -h 127.0.0.1 -p $REDIS_PORT PING >/dev/null"
-
-  local -a restart_pids=()
-  for ((i = 0; i < N_SHARDS; i++)); do
-    local name; name="$(shard_name "$i")"
-    (
-      restart_shard "$name" "$i" 0 "$db_ip"
-    ) &
-    restart_pids+=("$!")
-  done
+  log "waiting on ${#gen_pids[@]} parallel SRS generations..."
   local failed=0
-  for pid in "${restart_pids[@]}"; do
+  for pid in "${gen_pids[@]}"; do
     wait "$pid" || failed=$((failed + 1))
   done
   if (( failed > 0 )); then
-    die "$failed shard restart(s) failed"
+    die "$failed shard(s) failed SRS generation; see logs above"
   fi
 
-  # Step 3: run aegon_srs_bootstrap with --metrics-out so the
-  # consolidated per-shard metrics land in one JSON file.
-  local cname; cname="$(coord_name)"
-  local srs_csv; srs_csv="$(srs_endpoints_csv)"
-  log "[$cname] running aegon_srs_bootstrap with metrics gather"
-  remote "$cname" \
-    "$REMOTE_BIN_DIR/aegon_srs_bootstrap \
-       --shard-log-capacity $SHARD_LOG_CAPACITY \
-       --kzh-k $KZH_K \
-       --setup-seed $SETUP_SEED \
-       --shard-endpoints $srs_csv \
-       --metrics-out $REMOTE_SETUP_BENCH_OUT" \
-    stream
+  # Gather per-shard timings.
+  local -a per_shard_secs=()
+  for ((i = 0; i < N_SHARDS; i++)); do
+    local sec; sec="$(cat "$tmp_dir/$i.sec")"
+    [[ "$sec" == "FAIL" ]] && die "shard $i SRS gen FAILED"
+    per_shard_secs+=("$sec")
+  done
+  rm -rf "$tmp_dir"
 
-  log "retrieving $REMOTE_SETUP_BENCH_OUT -> $LOCAL_SETUP_BENCH_OUT"
-  scp_from "$cname" "$REMOTE_SETUP_BENCH_OUT" "$LOCAL_SETUP_BENCH_OUT"
-  log "setup-bench JSON saved to $LOCAL_SETUP_BENCH_OUT"
+  # Compute min/max/median/mean from per_shard_secs in python.
+  local secs_csv; secs_csv="$(IFS=,; echo "${per_shard_secs[*]}")"
+  local stats_json
+  stats_json="$(python3 - "$secs_csv" <<'PY'
+import sys, json, statistics
+secs = [float(s) for s in sys.argv[1].split(',')]
+print(json.dumps({
+  "min":    round(min(secs), 3),
+  "max":    round(max(secs), 3),
+  "median": round(statistics.median(secs), 3),
+  "mean":   round(statistics.mean(secs), 3),
+  "all":    [round(s, 3) for s in secs],
+}))
+PY
+)"
+  log "SRS gen stats: $stats_json"
+
+  # Capture SRS size from shard-0 (identical across shards by construction).
+  local gen_host; gen_host="$(shard_name 0)"
+  local srs_bytes; srs_bytes="$(remote "$gen_host" "stat -c '%s' $REMOTE_SRS_PATH" | tr -d '[:space:]')"
+  log "[$gen_host] SRS size: $srs_bytes bytes"
+
+  # Emit JSON. broadcast_seconds is kept (at 0) for plot compatibility
+  # — the per-shard scheme has no broadcast phase.
+  mkdir -p "$(dirname "$LOCAL_SETUP_BENCH_OUT")"
+  python3 - <<PY > "$LOCAL_SETUP_BENCH_OUT"
+import json
+stats = json.loads('''$stats_json''')
+payload = {
+  "regime": "per-shard-local",
+  "n_shards": $N_SHARDS,
+  "shard_log_capacity": $SHARD_LOG_CAPACITY,
+  "kzh_k": $KZH_K,
+  "log_n_shards": $log_n_shards,
+  "setup_seed": $SETUP_SEED,
+  "gen_host_machine_type": "$SHARD_MACHINE_TYPE",
+  "gen_host_note": "Per-shard parallel SRS generation; every shard runs aegon_srs_gen with the same seed, writing to local disk at $REMOTE_SRS_PATH. No NFS, no central gen, no broadcast.",
+  "gen_seconds": stats["max"],
+  "gen_seconds_max": stats["max"],
+  "gen_seconds_min": stats["min"],
+  "gen_seconds_median": stats["median"],
+  "gen_seconds_mean": stats["mean"],
+  "gen_seconds_per_shard": stats["all"],
+  "broadcast_seconds": 0,
+  "srs_bytes": $srs_bytes,
+}
+print(json.dumps(payload, indent=2))
+PY
+  log "setup-bench JSON written to $LOCAL_SETUP_BENCH_OUT"
 }
 
 # Publish-time + commit-size benchmark for the large regime.
@@ -866,15 +1020,61 @@ cmd_setup_bench() {
 PUBLISH_FILL_PERCENTS="${PUBLISH_FILL_PERCENTS:-0,30,60,90}"
 PUBLISH_BATCH_SIZES="${PUBLISH_BATCH_SIZES:-4096,8192,16384,32768,65536,131072}"
 PUBLISH_SAMPLES_PER_BATCH="${PUBLISH_SAMPLES_PER_BATCH:-3}"
-# True (non-over-provisioned) total log capacity. Default 32 (2^32
-# entries). The per-shard polynomial sizes against SHARD_LOG_CAPACITY
-# (default 29), which gives a 4x over-provisioning.
-PUBLISH_TRUE_LOG_CAP="${PUBLISH_TRUE_LOG_CAP:-32}"
+# True (non-over-provisioned) total log capacity, derived from the
+# cluster geometry:
+#   total_log_slots = SHARD_LOG_CAPACITY + log2(N_SHARDS)
+#   true_log_capacity = total_log_slots - LOG2_OVER_PROVISIONING_FACTOR(=2)
+#
+# Auto-deriving avoids a class of latent bugs we hit before, where a
+# static default (32) carried over from the LARGE regime and made
+# medium-cluster runs target 30% of 2^32 = 1.3B entries instead of
+# 30% of 2^26 = 20M. Override only if you intentionally want to
+# benchmark against a different addressable space than the cluster's
+# physical one.
+derive_true_log_cap() {
+  python3 -c "
+import math
+n_shards = ${N_SHARDS}
+shard_log_cap = ${SHARD_LOG_CAPACITY}
+log2_alpha = 2  # mirrors LOG2_OVER_PROVISIONING_FACTOR in akd/src/aegon/config.rs
+log2_n_shards = int(math.log2(n_shards))
+print(shard_log_cap + log2_n_shards - log2_alpha)
+"
+}
+PUBLISH_TRUE_LOG_CAP="${PUBLISH_TRUE_LOG_CAP:-$(derive_true_log_cap)}"
 LOCAL_PUBLISH_BENCH_DIR="${LOCAL_PUBLISH_BENCH_DIR:-/tmp/aegon-publish-bench}"
+
+# Print the resolved cluster + bench config. Called at the top of
+# every bench command so a misconfiguration is visible in the log
+# before any expensive work starts. Failures we hit in prior runs
+# were almost always config-shape mismatches (wrong TRUE_LOG_CAP for
+# the regime, etc.); making the resolved values appear up front
+# turns "warmup ran for 12 hours then failed" into "we caught it in
+# the first 2 seconds."
+dump_bench_config() {
+  local derived; derived="$(derive_true_log_cap)"
+  log "==== resolved config ===="
+  log "  N_SHARDS               = $N_SHARDS"
+  log "  SHARD_LOG_CAPACITY     = $SHARD_LOG_CAPACITY (per shard 2^$SHARD_LOG_CAPACITY slots)"
+  log "  KZH_K                  = $KZH_K"
+  log "  PUBLISH_TRUE_LOG_CAP   = $PUBLISH_TRUE_LOG_CAP (derived = $derived; addressable = 2^$PUBLISH_TRUE_LOG_CAP entries)"
+  log "  PUBLISH_FILL_PERCENTS  = $PUBLISH_FILL_PERCENTS"
+  log "  PUBLISH_BATCH_SIZES    = $PUBLISH_BATCH_SIZES"
+  log "  PUBLISH_WARMUP_BATCH   = ${PUBLISH_WARMUP_BATCH_SIZE:-16384}"
+  log "  COORD_DB_PATH          = $COORD_DB_PATH (RocksDB on coordinator)"
+  log "  COORD_BOOT_DISK        = $COORD_BOOT_DISK_SIZE $COORD_BOOT_DISK_TYPE"
+  log "  SHARDS                 = $SHARD_MACHINE_TYPE (--no-retain-epoch-polys set)"
+  if [[ "$PUBLISH_TRUE_LOG_CAP" != "$derived" ]]; then
+    log "  NOTE: PUBLISH_TRUE_LOG_CAP overridden — derived value would be $derived"
+  fi
+  log "========================"
+}
+
 cmd_publish_bench() {
   require_project
   require_power_of_two "$N_SHARDS"
   mkdir -p "$LOCAL_PUBLISH_BENCH_DIR"
+  dump_bench_config
 
   # Build + push the bench binary to the coordinator (idempotent —
   # cached cargo + scp-only-if-different is what `bench-cluster.sh
@@ -911,82 +1111,58 @@ cmd_publish_bench() {
     sudo mv /tmp/aegon_publish_bench $REMOTE_BIN_DIR/ && \
     sudo chmod +x $REMOTE_BIN_DIR/aegon_publish_bench"
 
-  local db_ip; db_ip="$(db_internal_ip)"
   local shard_csv; shard_csv="$(shard_endpoints_csv)"
-  local srs_csv; srs_csv="$(srs_endpoints_csv)"
 
-  # Walk every fill percent. For each, compute per-shard prefill,
-  # restart shards, bootstrap (cache hit -> fast), then run the
-  # bench in distributed mode with --fill-percents <pct>.
-  local total_capacity=$((1 << PUBLISH_TRUE_LOG_CAP))
-  IFS=',' read -ra fill_pcts <<< "$PUBLISH_FILL_PERCENTS"
-  for fill_pct in "${fill_pcts[@]}"; do
-    log "==== publish-bench: fill_percent=$fill_pct ===="
-    # python3 for the multiplication so the arithmetic survives at
-    # PUBLISH_TRUE_LOG_CAP=32 (= ~4.3B, fits in u64 but easy to mis-
-    # shift in bash).
-    local per_shard
-    per_shard="$(python3 -c "print((${total_capacity} * ${fill_pct}) // 100 // ${N_SHARDS})")"
-    log "[$fill_pct%] per-shard prefill_count = $per_shard"
+  # One process now walks every fill percent — the bench binary
+  # issues a ReconfigurePrefill RPC to each shard before each stage,
+  # so the cluster never needs to kill and restart shards between
+  # fills. Mirrors the local-mode publish-bench output: a single
+  # JSON file with one record per fill_percent under "stages".
+  # Prereq: shards already started (`bench-cluster.sh start-shards`).
 
-    # Stage 1: restart shards with the right prefill count.
-    log "[$fill_pct%] restarting all shards with prefill_count=$per_shard"
-    remote "$(db_name)" \
-      "redis-cli -h 127.0.0.1 -p $REDIS_PORT FLUSHALL >/dev/null && \
-       redis-cli -h 127.0.0.1 -p $REDIS_PORT PING >/dev/null"
-    local -a restart_pids=()
-    for ((i = 0; i < N_SHARDS; i++)); do
-      local name; name="$(shard_name "$i")"
-      (
-        restart_shard "$name" "$i" "$per_shard" "$db_ip"
-      ) &
-      restart_pids+=("$!")
-    done
-    local failed=0
-    for pid in "${restart_pids[@]}"; do
-      wait "$pid" || failed=$((failed + 1))
-    done
-    if (( failed > 0 )); then
-      die "$failed shard restart(s) failed at fill_pct=$fill_pct"
-    fi
+  # Wipe the coordinator's RocksDB before publish-bench so we start
+  # from a clean open-addressing keyspace. (cmd_start_shards also
+  # wipes; this is a defensive second wipe in case publish-bench is
+  # invoked directly without start-shards before it.)
+  log "[$cname] wiping $COORD_DB_PATH"
+  remote "$cname" "sudo rm -rf $COORD_DB_PATH && sudo mkdir -p $COORD_DB_PATH && sudo chown \$(whoami) $COORD_DB_PATH"
 
-    # Stage 2: bootstrap. SRS cache should hit (assuming this isn't
-    # the very first run), making this near-instant.
-    log "[$fill_pct%] running bootstrap (cache hit expected)"
-    remote "$cname" \
-      "$REMOTE_BIN_DIR/aegon_srs_bootstrap \
-         --shard-log-capacity $SHARD_LOG_CAPACITY \
-         --kzh-k $KZH_K \
-         --setup-seed $SETUP_SEED \
-         --shard-endpoints $srs_csv" \
-      stream
+  local remote_out="/tmp/aegon-publish-bench.json"
+  local local_out="$LOCAL_PUBLISH_BENCH_DIR/${LOCAL_OUT_NAME_PREFIX:-}publish.json"
+  # PUBLISH_WARMUP_BATCH_SIZE controls how big the inter-stage
+  # warmup publishes are. Pick a value at or above the high end of
+  # PUBLISH_BATCH_SIZES so warmup time scales sensibly with
+  # cluster size (e.g. 2048 for medium, 131072 for large).
+  local warmup_batch="${PUBLISH_WARMUP_BATCH_SIZE:-16384}"
+  log "[$cname] running aegon_publish_bench (distributed, fills=$PUBLISH_FILL_PERCENTS, warmup_batch=$warmup_batch)"
+  # RocksDB at scale opens one fd per SST file (plus WAL + manifest).
+  # 30% medium accumulates 3000+ SSTs over the warmup — default 1024
+  # ulimit blows up with "Too many open files". `sudo prlimit` bumps
+  # both soft + hard for the running shell so the bench binary
+  # inherits the higher limit.
+  remote "$cname" \
+    "sudo prlimit --pid \$\$ --nofile=1048576:1048576 && \
+     mkdir -p \$HOME/aegon-run && cd \$HOME/aegon-run && \
+     $REMOTE_BIN_DIR/aegon_publish_bench \
+       --shard-log-capacity $SHARD_LOG_CAPACITY \
+       --true-log-capacity $PUBLISH_TRUE_LOG_CAP \
+       --kzh-k $KZH_K \
+       --n-shards $N_SHARDS \
+       --endpoints $shard_csv \
+       --fill-percents $PUBLISH_FILL_PERCENTS \
+       --batch-sizes $PUBLISH_BATCH_SIZES \
+       --warmup-batch-size $warmup_batch \
+       --samples-per-batch $PUBLISH_SAMPLES_PER_BATCH \
+       --setup-seed $SETUP_SEED \
+       --prefill-seed $PREFILL_SEED \
+       --db-path $COORD_DB_PATH \
+       --private \
+       --out $remote_out" \
+    stream
 
-    # Stage 3: run the bench in distributed mode.
-    local remote_out="/tmp/aegon-publish-bench-${fill_pct}.json"
-    log "[$fill_pct%] running aegon_publish_bench (distributed)"
-    remote "$cname" \
-      "mkdir -p \$HOME/aegon-run && cd \$HOME/aegon-run && \
-       $REMOTE_BIN_DIR/aegon_publish_bench \
-         --shard-log-capacity $SHARD_LOG_CAPACITY \
-         --true-log-capacity $PUBLISH_TRUE_LOG_CAP \
-         --kzh-k $KZH_K \
-         --n-shards $N_SHARDS \
-         --endpoints $shard_csv \
-         --fill-percents $fill_pct \
-         --batch-sizes $PUBLISH_BATCH_SIZES \
-         --samples-per-batch $PUBLISH_SAMPLES_PER_BATCH \
-         --setup-seed $SETUP_SEED \
-         --prefill-seed $PREFILL_SEED \
-         --db-url redis://$db_ip:$REDIS_PORT \
-         --out $remote_out" \
-      stream
-
-    local local_out="$LOCAL_PUBLISH_BENCH_DIR/${LOCAL_OUT_NAME_PREFIX:-}publish-${fill_pct}pct.json"
-    log "[$fill_pct%] retrieving $remote_out -> $local_out"
-    scp_from "$cname" "$remote_out" "$local_out"
-    log "[$fill_pct%] done"
-  done
-  log "publish-bench complete. JSONs in $LOCAL_PUBLISH_BENCH_DIR/"
+  log "retrieving $remote_out -> $local_out"
+  scp_from "$cname" "$remote_out" "$local_out"
+  log "publish-bench complete: $local_out"
 }
 
 cmd_bench() {
@@ -995,12 +1171,12 @@ cmd_bench() {
 
   local cname; cname="$(coord_name)"
   local csv; csv="$(shard_endpoints_csv)"
-  local db_ip; db_ip="$(db_internal_ip)"
   log "endpoints (first 2 shown): $(echo "$csv" | cut -d, -f1-2),..."
-  log "db: redis://$db_ip:$REDIS_PORT"
+  log "db: $COORD_DB_PATH (RocksDB on coord)"
   log "[$cname] running aegon_coordinator_bench"
   remote "$cname" \
-    "mkdir -p \$HOME/aegon-run \$HOME/artifacts/srs && \
+    "sudo prlimit --pid \$\$ --nofile=1048576:1048576 && \
+     mkdir -p \$HOME/aegon-run \$HOME/artifacts/srs && \
      cd \$HOME/aegon-run && \
      $REMOTE_BIN_DIR/aegon_coordinator_bench \
        --shard-log-capacity $SHARD_LOG_CAPACITY \
@@ -1009,7 +1185,7 @@ cmd_bench() {
        --endpoints $csv \
        --batch-sizes $BATCH_SIZES \
        --samples-per-batch $SAMPLES_PER_BATCH \
-       --db-url redis://$db_ip:$REDIS_PORT \
+       --db-path $COORD_DB_PATH \
        --output $REMOTE_BENCH_OUT" \
     stream
   log "retrieving $REMOTE_BENCH_OUT -> $LOCAL_BENCH_OUT"
@@ -1039,13 +1215,21 @@ LOOKUP_FILL_PERCENTS="${LOOKUP_FILL_PERCENTS:-${PUBLISH_FILL_PERCENTS}}"
 LOOKUP_PUBLISH_BATCH_SIZES="${LOOKUP_PUBLISH_BATCH_SIZES:-${PUBLISH_BATCH_SIZES}}"
 LOOKUP_PUBLISH_SAMPLES_PER_BATCH="${LOOKUP_PUBLISH_SAMPLES_PER_BATCH:-${PUBLISH_SAMPLES_PER_BATCH}}"
 LOOKUP_TRUE_LOG_CAP="${LOOKUP_TRUE_LOG_CAP:-${PUBLISH_TRUE_LOG_CAP}}"
-LOOKUP_PUBLISH_BATCH_SIZE="${LOOKUP_PUBLISH_BATCH_SIZE:-1024}"
+# Climb batch size for inter-fill real publishes. Matches the
+# publish-bench warmup batch so the climb finishes in a sensible
+# time at large fill levels (1024 was a small-bench default that
+# would balloon medium's 20M-entry warmup to ~19k epochs).
+LOOKUP_PUBLISH_BATCH_SIZE="${LOOKUP_PUBLISH_BATCH_SIZE:-${PUBLISH_WARMUP_BATCH_SIZE:-16384}}"
 LOOKUP_AUDIT_SAMPLES="${LOOKUP_AUDIT_SAMPLES:-5}"
 LOCAL_LOOKUP_BENCH_DIR="${LOCAL_LOOKUP_BENCH_DIR:-/tmp/aegon-lookup-bench}"
 cmd_lookup_bench() {
   require_project
   require_power_of_two "$N_SHARDS"
   mkdir -p "$LOCAL_LOOKUP_BENCH_DIR"
+  dump_bench_config
+  log "  LOOKUP_FILL_PERCENTS   = $LOOKUP_FILL_PERCENTS"
+  log "  LOOKUP_TRUE_LOG_CAP    = $LOOKUP_TRUE_LOG_CAP"
+  log "  LOOKUP_PRELOAD_COUNT   = $LOOKUP_PRELOAD_COUNT"
 
   # Need the binary on the coord. The default deploy step doesn't push
   # it, so do that here (idempotent — same as cmd_deploy's coord push
@@ -1077,86 +1261,155 @@ cmd_lookup_bench() {
 
   local cname; cname="$(coord_name)"
   local shard_csv; shard_csv="$(shard_endpoints_csv)"
-  local srs_csv; srs_csv="$(srs_endpoints_csv)"
-  local db_ip; db_ip="$(db_internal_ip)"
   log "[$cname] uploading aegon_lookup_bench"
   scp_to "$cname" "$remote_bin_dir/aegon_lookup_bench"
   remote "$cname" "sudo mkdir -p $REMOTE_BIN_DIR && \
     sudo mv /tmp/aegon_lookup_bench $REMOTE_BIN_DIR/ && \
     sudo chmod +x $REMOTE_BIN_DIR/aegon_lookup_bench"
 
-  local total_capacity=$((1 << LOOKUP_TRUE_LOG_CAP))
-  IFS=',' read -ra fill_pcts <<< "$LOOKUP_FILL_PERCENTS"
-  for fill_pct in "${fill_pcts[@]}"; do
-    log "==== lookup-bench: fill_percent=$fill_pct ===="
-    local per_shard
-    per_shard="$(python3 -c "print((${total_capacity} * ${fill_pct}) // 100 // ${N_SHARDS})")"
-    log "[$fill_pct%] per-shard prefill_count = $per_shard"
+  # Single combined invocation: aegon_lookup_bench walks --fill-percents
+  # internally, climbing INCREMENTALLY between them via real publish
+  # (no prefill_random shortcut). At each fill level the binary runs
+  # lookups + audit + publish-batch-sweep in order, then advances to the
+  # next fill — so the warmup work is paid exactly once per fill level
+  # across the entire run (the publish-bench's work is folded in, not
+  # duplicated). Prereq: shards already started + at epoch 0
+  # (`bench-cluster.sh start-shards`).
 
-    # Stage 1: restart shards with the right prefill count. Reuses
-    # cmd_publish_bench's parallel-restart pattern.
-    log "[$fill_pct%] restarting all shards with prefill_count=$per_shard"
-    remote "$(db_name)" \
-      "redis-cli -h 127.0.0.1 -p $REDIS_PORT FLUSHALL >/dev/null && \
-       redis-cli -h 127.0.0.1 -p $REDIS_PORT PING >/dev/null"
-    local -a restart_pids=()
-    for ((i = 0; i < N_SHARDS; i++)); do
-      local name; name="$(shard_name "$i")"
-      (
-        restart_shard "$name" "$i" "$per_shard" "$db_ip"
-      ) &
-      restart_pids+=("$!")
-    done
-    local failed=0
-    for pid in "${restart_pids[@]}"; do
-      wait "$pid" || failed=$((failed + 1))
-    done
-    if (( failed > 0 )); then
-      die "$failed shard restart(s) failed at fill_pct=$fill_pct"
+  log "[$cname] wiping $COORD_DB_PATH (single wipe; no inter-fill resets)"
+  remote "$cname" "sudo rm -rf $COORD_DB_PATH && sudo mkdir -p $COORD_DB_PATH && sudo chown \$(whoami) $COORD_DB_PATH"
+
+  # Launch the bench inside a systemd transient unit so it SURVIVES
+  # SSH disconnects. Earlier runs lost ~7h of climb work when the
+  # local host suspended and the long-lived `gcloud ssh ... stream`
+  # session broke, killing the bench process (which was a child of
+  # that SSH command). With systemd-run --collect, the bench is
+  # reparented to systemd, so SSH death doesn't reach it.
+  local remote_out="/tmp/aegon-lookup-bench.json"
+  local remote_log="/tmp/aegon-lookup-bench.log"
+  local unit="aegon-lookup-bench"
+  local me; me="$(whoami)"
+  log "[$cname] starting aegon_lookup_bench as systemd unit '$unit'"
+  remote "$cname" "
+    sudo systemctl reset-failed $unit 2>/dev/null || true
+    sudo systemctl stop $unit 2>/dev/null || true
+    rm -f $remote_log $remote_out
+    # Pre-create the working directory *before* systemd-run — systemd
+    # chdir's there before spawning bash, so the inner 'mkdir -p' would
+    # run too late and the unit would fail with status=200/CHDIR.
+    mkdir -p /home/$me/aegon-run
+    sudo systemd-run \
+      --unit=$unit \
+      --description='Aegon lookup-bench' \
+      --uid=$me --gid=$me \
+      --working-directory=/home/$me/aegon-run \
+      --setenv=HOME=/home/$me \
+      --property=LimitNOFILE=1048576 \
+      bash -c '
+        cd /home/$me/aegon-run
+        $REMOTE_BIN_DIR/aegon_lookup_bench \
+          --shard-log-capacity $SHARD_LOG_CAPACITY \
+          --true-log-capacity $LOOKUP_TRUE_LOG_CAP \
+          --kzh-k $KZH_K \
+          --n-shards $N_SHARDS \
+          --setup-seed $SETUP_SEED \
+          --endpoints $shard_csv \
+          --db-path $COORD_DB_PATH \
+          --fill-percents $LOOKUP_FILL_PERCENTS \
+          --prefill-seed $PREFILL_SEED \
+          --samples-per-level $LOOKUP_SAMPLES_PER_LEVEL \
+          --publish-batch-size $LOOKUP_PUBLISH_BATCH_SIZE \
+          --publish-batch-sizes $LOOKUP_PUBLISH_BATCH_SIZES \
+          --publish-samples-per-batch $LOOKUP_PUBLISH_SAMPLES_PER_BATCH \
+          --audit-samples $LOOKUP_AUDIT_SAMPLES \
+          --private \
+          --output $remote_out > $remote_log 2>&1
+      '
+    echo LAUNCHED
+  "
+
+  # Poll-loop on the LOCAL side. Each iteration is a short, recoverable
+  # ssh command (not a long-lived stream that can break). When the
+  # systemd unit deactivates (success or failure), we exit the loop.
+  local local_out="$LOCAL_LOOKUP_BENCH_DIR/${LOCAL_OUT_NAME_PREFIX:-}combined.json"
+  local local_log="$LOCAL_LOOKUP_BENCH_DIR/${LOCAL_OUT_NAME_PREFIX:-}lookup-bench.log"
+  mkdir -p "$LOCAL_LOOKUP_BENCH_DIR"
+  : > "$local_log"   # truncate
+  log "[$cname] polling $unit + streaming $remote_log -> $local_log (resilient to SSH death)"
+  local printed_bytes=0
+  local poll_rc=0
+  while true; do
+    # Pull new log bytes since last fetched offset. Use byte-offset
+    # rather than line count so each poll is O(diff) not O(whole log).
+    local total_bytes
+    total_bytes="$(timeout 60 gcloud compute ssh "$cname" \
+      --zone="$ZONE" --tunnel-through-iap --quiet \
+      --command="wc -c < $remote_log 2>/dev/null || echo 0" 2>/dev/null \
+      | tr -d '[:space:]')"
+    total_bytes="${total_bytes:-0}"
+    if [[ "$total_bytes" =~ ^[0-9]+$ ]] && (( total_bytes > printed_bytes )); then
+      timeout 60 gcloud compute ssh "$cname" \
+        --zone="$ZONE" --tunnel-through-iap --quiet \
+        --command="tail -c +$((printed_bytes + 1)) $remote_log 2>/dev/null" 2>/dev/null \
+        | tee -a "$local_log" >&2
+      printed_bytes=$total_bytes
     fi
 
-    # Stage 2: bootstrap. SRS cache should hit on re-runs.
-    log "[$fill_pct%] running bootstrap (cache hit expected)"
-    remote "$cname" \
-      "$REMOTE_BIN_DIR/aegon_srs_bootstrap \
-         --shard-log-capacity $SHARD_LOG_CAPACITY \
-         --kzh-k $KZH_K \
-         --setup-seed $SETUP_SEED \
-         --shard-endpoints $srs_csv" \
-      stream
-
-    # Stage 3: run the lookup bench. --preload-counts is the
-    # sampleable-namespace size *added on top* of the anonymous
-    # per-shard prefill the cluster already has; --publish-batch-
-    # sizes runs the per-stage publish bench using a disjoint
-    # namespace.
-    local remote_out="/tmp/aegon-lookup-bench-${fill_pct}.json"
-    log "[$fill_pct%] running aegon_lookup_bench (preload=$LOOKUP_PRELOAD_COUNT, samples=$LOOKUP_SAMPLES_PER_LEVEL)"
-    remote "$cname" \
-      "mkdir -p \$HOME/aegon-run && \
-       cd \$HOME/aegon-run && \
-       $REMOTE_BIN_DIR/aegon_lookup_bench \
-         --shard-log-capacity $SHARD_LOG_CAPACITY \
-         --kzh-k $KZH_K \
-         --n-shards $N_SHARDS \
-         --setup-seed $SETUP_SEED \
-         --endpoints $shard_csv \
-         --db-url redis://$db_ip:$REDIS_PORT \
-         --preload-counts $LOOKUP_PRELOAD_COUNT \
-         --samples-per-level $LOOKUP_SAMPLES_PER_LEVEL \
-         --publish-batch-size $LOOKUP_PUBLISH_BATCH_SIZE \
-         --publish-batch-sizes $LOOKUP_PUBLISH_BATCH_SIZES \
-         --publish-samples-per-batch $LOOKUP_PUBLISH_SAMPLES_PER_BATCH \
-         --audit-samples $LOOKUP_AUDIT_SAMPLES \
-         --output $remote_out" \
-      stream
-
-    local local_out="$LOCAL_LOOKUP_BENCH_DIR/${LOCAL_OUT_NAME_PREFIX:-}lookup-${fill_pct}pct.json"
-    log "[$fill_pct%] retrieving $remote_out -> $local_out"
-    scp_from "$cname" "$remote_out" "$local_out"
-    log "[$fill_pct%] done"
+    # Check unit status. is-active prints active|inactive|failed.
+    local active
+    active="$(timeout 60 gcloud compute ssh "$cname" \
+      --zone="$ZONE" --tunnel-through-iap --quiet \
+      --command="systemctl is-active $unit 2>/dev/null || true" 2>/dev/null \
+      | tr -d '[:space:]')"
+    if [[ "$active" != "active" && "$active" != "activating" ]]; then
+      log "[$cname] $unit final state: '$active' (started=$total_bytes bytes printed)"
+      # Capture the unit's exit code.
+      local exit_code
+      exit_code="$(timeout 60 gcloud compute ssh "$cname" \
+        --zone="$ZONE" --tunnel-through-iap --quiet \
+        --command="systemctl show $unit --property=ExecMainStatus --value 2>/dev/null || echo 0" 2>/dev/null \
+        | tr -d '[:space:]')"
+      poll_rc="${exit_code:-1}"
+      break
+    fi
+    sleep 60
   done
-  log "lookup-bench complete. JSONs in $LOCAL_LOOKUP_BENCH_DIR/"
+
+  # Flush any final bytes the last poll missed.
+  local total_bytes_final
+  total_bytes_final="$(timeout 60 gcloud compute ssh "$cname" \
+    --zone="$ZONE" --tunnel-through-iap --quiet \
+    --command="wc -c < $remote_log 2>/dev/null || echo 0" 2>/dev/null \
+    | tr -d '[:space:]')"
+  total_bytes_final="${total_bytes_final:-0}"
+  if [[ "$total_bytes_final" =~ ^[0-9]+$ ]] && (( total_bytes_final > printed_bytes )); then
+    timeout 60 gcloud compute ssh "$cname" \
+      --zone="$ZONE" --tunnel-through-iap --quiet \
+      --command="tail -c +$((printed_bytes + 1)) $remote_log 2>/dev/null" 2>/dev/null \
+      | tee -a "$local_log" >&2
+  fi
+
+  # Always try to fetch the JSON — even on failure, the bench may have
+  # flushed partial data (one entry per completed fill level). Losing
+  # that data because we returned early on non-zero exit was the v2
+  # failure mode: we got level 1+2 worth of flushed JSON but the
+  # script bailed before scp_from, then teardown wiped the coord.
+  #
+  # The fetch can itself fail (coord dead, file missing), so swallow
+  # its error and surface the original bench rc instead.
+  log "retrieving $remote_out -> $local_out (regardless of exit status)"
+  if scp_from "$cname" "$remote_out" "$local_out" 2>&1; then
+    log "lookup-bench JSON fetched: $local_out"
+  else
+    log "WARN: failed to fetch $remote_out (coord may be down or file missing)"
+  fi
+
+  if [[ "$poll_rc" != "0" ]]; then
+    log "[$cname] lookup-bench unit exited non-zero (status=$poll_rc); see $local_log"
+    return "$poll_rc"
+  fi
+
+  log "lookup-bench complete: $local_out"
 }
 
 cmd_logs() {
@@ -1247,15 +1500,12 @@ cmd_watchdog() {
   # We pass the longer match prefix that both bench bins share.
   ( probe_one "$cname" "aegon_coordinat" > "$tmpdir/coord" ; echo $? > "$tmpdir/coord.rc" ) &
   pids+=("$!")
-  local dname; dname="$(db_name)"
-  ( probe_one "$dname" "redis-server"   > "$tmpdir/db"    ; echo $? > "$tmpdir/db.rc"    ) &
-  pids+=("$!")
 
   for pid in "${pids[@]}"; do
     wait "$pid" 2>/dev/null || true
   done
 
-  # Replay outputs in deterministic order (shard-0 .. shard-N, coord, db)
+  # Replay outputs in deterministic order (shard-0 .. shard-N, coord)
   # and tally failures.
   local failed=0
   for ((i = 0; i < N_SHARDS; i++)); do
@@ -1266,16 +1516,13 @@ cmd_watchdog() {
   cat "$tmpdir/coord"
   local rc; rc="$(cat "$tmpdir/coord.rc" 2>/dev/null || echo 1)"
   (( rc != 0 )) && failed=$((failed+1))
-  cat "$tmpdir/db"
-  rc="$(cat "$tmpdir/db.rc" 2>/dev/null || echo 1)"
-  (( rc != 0 )) && failed=$((failed+1))
   rm -rf "$tmpdir"
 
   if (( failed > 0 )); then
     log "watchdog: $failed host(s) BAD"
     return 1
   fi
-  log "watchdog: all $((N_SHARDS + 2)) hosts OK"
+  log "watchdog: all $((N_SHARDS + 1)) hosts OK"
   return 0
 }
 
@@ -1283,25 +1530,24 @@ cmd_down() {
   require_project
   log "tearing down bench cluster"
 
-  for ((i = 0; i < N_SHARDS; i++)); do
-    local name; name="$(shard_name "$i")"
-    if gcloud compute instances describe "$name" --zone="$ZONE" >/dev/null 2>&1; then
-      log "deleting $name"
-      gcloud compute instances delete "$name" --zone="$ZONE" --quiet >/dev/null
-    fi
-  done
-  local cname; cname="$(coord_name)"
-  if gcloud compute instances describe "$cname" --zone="$ZONE" >/dev/null 2>&1; then
-    log "deleting $cname"
-    gcloud compute instances delete "$cname" --zone="$ZONE" --quiet >/dev/null
-  fi
-  local dname; dname="$(db_name)"
-  if gcloud compute instances describe "$dname" --zone="$ZONE" >/dev/null 2>&1; then
-    log "deleting $dname"
-    gcloud compute instances delete "$dname" --zone="$ZONE" --quiet >/dev/null
+  # Collect all aegon-bench-* instances in one shot and delete them
+  # in a single gcloud invocation (which deletes them in parallel
+  # server-side). Serial per-VM delete via `gcloud delete` runs ~1
+  # VM/minute and turns a 128-shard teardown into a 2-hour job.
+  local insts
+  insts="$(gcloud compute instances list \
+    --filter="name~^aegon-bench-" \
+    --zones="$ZONE" \
+    --format='value(name)' 2>/dev/null | tr '\n' ' ')"
+  if [[ -n "$insts" ]]; then
+    log "deleting $(echo "$insts" | wc -w) instance(s) in parallel"
+    gcloud compute instances delete $insts --zone="$ZONE" --quiet >/dev/null || \
+      log "WARN: some instance deletions failed; check console"
+  else
+    log "no aegon-bench-* instances to delete"
   fi
 
-  for fw in "$FIREWALL_GRPC" "$FIREWALL_SRS" "$FIREWALL_REDIS" "$FIREWALL_SSH"; do
+  for fw in "$FIREWALL_GRPC" "$FIREWALL_SRS" "$FIREWALL_SSH" "aegon-bench-masking"; do
     if gcloud compute firewall-rules describe "$fw" >/dev/null 2>&1; then
       log "deleting firewall $fw"
       gcloud compute firewall-rules delete "$fw" --quiet >/dev/null
@@ -1354,11 +1600,10 @@ usage: $0 <subcommand>
                    under LOCAL_PUBLISH_BENCH_DIR (default
                    /tmp/aegon-publish-bench). Bootstrap between
                    stages should hit cache and be near-instant.
-  restart-shards   Restart all shards with a fresh --prefill-count using
-                   already-uploaded binaries + on-disk SRS cache + FLUSHALL.
-                   Cheap per-call (~30 s) — use in (prefill,batch) sweeps.
-                   Cache hit makes the bootstrap step a no-op too, so
-                   follow with `bootstrap` then `bench`.
+  start-shards     Start all shards once with --prefill-count 0 (per-fill
+                   prefill is now driven via the ReconfigurePrefill RPC
+                   issued by the bench binaries themselves). Run once
+                   after setup-bench; bench binaries handle the rest.
   bench            Run aegon_coordinator_bench on the coordinator, fetch JSON
   lookup-bench     Large-regime combined lookup + publish bench.
                    Walks LOOKUP_FILL_PERCENTS (default mirrors
@@ -1408,7 +1653,8 @@ main() {
     bootstrap)      cmd_bootstrap ;;
     setup-bench)    cmd_setup_bench ;;
     publish-bench)  cmd_publish_bench ;;
-    restart-shards) cmd_restart_shards ;;
+    start-shards)   cmd_start_shards ;;
+    start-masking)  cmd_start_masking ;;
     bench)          cmd_bench ;;
     lookup-bench)   cmd_lookup_bench ;;
     watchdog)       cmd_watchdog ;;

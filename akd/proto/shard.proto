@@ -53,7 +53,35 @@ service ShardService {
   // Initial commitment — used by the coordinator at setup time to
   // build the epoch-0 Merkle root.
   rpc CurrentCommitment(Empty) returns (CommitmentResponse);
+
+  // Verifier parameters + log_capacity. Used by the coordinator at
+  // setup time so it doesn't have to regenerate the (very expensive)
+  // SRS just to derive its small verifier-side projection. The
+  // returned `verifier_param` is ~tens of KB regardless of dictionary
+  // size; the SRS that produced it is multi-GB.
+  rpc GetVerifierContext(Empty) returns (GetVerifierContextResponse);
+
+  // Reset this shard back to a fresh epoch-0 state (wiping any
+  // accumulated polynomials / publishes) and pre-populate it with
+  // `count` random `(slot, h_label, h_value)` entries seeded by
+  // `seed`. Replaces the historical "kill the shard process and
+  // restart with a different --prefill-count" cycle the cluster
+  // benches used to do between fill_percent stages.
+  rpc ReconfigurePrefill(ReconfigurePrefillRequest)
+      returns (ReconfigurePrefillResponse);
 }
+
+message ReconfigurePrefillRequest {
+  // Number of (slot, h_label, h_value) random entries to insert
+  // after the state reset. Zero means "just reset; don't prefill".
+  uint64 count = 1;
+  // RNG seed used to derive the slots and field elements. The
+  // cluster driver picks `prefill_seed_base + shard_id` so each
+  // shard ends up with a deterministic, disjoint random fill.
+  uint64 seed = 2;
+}
+
+message ReconfigurePrefillResponse {}
 
 message RemaskValueHistoryEntryRequest {
   // Canonical-serialized StoredValueHistoryEntry<E, P> (uncompressed).
@@ -117,6 +145,14 @@ message OpenResponse {
 
 message CommitmentResponse {
   bytes epoch_commitment = 1;
+}
+
+message GetVerifierContextResponse {
+  // Canonical-serialized P::VerifierParam (uncompressed). The
+  // coordinator reconstructs VerifierContext locally by pairing
+  // this with `log_capacity` below.
+  bytes verifier_param = 1;
+  uint64 log_capacity = 2;
 }
 
 message Empty {}

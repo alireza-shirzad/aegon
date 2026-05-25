@@ -30,7 +30,14 @@ pub trait PolynomialCommitmentScheme<E: Pairing> {
         + Default
         + Send
         + Sync;
-    type Proof: Clone + CanonicalSerialize + CanonicalDeserialize + Debug + PartialEq + Eq;
+    type Proof: Clone
+        + CanonicalSerialize
+        + CanonicalDeserialize
+        + Debug
+        + PartialEq
+        + Eq
+        + Send
+        + Sync;
     type BatchProof: CanonicalSerialize + CanonicalDeserialize + Clone + Debug + Eq;
     type State: Clone
         + CanonicalSerialize
@@ -119,6 +126,20 @@ pub trait PolynomialCommitmentScheme<E: Pairing> {
     /// specific Boolean point can compute the matching storage index
     /// without duplicating the PCS's own splitting formula.
     fn block_dims(_prover_param: &Self::ProverParam, num_vars: usize) -> Vec<usize> {
+        vec![num_vars]
+    }
+
+    /// Verifier-side analogue of [`Self::block_dims`]. The PCS
+    /// dimensions are public and can be recovered from either the
+    /// prover or verifier projection of the SRS, so this exists for
+    /// code paths that hold only the verifier_param (e.g. coordinator
+    /// setup in remote-shard mode, which fetches verifier_param from
+    /// a shard and never materializes prover_param).
+    fn block_dims_from_verifier_param(
+        _verifier_param: &Self::VerifierParam,
+        num_vars: usize,
+    ) -> Vec<usize> {
+        // Match the default `block_dims` shape — a single block.
         vec![num_vars]
     }
 

@@ -534,6 +534,10 @@ impl<E: Pairing> KZHKState<E> {
             },
         }
         // d_bool: combine each level's AuxRow with the sparse-walk FMA.
+        // Levels are sequential here because the inner `AuxRow::iadd_scaled`
+        // already saturates rayon's worker pool with its per-cell par_iter
+        // — adding outer parallelism over the k-1 levels measured as a
+        // no-op (985ms vs 990ms at log_cap=22, k=7, batch=16384).
         match (self.d_bool.as_mut(), other.d_bool.as_ref()) {
             (Some(self_rows), Some(other_rows)) => {
                 assert_eq!(

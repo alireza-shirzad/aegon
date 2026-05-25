@@ -118,6 +118,127 @@ fn srs_path_round_trip() {
 }
 
 #[test]
+fn private_mode_publish_lookup_round_trip() {
+    // Same minimal happy-path as `srs_path_round_trip`, but with
+    // `private(true)` — exercises:
+    //   * hiding SRS generation
+    //   * value-side commits with `tau*h` blinding
+    //   * publish_phase_2 storing plain non-ZK openings (per the
+    //     "publish-time openings are all non-zk" design)
+    //   * lookup-time masking via `open_value_side_at_point` ->
+    //     inline `generate_masking_package` (no external masking
+    //     server configured)
+    //   * `verify_zk` accepting the resulting hiding openings against
+    //     the `tau*h`-blinded commitments
+    use akd::aegon::verify_sharded_lookup;
+    let log_capacity = 6usize;
+    let log_n_shards = 1usize;
+
+    let cfg = ShardedAegonConfig::<Bn254, Pcs>::builder()
+        .shard_log_capacity(log_capacity - log_n_shards)
+        .log_n_shards(log_n_shards)
+        .private(true)
+        .kzh_k(2)
+        .build()
+        .expect("private=true config builds");
+    let mut rng = ChaCha20Rng::seed_from_u64(0xA56_5);
+    let mut server = Sharded::setup(&mut rng, &cfg).expect("setup with hiding SRS");
+
+    // Publish twice so the test hits both new-placement and value-only
+    // update paths in publish_phase_2 (different opening loops in the
+    // refactor — both must produce verifiable proofs).
+    let updates_v1 = vec![
+        (b"alice".to_vec(), b"alice-v1".to_vec()),
+        (b"bob".to_vec(), b"bob-v1".to_vec()),
+    ];
+    let commit_v1 = server.publish(&updates_v1).expect("publish v1 (private)");
+    let updates_v2 = vec![(b"alice".to_vec(), b"alice-v2".to_vec())];
+    let commit_v2 = server.publish(&updates_v2).expect("publish v2 (private)");
+
+    let ctx = server.sharded_verifier_context();
+    // alice gets the updated value; bob is unchanged. Both must
+    // produce hiding openings that verify against the hiding
+    // commitments at the current sharded epoch.
+    for (label, expected_value) in [
+        (b"alice".to_vec(), b"alice-v2".to_vec()),
+        (b"bob".to_vec(), b"bob-v1".to_vec()),
+    ] {
+        let (_db_value, proof) = server.lookup(&label).expect("private lookup");
+        let ok = verify_sharded_lookup::<Bn254, Pcs, Sha256Hash>(
+            &ctx, &commit_v2, &label, &expected_value, &proof,
+        )
+        .expect("verify_sharded_lookup under private=true");
+        assert!(
+            ok,
+            "private-mode lookup must verify for {label:?}",
+        );
+    }
+    let _ = commit_v1;
+}
+
+#[test]
+fn private_mode_lookup_history_round_trip() {
+    // Heavier round-trip under private=true with RocksDB: publish
+    // twice, fetch lookup_history (which produces per-epoch §6.4
+    // history bundles with masked openings), and run
+    // verify_lookup_history. This exercises every value-side opening
+    // path in private mode — lookup_history hits both pre and post
+    // rand_value openings PLUS the freshness attestation. If any one
+    // of them produces a malformed hiding proof, the verifier rejects.
+    use akd::aegon::{verify_lookup_history, DbSource};
+    let tmp_root = std::env::temp_dir();
+    let nonce: u64 = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0xDEADBEEF);
+    let db_path = tmp_root.join(format!(
+        "aegon-rocks-private-{}-{nonce}",
+        std::process::id()
+    ));
+    if db_path.exists() {
+        std::fs::remove_dir_all(&db_path).ok();
+    }
+
+    let cfg = ShardedAegonConfig::<Bn254, Pcs>::builder()
+        .shard_log_capacity(8 - 1)
+        .log_n_shards(1)
+        .private(true)
+        .kzh_k(2)
+        .db(DbSource::Rocks(db_path.clone()))
+        .build()
+        .expect("private=true rocks config builds");
+    let mut rng = ChaCha20Rng::seed_from_u64(0xA56_5);
+    let mut server = Sharded::setup(&mut rng, &cfg).expect("setup with hiding SRS");
+
+    let updates_v1 = vec![
+        (b"alice".to_vec(), b"alice-v1".to_vec()),
+        (b"bob".to_vec(), b"bob-v1".to_vec()),
+    ];
+    server.publish(&updates_v1).expect("publish v1");
+    let updates_v2 = vec![(b"alice".to_vec(), b"alice-v2".to_vec())];
+    server.publish(&updates_v2).expect("publish v2");
+
+    let ctx = server.sharded_verifier_context();
+    let alice_hist = server
+        .lookup_history(&b"alice".to_vec())
+        .expect("alice history (private)");
+    assert_eq!(alice_hist.entries.len(), 2);
+
+    let verified = verify_lookup_history::<Bn254, Pcs, Sha256Hash>(&ctx, &alice_hist)
+        .expect("verify alice history under private=true");
+    assert_eq!(verified.entry_roots.len(), 2);
+    let current_root = server.current_commitment().merkle_root;
+    let live_root = verified.live_root.expect("freshness anchor present");
+    assert_eq!(
+        live_root, current_root,
+        "private-mode freshness anchors under current root"
+    );
+
+    drop(server);
+    let _ = std::fs::remove_dir_all(&db_path);
+}
+
+#[test]
 fn optimal_kzh_k_matches_published_table() {
     use akd::aegon::optimal_kzh_k;
     // Exact values from the empirical f(k) = k(k-1)·2^(N/k) table.

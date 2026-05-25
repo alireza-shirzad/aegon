@@ -21,6 +21,7 @@ pub mod distributed_srs;
 pub mod error;
 pub(crate) mod fs;
 pub mod hash;
+pub mod instrument;
 pub mod masking;
 pub mod presets;
 pub mod server;

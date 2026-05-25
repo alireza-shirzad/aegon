@@ -100,6 +100,10 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+#[cfg(feature = "mimalloc_alloc")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use akd::aegon::coordinator_grpc::{
     proto::{
         coordinator_service_client::CoordinatorServiceClient, Empty, LookupHistoryRequest,
@@ -345,13 +349,6 @@ fn main() -> ExitCode {
         );
         return ExitCode::from(2);
     }
-    if !local_mode && args.initial_prefill_count > 0 {
-        eprintln!(
-            "error: --initial-prefill-count is local-mode only (in-process shards). \
-             For remote shards, prefill via `aegon_shard_server --prefill-count`."
-        );
-        return ExitCode::from(2);
-    }
     if args.srs_path.is_none() && args.setup_seed.is_none() {
         eprintln!("error: provide either --srs-path or --setup-seed");
         return ExitCode::from(2);
@@ -476,11 +473,12 @@ fn main() -> ExitCode {
     let setup_ms = t_setup.elapsed().as_secs_f64() * 1000.0;
     eprintln!("bench: setup OK in {setup_ms:.1} ms");
 
-    // Initial bulk-prefill (local mode only). Anonymous filler that
-    // pads the dict to a realistic fill level without going through
-    // publish — keeps the lookup-bench's preload climb cheap even at
-    // medium/planetary scale. Must be done before any publish call:
-    // `prefill_random` errors at epoch != 0.
+    // Initial bulk-prefill. Anonymous filler that pads the dict to
+    // a realistic fill level without going through publish — keeps
+    // the lookup-bench's preload climb cheap even at planetary
+    // scale. Must be done before any publish call: `prefill_random`
+    // errors at epoch != 0. Works for both local (in-process) and
+    // distributed (gRPC ReconfigurePrefill) modes.
     let mut initial_prefill_ms: f64 = 0.0;
     if args.initial_prefill_count > 0 {
         eprintln!(
@@ -589,7 +587,7 @@ fn main() -> ExitCode {
             let endpoint = tonic::transport::Endpoint::from_shared(endpoint_url.clone())?
                 .connect_timeout(std::time::Duration::from_secs(10));
             let channel = endpoint.connect().await?;
-            const MAX_MSG_BYTES: usize = 1024 * 1024 * 1024;
+            const MAX_MSG_BYTES: usize = 8 * 1024 * 1024 * 1024;
             let mut c = CoordinatorServiceClient::new(channel)
                 .max_decoding_message_size(MAX_MSG_BYTES)
                 .max_encoding_message_size(MAX_MSG_BYTES);
@@ -1076,111 +1074,6 @@ fn main() -> ExitCode {
             }
         }
 
-        // ---- per-stage publish bench (optional) -------------------
-        // After the lookup samples, sweep `--publish-batch-sizes`
-        // (each batch run `--publish-samples-per-batch` times) and
-        // record per-publish wall time + commit-class byte sizes.
-        // Disjoint namespace from the lookup-sampleable space so the
-        // bench doesn't accidentally turn its own publish-samples
-        // into sample candidates for the next stage.
-        let mut publish_bench_json: Option<String> = None;
-        if publish_enabled {
-            let mut batch_blocks: Vec<String> = Vec::with_capacity(args.publish_batch_sizes.len());
-            for &batch_size in &args.publish_batch_sizes {
-                eprintln!(
-                    "  publish_bench: batch={batch_size} samples={}",
-                    args.publish_samples_per_batch
-                );
-                let mut samples_ms: Vec<f64> = Vec::with_capacity(args.publish_samples_per_batch);
-                // Commit-class sizes are invariant in batch_size for a
-                // given n_shards; we still record them per batch so a
-                // buggy invariant shows up in the JSON.
-                let mut commit_sizes: Option<(u64, u64, u64, u64, u64)> = None;
-                for sample_idx in 0..args.publish_samples_per_batch {
-                    let updates: Vec<(Vec<u8>, Vec<u8>)> = (0..batch_size as u64)
-                        .map(|_| {
-                            let idx = publish_bench_idx;
-                            publish_bench_idx += 1;
-                            (phone_label(idx), rsa_value(idx))
-                        })
-                        .collect();
-                    let t = Instant::now();
-                    let res = {
-                        let mut s = shared.blocking_write();
-                        s.publish(&updates)
-                    };
-                    let ms = t.elapsed().as_secs_f64() * 1000.0;
-                    samples_ms.push(ms);
-                    let commit = match res {
-                        Ok(c) => c,
-                        Err(e) => {
-                            eprintln!(
-                                "error: publish_bench publish failed (level={target}, \
-                                 batch={batch_size}, sample={sample_idx}): {e}"
-                            );
-                            return ExitCode::from(1);
-                        },
-                    };
-                    if commit_sizes.is_none() {
-                        let (mut ic, mut vc, mut ric, mut rvc) = (0u64, 0u64, 0u64, 0u64);
-                        for shard_commit in &commit.per_shard {
-                            ic += shard_commit.index_commitment.uncompressed_size() as u64;
-                            vc += shard_commit.value_commitment.uncompressed_size() as u64;
-                            ric += shard_commit.rand_index_commitment.uncompressed_size() as u64;
-                            rvc += shard_commit.rand_value_commitment.uncompressed_size() as u64;
-                        }
-                        let total = commit.uncompressed_size() as u64;
-                        commit_sizes = Some((ic, vc, ric, rvc, total));
-                    }
-                }
-                let mut sorted = samples_ms.clone();
-                sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
-                let fastest = sorted[0];
-                let slowest = sorted[sorted.len() - 1];
-                let median = sorted[sorted.len() / 2];
-                let mean = samples_ms.iter().sum::<f64>() / samples_ms.len() as f64;
-                let (ic, vc, ric, rvc, total_commit) =
-                    commit_sizes.expect("commit_sizes set in publish_bench loop");
-                let samples_str = samples_ms
-                    .iter()
-                    .map(|t| format!("{t:.4}"))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                batch_blocks.push(format!(
-                    concat!(
-                        "          {{\n",
-                        "            \"batch_size\": {bs},\n",
-                        "            \"samples_ms\": [{samples_str}],\n",
-                        "            \"fastest_ms\": {fastest:.4},\n",
-                        "            \"slowest_ms\": {slowest:.4},\n",
-                        "            \"median_ms\": {median:.4},\n",
-                        "            \"mean_ms\": {mean:.4},\n",
-                        "            \"index_commitment_bytes\": {ic},\n",
-                        "            \"value_commitment_bytes\": {vc},\n",
-                        "            \"rand_index_commitment_bytes\": {ric},\n",
-                        "            \"rand_value_commitment_bytes\": {rvc},\n",
-                        "            \"total_commit_bytes\": {tot}\n",
-                        "          }}"
-                    ),
-                    bs = batch_size,
-                    samples_str = samples_str,
-                    fastest = fastest,
-                    slowest = slowest,
-                    median = median,
-                    mean = mean,
-                    ic = ic,
-                    vc = vc,
-                    ric = ric,
-                    rvc = rvc,
-                    tot = total_commit,
-                ));
-            }
-            publish_bench_json = Some(format!(
-                "        \"batches\": [\n{batches}\n        ]",
-                batches = batch_blocks.join(",\n"),
-            ));
-        }
-
         // ---- per-stage audit bench --------------------------------
         // Run `verify_sharded_invariance` on consecutive epoch
         // transitions starting from a fresh `AuditState` at epoch 0.
@@ -1189,9 +1082,10 @@ fn main() -> ExitCode {
         // bytes pulled per audit step are the next epoch's
         // `ShardedEpochCommitment`).
         //
-        // We do this AFTER publish-bench so the chain has plenty of
-        // transitions to sample. With `samples = audit_samples`, we
-        // need ≥ samples + 1 published epochs available.
+        // Runs BEFORE the publish-bench so the audit chain length
+        // reflects the preload's target fill exactly, not
+        // `target + publish_bench_overhead`. The preload climb has
+        // already produced plenty of transitions to sample.
         //
         // The whole audit is verifier-side work — the "server" cost is
         // just the `epoch_commitment(epoch)` clone (cached in
@@ -1297,6 +1191,115 @@ fn main() -> ExitCode {
                     samples = audit_blocks.join(",\n"),
                 ));
             }
+        }
+
+        // ---- per-stage publish bench (optional) -------------------
+        // After lookups + audit, sweep `--publish-batch-sizes`
+        // (each batch run `--publish-samples-per-batch` times) and
+        // record per-publish wall time + commit-class byte sizes.
+        // Runs LAST in the stage because each sample adds an epoch
+        // to the chain — running audit first means the audit sees
+        // the preload's target fill exactly, not
+        // `target + publish_bench_overhead`. Disjoint namespace from
+        // the lookup-sampleable space so the bench doesn't
+        // accidentally turn its own publish-samples into sample
+        // candidates for the next stage.
+        let mut publish_bench_json: Option<String> = None;
+        if publish_enabled {
+            let mut batch_blocks: Vec<String> = Vec::with_capacity(args.publish_batch_sizes.len());
+            for &batch_size in &args.publish_batch_sizes {
+                eprintln!(
+                    "  publish_bench: batch={batch_size} samples={}",
+                    args.publish_samples_per_batch
+                );
+                let mut samples_ms: Vec<f64> = Vec::with_capacity(args.publish_samples_per_batch);
+                // Commit-class sizes are invariant in batch_size for a
+                // given n_shards; we still record them per batch so a
+                // buggy invariant shows up in the JSON.
+                let mut commit_sizes: Option<(u64, u64, u64, u64, u64)> = None;
+                for sample_idx in 0..args.publish_samples_per_batch {
+                    let updates: Vec<(Vec<u8>, Vec<u8>)> = (0..batch_size as u64)
+                        .map(|_| {
+                            let idx = publish_bench_idx;
+                            publish_bench_idx += 1;
+                            (phone_label(idx), rsa_value(idx))
+                        })
+                        .collect();
+                    let t = Instant::now();
+                    let res = {
+                        let mut s = shared.blocking_write();
+                        s.publish(&updates)
+                    };
+                    let ms = t.elapsed().as_secs_f64() * 1000.0;
+                    samples_ms.push(ms);
+                    let commit = match res {
+                        Ok(c) => c,
+                        Err(e) => {
+                            eprintln!(
+                                "error: publish_bench publish failed (level={target}, \
+                                 batch={batch_size}, sample={sample_idx}): {e}"
+                            );
+                            return ExitCode::from(1);
+                        },
+                    };
+                    if commit_sizes.is_none() {
+                        let (mut ic, mut vc, mut ric, mut rvc) = (0u64, 0u64, 0u64, 0u64);
+                        for shard_commit in &commit.per_shard {
+                            ic += shard_commit.index_commitment.uncompressed_size() as u64;
+                            vc += shard_commit.value_commitment.uncompressed_size() as u64;
+                            ric += shard_commit.rand_index_commitment.uncompressed_size() as u64;
+                            rvc += shard_commit.rand_value_commitment.uncompressed_size() as u64;
+                        }
+                        let total = commit.uncompressed_size() as u64;
+                        commit_sizes = Some((ic, vc, ric, rvc, total));
+                    }
+                }
+                let mut sorted = samples_ms.clone();
+                sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                let fastest = sorted[0];
+                let slowest = sorted[sorted.len() - 1];
+                let median = sorted[sorted.len() / 2];
+                let mean = samples_ms.iter().sum::<f64>() / samples_ms.len() as f64;
+                let (ic, vc, ric, rvc, total_commit) =
+                    commit_sizes.expect("commit_sizes set in publish_bench loop");
+                let samples_str = samples_ms
+                    .iter()
+                    .map(|t| format!("{t:.4}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                batch_blocks.push(format!(
+                    concat!(
+                        "          {{\n",
+                        "            \"batch_size\": {bs},\n",
+                        "            \"samples_ms\": [{samples_str}],\n",
+                        "            \"fastest_ms\": {fastest:.4},\n",
+                        "            \"slowest_ms\": {slowest:.4},\n",
+                        "            \"median_ms\": {median:.4},\n",
+                        "            \"mean_ms\": {mean:.4},\n",
+                        "            \"index_commitment_bytes\": {ic},\n",
+                        "            \"value_commitment_bytes\": {vc},\n",
+                        "            \"rand_index_commitment_bytes\": {ric},\n",
+                        "            \"rand_value_commitment_bytes\": {rvc},\n",
+                        "            \"total_commit_bytes\": {tot}\n",
+                        "          }}"
+                    ),
+                    bs = batch_size,
+                    samples_str = samples_str,
+                    fastest = fastest,
+                    slowest = slowest,
+                    median = median,
+                    mean = mean,
+                    ic = ic,
+                    vc = vc,
+                    ric = ric,
+                    rvc = rvc,
+                    tot = total_commit,
+                ));
+            }
+            publish_bench_json = Some(format!(
+                "        \"batches\": [\n{batches}\n        ]",
+                batches = batch_blocks.join(",\n"),
+            ));
         }
 
         // Per-stage JSON block. `lookup.samples` is empty when

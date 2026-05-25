@@ -54,6 +54,10 @@ tracing = ["dep:tracing"]
 # (Aegon::PublishPhase1, KZH::FMAState, ShardedAegon::*) without any
 # separate flame-graph tooling.
 tracing_instrument = ["tracing/attributes", "dep:tracing-subscriber", "dep:tracing-tree"]
+# Use mimalloc as the global allocator for binaries that opt in via the
+# `bin/<name>.rs` `#[cfg(feature = "mimalloc_alloc")]` block. Off by
+# default so debug-tool binaries and unit tests stay on glibc.
+mimalloc_alloc = []
 
 [dependencies]
 ## Required dependencies ##
@@ -76,6 +80,13 @@ futures = "0.3"
 hex = "0.4"
 clap = { version = "4", features = ["derive"] }
 log = { version = "0.4", features = ["kv_unstable"] }
+# Drop-in alternative allocator. glibc retains freed memory for reuse and
+# rarely returns it to the OS, which makes the shard's RSS grow well past
+# its actual working set during heavy publish-time alloc/free churn.
+# mimalloc returns freed pages aggressively. Used only via opt-in
+# `#[global_allocator]` in the individual binaries that need it (see
+# `bin/aegon_shard_server.rs`, `bin/aegon_rss_probe.rs`).
+mimalloc = { version = "0.1", default-features = false }
 prost = "0.13"
 rayon = { workspace = true }
 redis = { version = "0.27", default-features = false }

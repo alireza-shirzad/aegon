@@ -49,8 +49,8 @@ use proto::shard_service_client::ShardServiceClient;
 use proto::shard_service_server::{ShardService, ShardServiceServer};
 use proto::{
     CommitmentResponse, Empty, OpenResponse, PublishPhase1Request, PublishPhase1Response,
-    PublishPhase2Request, PublishPhase2Response, SlotEpochRequest, SlotOccupiedResponse,
-    SlotRequest,
+    PublishPhase2Request, PublishPhase2Response, ReconfigurePrefillRequest,
+    ReconfigurePrefillResponse, SlotEpochRequest, SlotOccupiedResponse, SlotRequest,
 };
 
 // ---------- wire encoding helpers --------------------------------------
@@ -277,15 +277,102 @@ where
         &self,
         entry: super::sharded::StoredValueHistoryEntry<E, P>,
     ) -> Result<super::sharded::StoredValueHistoryEntry<E, P>, AegonError> {
-        // Currently a pass-through: publish-time openings already go
-        // through the PCS's hiding path under a hiding SRS, so the
-        // history-lookup path returns them as-is. The RPC is kept on
-        // the trait + wire as a hook for a future
-        // "re-mask stored proofs at user-facing time" variant — when
-        // the system stops doing inline hiding at publish-time and
-        // moves that work behind the masking server too, this impl
-        // grows the per-opening remask logic.
-        Ok(entry)
+        // Under a non-hiding SRS, publish_phase_2 already produced
+        // plain non-ZK openings and the stored entries verify
+        // directly. Pass-through.
+        if !self.is_zk_srs() {
+            return Ok(entry);
+        }
+        // Under a hiding SRS:
+        //   - publish_phase_2 stored plain non-ZK proofs (cheap)
+        //   - this shard has the per-epoch `tau_f` for value-side
+        //     polys (kept in `EpochSnapshot.{value_tau,
+        //     rand_value_tau}` independently of `retain_epoch_polys`)
+        //   - the masking server (or an inline fallback) provides a
+        //     fresh `MaskingPackage`
+        // Combine the three to mint a hiding opening per stored
+        // proof. Each `remask_value_side_proof` call internally
+        // fetches/generates ONE masking package; we pay 3 packages
+        // per entry. That's still ~5× cheaper than the inline-ZK
+        // path at publish time because we only pay it on the
+        // (presumably rare) history-lookup path, not on every batch
+        // of 16K labels.
+        let prev_epoch = entry.epoch.saturating_sub(1);
+        let post_epoch = entry.epoch;
+        // Fetch all three tau snapshots up front (cheap reads).
+        let rand_value_pre_tau =
+            self.rand_value_tau_at_epoch(prev_epoch).ok_or_else(|| {
+                AegonError::Config(format!(
+                    "remask_value_history_entry: rand_value tau missing for epoch {prev_epoch}"
+                ))
+            })?;
+        let rand_value_post_tau =
+            self.rand_value_tau_at_epoch(post_epoch).ok_or_else(|| {
+                AegonError::Config(format!(
+                    "remask_value_history_entry: rand_value tau missing for epoch {post_epoch}"
+                ))
+            })?;
+        let value_post_tau = self.value_tau_at_epoch(post_epoch).ok_or_else(|| {
+            AegonError::Config(format!(
+                "remask_value_history_entry: value tau missing for epoch {post_epoch}"
+            ))
+        })?;
+
+        // The three remasks are independent — each takes its own
+        // masking package, has its own commitment + tau, and writes
+        // its own output proof. `remask_value_side_proof` is `&self`
+        // and the three commitments / evaluations / proofs / taus are
+        // disjoint owned/borrowed slices, so rayon can run them in
+        // parallel. With an inline-generated masking package this
+        // saves ~2/3 of the wall (~50 ms → ~17 ms per entry); with a
+        // real masking server it cuts the fetch+apply RTT × 3 down to
+        // a single concurrent burst.
+        let ((rand_value_pre_proof, rand_value_post_proof), value_post_proof) =
+            rayon::join(
+                || {
+                    rayon::join(
+                        || {
+                            self.remask_value_side_proof(
+                                &entry.prev_shard_commit.rand_value_commitment,
+                                &entry.slot_bits,
+                                &entry.rand_value_pre_eval,
+                                entry.rand_value_pre_proof.clone(),
+                                &rand_value_pre_tau,
+                                b"aegon.rand_value.open",
+                            )
+                        },
+                        || {
+                            self.remask_value_side_proof(
+                                &entry.post_shard_commit.rand_value_commitment,
+                                &entry.slot_bits,
+                                &entry.rand_value_post_eval,
+                                entry.rand_value_post_proof.clone(),
+                                &rand_value_post_tau,
+                                b"aegon.rand_value.open",
+                            )
+                        },
+                    )
+                },
+                || {
+                    self.remask_value_side_proof(
+                        &entry.post_shard_commit.value_commitment,
+                        &entry.slot_bits,
+                        &entry.value_post_eval,
+                        entry.value_post_proof.clone(),
+                        &value_post_tau,
+                        b"aegon.value.open",
+                    )
+                },
+            );
+        let rand_value_pre_proof = rand_value_pre_proof?;
+        let rand_value_post_proof = rand_value_post_proof?;
+        let value_post_proof = value_post_proof?;
+        Ok(super::sharded::StoredValueHistoryEntry {
+            rand_value_pre_proof,
+            rand_value_post_proof,
+            value_post_proof,
+            ..entry
+        })
     }
 
     fn current_commitment(&self) -> EpochCommitment<E, P> {
@@ -302,6 +389,12 @@ where
         seed: u64,
     ) -> Result<(), AegonError> {
         use ark_std::rand::SeedableRng;
+        // Reset back to epoch-0 first so multi-stage fill-percent
+        // sweeps can call this repeatedly on the same Aegon —
+        // matches the new gRPC ReconfigurePrefill semantics
+        // ("wipe and refill"). For a freshly-init-ed Aegon, this is
+        // a no-op (zero polys, zero commitments stay zero).
+        Aegon::reset_state(self)?;
         let mut rng = rand_chacha::ChaCha20Rng::seed_from_u64(seed);
         // `shard_id`/`db_source` arguments to Aegon::prefill_random are
         // legacy — the implementation ignores both (the comment on
@@ -452,7 +545,7 @@ where
     /// cluster). Set to 1 GiB on both directions so the limit is
     /// effectively never reached.
     fn wrap_service(this: Self) -> ShardServiceServer<Self> {
-        const MAX_MSG_BYTES: usize = 1024 * 1024 * 1024;
+        const MAX_MSG_BYTES: usize = 8 * 1024 * 1024 * 1024;
         ShardServiceServer::new(this)
             .max_decoding_message_size(MAX_MSG_BYTES)
             .max_encoding_message_size(MAX_MSG_BYTES)
@@ -672,6 +765,40 @@ where
             epoch_commitment: encode(&commit).map_err(err_to_status)?,
         }))
     }
+
+    async fn get_verifier_context(
+        &self,
+        _req: Request<Empty>,
+    ) -> Result<Response<proto::GetVerifierContextResponse>, Status> {
+        let aegon = self.aegon.read().await;
+        let vp = ShardHandle::<E, P, H>::verifier_context(&*aegon).verifier_param;
+        let log_capacity = ShardHandle::<E, P, H>::log_capacity(&*aegon);
+        Ok(Response::new(proto::GetVerifierContextResponse {
+            verifier_param: encode(&vp).map_err(err_to_status)?,
+            log_capacity: log_capacity as u64,
+        }))
+    }
+
+    async fn reconfigure_prefill(
+        &self,
+        req: Request<ReconfigurePrefillRequest>,
+    ) -> Result<Response<ReconfigurePrefillResponse>, Status> {
+        let r = req.into_inner();
+        let mut aegon = self.aegon.write().await;
+        // Reset wipes the in-memory Aegon back to a fresh epoch-0
+        // and recomputes the empty-poly commitments. Then prefill
+        // sprays `count` random entries into the data polynomials.
+        aegon.reset_state().map_err(err_to_status)?;
+        if r.count > 0 {
+            use ark_std::rand::SeedableRng;
+            let mut rng = rand_chacha::ChaCha20Rng::seed_from_u64(r.seed);
+            // shard_id / db_source are ignored by Aegon::prefill_random.
+            aegon
+                .prefill_random(&mut rng, r.count as usize, &super::DbSource::None, 0)
+                .map_err(err_to_status)?;
+        }
+        Ok(Response::new(ReconfigurePrefillResponse {}))
+    }
 }
 
 // ---------- gRPC client: implements ShardHandle ------------------------
@@ -799,7 +926,18 @@ where
 
     /// Connect with full configurability (TLS, timeouts, retries).
     pub fn connect_with(cfg: GrpcShardClientConfig<E, P>) -> Result<Self, AegonError> {
-        let runtime = Runtime::new()
+        // The coord's plan_phase_1_batches RPC fan-out (~16K
+        // is_index_slot_occupied calls per fresh-cluster publish) is
+        // I/O-bound — each call is a sub-ms gRPC RTT, not CPU work.
+        // Default Runtime::new() sizes workers to CPU count, which on
+        // an n2-standard-4 coord caps in-flight concurrency at 4 and
+        // turns the fan-out into an 8 s serial wall. 64 workers
+        // multiplex the same connection without contention.
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(64)
+            .enable_all()
+            .thread_name("aegon-grpc-rt")
+            .build()
             .map_err(|e| AegonError::Config(format!("tokio runtime: {e}")))?;
 
         let mut endpoint = tonic::transport::Endpoint::from_shared(cfg.endpoint.clone())
@@ -822,7 +960,7 @@ where
             .map_err(|e| AegonError::Config(format!("connect '{}': {e}", cfg.endpoint)))?;
         // See `ShardServer::wrap_service` for the rationale on the 1 GiB
         // limit — same trigger (batch=10k publish_phase_1 response).
-        const MAX_MSG_BYTES: usize = 1024 * 1024 * 1024;
+        const MAX_MSG_BYTES: usize = 8 * 1024 * 1024 * 1024;
         let client = ShardServiceClient::new(client)
             .max_decoding_message_size(MAX_MSG_BYTES)
             .max_encoding_message_size(MAX_MSG_BYTES);
@@ -835,6 +973,57 @@ where
             retry: cfg.retry,
         })
     }
+}
+
+/// One-shot fetch of a shard's `(VerifierContext, log_capacity)` over
+/// gRPC. Used by the coordinator at setup time so it doesn't have to
+/// regenerate the (multi-GB, multi-minute) full SRS just to derive
+/// its small verifier-side projection. Each call opens its own
+/// throwaway runtime + channel — cheap because this runs once per
+/// cluster boot.
+///
+/// Plaintext only — the bench/intra-cluster traffic is already
+/// implicitly trusted (same VPC), matching the masking-server
+/// rationale.
+pub fn fetch_verifier_context_from_endpoint<E, P>(
+    endpoint: String,
+) -> Result<(VerifierContext<E, P>, usize), AegonError>
+where
+    E: Pairing,
+    P: AegonPcs<E>,
+    P::VerifierParam: CanonicalDeserialize + Clone,
+{
+    let runtime = Runtime::new()
+        .map_err(|e| AegonError::Config(format!("tokio runtime: {e}")))?;
+    let ep = tonic::transport::Endpoint::from_shared(endpoint.clone())
+        .map_err(|e| AegonError::Config(format!("endpoint '{endpoint}': {e}")))?
+        .connect_timeout(Duration::from_secs(10));
+    let channel = runtime
+        .block_on(ep.connect())
+        .map_err(|e| AegonError::Config(format!("connect '{endpoint}': {e}")))?;
+    const MAX_MSG_BYTES: usize = 8 * 1024 * 1024 * 1024;
+    let mut client = ShardServiceClient::new(channel)
+        .max_decoding_message_size(MAX_MSG_BYTES)
+        .max_encoding_message_size(MAX_MSG_BYTES);
+    let resp = runtime
+        .block_on(client.get_verifier_context(Request::new(Empty {})))
+        .map_err(status_to_err)?
+        .into_inner();
+    let verifier_param: P::VerifierParam = decode(&resp.verifier_param)?;
+    let log_capacity = resp.log_capacity as usize;
+    let vctx = VerifierContext::new(log_capacity, verifier_param);
+    Ok((vctx, log_capacity))
+}
+
+// `impl GrpcShardClient` continues below with `with_retry` and
+// the rest of the client methods.
+impl<E, P> GrpcShardClient<E, P>
+where
+    E: Pairing,
+    P: AegonPcs<E> + Send + Sync,
+    P::Commitment: CanonicalDeserialize + Send + Sync,
+    P::VerifierParam: Clone + Send + Sync,
+{
 
     /// Run `op` against the client, retrying on transport-level
     /// failures only (`Status::code() == Unavailable | Unknown`). The
@@ -938,17 +1127,26 @@ where
     }
 
     fn is_index_slot_occupied(&self, slot_bits: &[bool]) -> bool {
+        // Hot path: plan_phase_1_batches calls this once per probe
+        // (~16K times per fresh-cluster publish). Using `with_retry`
+        // would hold the client's AsyncMutex across the whole RPC,
+        // serializing every concurrent call onto a single in-flight
+        // request and turning the fan-out into a serial wall. Take
+        // the lock just long enough to clone the (cheap, Channel-
+        // backed) client, then drive the RPC without holding it.
         let req = SlotRequest {
             slot_bits: encode(&slot_bits.to_vec()).expect("slot_bits encode"),
         };
-        match self.with_retry(move |client| {
-            let req = req.clone();
-            async move { client.lock().await.is_index_slot_occupied(req).await }
-        }) {
+        let client = self.client.clone();
+        let result = self.runtime.block_on(async move {
+            let mut client = client.lock().await.clone();
+            client.is_index_slot_occupied(req).await
+        });
+        match result {
             Ok(resp) => resp.into_inner().occupied,
-            // RPC unreachable after all retries; default to "occupied"
-            // so the coordinator's open-addressing loop doesn't claim
-            // a slot we can't actually verify.
+            // RPC unreachable; default to "occupied" so the
+            // coordinator's open-addressing loop doesn't claim a slot
+            // we can't actually verify.
             Err(_) => true,
         }
     }
@@ -1105,6 +1303,22 @@ where
 
     fn log_capacity(&self) -> usize {
         self.cached_log_capacity
+    }
+
+    fn prefill_random_in_place(
+        &mut self,
+        count: usize,
+        seed: u64,
+    ) -> Result<(), AegonError> {
+        let req = ReconfigurePrefillRequest {
+            count: count as u64,
+            seed,
+        };
+        let _ = self.with_retry(move |client| {
+            let req = req.clone();
+            async move { client.lock().await.reconfigure_prefill(req).await }
+        })?;
+        Ok(())
     }
 }
 

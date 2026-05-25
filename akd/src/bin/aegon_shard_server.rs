@@ -11,6 +11,10 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 
+#[cfg(feature = "mimalloc_alloc")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use akd::aegon::distributed_srs::{
     run_distributed_compute, try_cache_hit, Phase, SrsBootstrapConfig, SrsBootstrapState,
     SrsServer as SrsGrpcServer,
@@ -168,6 +172,23 @@ struct Args {
     /// set. Default: `$HOME/.cache/aegon-srs`.
     #[arg(long)]
     srs_cache_dir: Option<PathBuf>,
+
+    /// Skip retaining the rand polynomials + PCS state in
+    /// `epoch_history` per publish. Saves ~50 MB / epoch on shards
+    /// driving long publish chains (bench cluster) at the cost of
+    /// breaking `consistency_proof(label, old_epoch)` — the four
+    /// commitments per epoch ARE still kept, so
+    /// `verify_sharded_invariance` (audits) and `epoch_commitment` keep
+    /// working. Off by default; production deployments leave it off.
+    #[arg(long)]
+    no_retain_epoch_polys: bool,
+
+    /// Emit `[rss] <stage>: <GiB>` lines on stdout at SRS-load, Aegon-
+    /// init, and every publish phase-1 / phase-2 sub-step. Cheap to
+    /// leave off (one relaxed atomic load per call site); useful for
+    /// diagnosing publish-time memory spikes.
+    #[arg(long)]
+    log_rss: bool,
 }
 
 #[tokio::main]
@@ -175,6 +196,9 @@ async fn main() -> ExitCode {
     #[cfg(feature = "tracing_instrument")]
     akd::aegon::tracing_init::init_tree_subscriber();
     let args = Args::parse();
+
+    akd::aegon::instrument::set_rss_log(args.log_rss);
+    akd::aegon::instrument::log_rss("startup");
 
     if args.srs_path.is_none() && args.setup_seed.is_none() {
         eprintln!("error: provide either --srs-path or --setup-seed");
@@ -313,6 +337,18 @@ async fn main() -> ExitCode {
             return ExitCode::from(1);
         },
     };
+    akd::aegon::instrument::log_rss("post_aegon_init");
+
+    // Honor `--no-retain-epoch-polys` before any publish runs. Bench
+    // shards set this to skip the per-epoch poly+state clones (~50 MB
+    // each at shard_log_capacity=27) that `consistency_proof` would
+    // need but the bench doesn't exercise. Affects only future
+    // publishes — the epoch-0 snapshot that Aegon::setup just inserted
+    // already has its polys populated (cheap; both are empty there).
+    if args.no_retain_epoch_polys {
+        eprintln!("shard config: retain_epoch_polys=false (consistency_proof at old epochs disabled)");
+        aegon.set_retain_epoch_polys(false);
+    }
 
     // Distributed-gen path advances phase as we work through init +
     // prefill so any `WaitForReady` poll has a useful status string.

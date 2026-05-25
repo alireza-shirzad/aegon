@@ -204,6 +204,18 @@ where
         prover_param.get_dimensions().clone()
     }
 
+    /// Verifier-side dims. KZH-k stores the same `dimensions` vector
+    /// in both `KZHKProverParam` and `KZHKVerifierParam`, so the
+    /// verifier path gets the exact same layout the prover used —
+    /// matching is essential because openings must address the same
+    /// Boolean-point decomposition both sides expect.
+    fn block_dims_from_verifier_param(
+        verifier_param: &Self::VerifierParam,
+        _num_vars: usize,
+    ) -> Vec<usize> {
+        verifier_param.get_dimensions().clone()
+    }
+
     /// Commits to a multilinear polynomial `f`. Dispatches to the zk or
     /// non-zk variant based on the SRS configuration. In the non-zk case the
     /// commitment is `C = <f, H_1>` (Figure 14, Commit); in the zk case it

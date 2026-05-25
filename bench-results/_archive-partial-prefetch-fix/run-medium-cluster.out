@@ -1,0 +1,13 @@
+[2026-05-24T17:33:02+0000] host: instance-20260503-131121
+[2026-05-24T17:33:02+0000] PROJECT=jbonneau-mwalfish-9a0c  N_SHARDS=2  SHARD_LOG_CAPACITY=27  KZH_K=9
+[2026-05-24T17:33:02+0000] PUBLISH_BATCH_SIZES=64,128,256,512,1024,2048
+[2026-05-24T17:33:02+0000] results dir: /home/alrshir/aegon/bench-results
+[2026-05-24T17:33:02+0000] ==== medium-up START ====
+[2026-05-24T17:35:16+0000] ==== medium-up OK in 134s ====
+[2026-05-24T17:35:16+0000] ==== medium-deploy START ====
+[2026-05-24T17:46:33+0000] ==== medium-deploy OK in 677s ====
+[2026-05-24T17:46:33+0000] ==== medium-setup-bench START ====
+[2026-05-24T17:50:52+0000] ==== medium-setup-bench OK in 259s ====
+[2026-05-24T17:50:52+0000] ==== medium-start-shards START ====
+[2026-05-24T17:55:59+0000] ==== medium-start-shards OK in 307s ====
+[2026-05-24T17:55:59+0000] ==== medium-lookup-bench START ====

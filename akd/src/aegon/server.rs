@@ -27,6 +27,7 @@ use ark_ff::{One, UniformRand, Zero};
 use ark_poly::SparseMultilinearExtension;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::rand::Rng;
+use rayon::prelude::*;
 use akd_core::aegon_crypto::pcs::PCSGlobalParam;
 use akd_core::aegon_crypto::poly::{DenseOrSparseMLE, DenseOrSparseMLERef};
 use akd_core::aegon_crypto::transcript::IOPTranscript;
@@ -36,6 +37,7 @@ use super::db::{key_shard_state, DbSource, RedisDb};
 use super::error::AegonError;
 use super::fs::derive_chain_scalar;
 use super::hash::{bool_index_to_point, bool_index_to_usize, HashSuite, Sha256Hash};
+use super::instrument::log_rss_ctx;
 use super::sharded::ShardWrite;
 use super::types::{
     AegonPcs, EpochCommitment, HistoryOpeningEntry, HistoryOpenings, Label, LookupProof, RandPair,
@@ -47,18 +49,40 @@ use super::types::{
 /// epoch `n`. The two data commitments are kept so we can return them in
 /// `EpochCommitment`s; the rand polynomials and their PCS state are kept
 /// so the server can produce opening proofs at arbitrary points later.
+///
+/// The four rand polynomial / state fields are `Option` so a shard that
+/// never services `consistency_proof(label, s0)` (e.g. benchmark
+/// deployments) can drop them at publish time via `Aegon::
+/// set_retain_epoch_polys(false)`. The commitments are always kept —
+/// `epoch_commitment(epoch)` (used by `verify_sharded_invariance`) only
+/// reads those four fields.
 #[derive(Clone)]
 struct EpochSnapshot<E: Pairing, P: AegonPcs<E>> {
     index_commitment: P::Commitment,
     value_commitment: P::Commitment,
 
-    rand_index_poly: SparseMultilinearExtension<E::ScalarField>,
+    rand_index_poly: Option<SparseMultilinearExtension<E::ScalarField>>,
     rand_index_commitment: P::Commitment,
-    rand_index_state: P::State,
+    rand_index_state: Option<P::State>,
 
-    rand_value_poly: SparseMultilinearExtension<E::ScalarField>,
+    rand_value_poly: Option<SparseMultilinearExtension<E::ScalarField>>,
     rand_value_commitment: P::Commitment,
-    rand_value_state: P::State,
+    rand_value_state: Option<P::State>,
+
+    /// Per-epoch hiding scalars for the value-side polynomials,
+    /// snapshotted at the END of this publish. Always retained even
+    /// when `rand_*_state` are dropped (the "no-retain-epoch-polys"
+    /// bench mode) because masking a stored history opening at
+    /// lookup time needs `tau_f` for the polynomial at the epoch the
+    /// opening was produced. Only 32 B/scalar (64 B/epoch) so the
+    /// growth is trivial — ~256 KB at 4K epochs even at planetary
+    /// scale.
+    ///
+    /// `None` when the SRS is non-hiding (`is_zk = false`); the
+    /// masking-server protocol short-circuits in that case so we
+    /// never read these.
+    value_tau: Option<P::HidingScalar>,
+    rand_value_tau: Option<P::HidingScalar>,
 }
 
 pub struct Aegon<E, P, H = Sha256Hash>
@@ -120,6 +144,14 @@ where
     // epoch number; epoch 0 is the empty initial state.
     epoch_history: BTreeMap<u64, EpochSnapshot<E, P>>,
 
+    // When false, each `publish` records only the four commitments per
+    // epoch (not the rand polynomials or their PCS state), so
+    // `open_rand_*_at_slot_in_epoch` will fail for non-current epochs
+    // but `epoch_commitment` / `verify_sharded_invariance` keep working.
+    // Default `true`. Set `false` on shards that don't service
+    // `consistency_proof` (e.g. bench cluster) to free ~50 MB/epoch.
+    retain_epoch_polys: bool,
+
     // Set by publish_phase_1, consumed by publish_phase_2. None when
     // no publish is in flight. The two-phase split exists so that a
     // sharded coordinator can gather all 32 shards' new data commits
@@ -174,35 +206,27 @@ pub struct AegonCheckpoint<E: Pairing, P: AegonPcs<E>> {
 /// the invariance proof. The second half (`publish_phase_2`) consumes
 /// the stash.
 struct PendingPublish<E: Pairing, P: AegonPcs<E>> {
-    prev_index_poly: SparseMultilinearExtension<E::ScalarField>,
-    prev_value_poly: SparseMultilinearExtension<E::ScalarField>,
-    prev_index_com: P::Commitment,
-    prev_index_state: P::State,
-    prev_value_com: P::Commitment,
-    prev_value_state: P::State,
-    prev_rand_index_poly: SparseMultilinearExtension<E::ScalarField>,
-    prev_rand_index_com: P::Commitment,
-    prev_rand_index_state: P::State,
-    prev_rand_value_poly: SparseMultilinearExtension<E::ScalarField>,
-    prev_rand_value_com: P::Commitment,
-    prev_rand_value_state: P::State,
-    new_index_com: P::Commitment,
-    new_index_state: P::State,
-    new_value_com: P::Commitment,
-    new_value_state: P::State,
-    /// Commitment of the **delta** polynomial committed in phase 1 —
-    /// i.e. only the slots this batch touched, evaluations equal to
-    /// `new − prev`. Reused in phase 2 to derive the rand-poly
-    /// commitments via the homomorphism
-    /// `delta_rand_X_com = r_X · delta_X_com`, so phase 2 never has to
-    /// run another MSM over the rand polynomials.
+    /// Delta polynomial on the index side — sparse with support exactly
+    /// equal to the new-placement slots this batch touched. Stashed for
+    /// phase_2's `update_rand_with_delta` which adds `r_index · delta`
+    /// into `self.rand_index_poly` in place.
+    delta_index_poly: SparseMultilinearExtension<E::ScalarField>,
+    /// Same for value side. Support equals every slot whose value
+    /// actually moved (new placements + value-only updates).
+    delta_value_poly: SparseMultilinearExtension<E::ScalarField>,
+    /// Commitment of `delta_index_poly` from phase 1. Reused in phase 2
+    /// to derive the new rand_index commitment via the homomorphism
+    /// `new_rand_index_com = rand_index_com + r_index · delta_index_com`,
+    /// so phase 2 never has to run another MSM over the rand
+    /// polynomial.
     delta_index_com: P::Commitment,
     delta_value_com: P::Commitment,
     /// Prover `State` for the same delta polynomials. The KZH-k aux
     /// table over a batch-sized support is built in phase 1 (cost
     /// `O(k · batch)`); phase 2 then uses the State homomorphism
-    /// `new_rand_state = prev_rand_state + r_X · delta_state` via
-    /// `P::fma_state` to avoid recomputing aux from scratch.
+    /// `new_rand_state = rand_state + r_X · delta_state` via in-place
+    /// `P::fma_state` to avoid recomputing aux from scratch and to
+    /// avoid cloning the (full-cap) prev state.
     delta_index_state: P::State,
     delta_value_state: P::State,
     /// Slot bits for every brand-new placement in this batch (entries
@@ -309,17 +333,21 @@ where
             commit_with_aux_value_side::<E, P>(&prover_param, &rand_value_poly)?;
 
         let mut epoch_history = BTreeMap::new();
+        let (init_value_tau, init_rand_value_tau) =
+            extract_value_taus::<E, P>(&prover_param, &value_state, &rand_value_state);
         epoch_history.insert(
             0,
             EpochSnapshot {
                 index_commitment: index_commitment.clone(),
                 value_commitment: value_commitment.clone(),
-                rand_index_poly: rand_index_poly.clone(),
+                rand_index_poly: Some(rand_index_poly.clone()),
                 rand_index_commitment: rand_index_commitment.clone(),
-                rand_index_state: rand_index_state.clone(),
-                rand_value_poly: rand_value_poly.clone(),
+                rand_index_state: Some(rand_index_state.clone()),
+                rand_value_poly: Some(rand_value_poly.clone()),
                 rand_value_commitment: rand_value_commitment.clone(),
-                rand_value_state: rand_value_state.clone(),
+                rand_value_state: Some(rand_value_state.clone()),
+                value_tau: init_value_tau,
+                rand_value_tau: init_rand_value_tau,
             },
         );
 
@@ -346,6 +374,7 @@ where
             r_value: E::ScalarField::zero(),
             label_table: HashMap::new(),
             epoch_history,
+            retain_epoch_polys: true,
             pending: None,
             _phantom: PhantomData,
         })
@@ -361,6 +390,17 @@ where
         client: std::sync::Arc<super::masking::MaskingClient<E, P>>,
     ) {
         self.masking_client = Some(client);
+    }
+
+    /// Toggle whether each `publish` retains the rand polynomials + PCS
+    /// state in `epoch_history`. Default `true`. When `false`, only the
+    /// four commitments are kept per epoch — `epoch_commitment(epoch)`
+    /// (used by `verify_sharded_invariance`) keeps working but
+    /// `open_rand_*_at_slot_in_epoch` returns `InvalidEpoch` for any
+    /// non-current epoch. Call once at startup; flipping mid-run leaves
+    /// already-recorded snapshots in whatever shape they had.
+    pub fn set_retain_epoch_polys(&mut self, retain: bool) {
+        self.retain_epoch_polys = retain;
     }
 
     pub fn verifier_param(&self) -> P::VerifierParam {
@@ -444,17 +484,24 @@ where
         // epochs' snapshots are unrecoverable from the checkpoint
         // alone; the shard will return InvalidEpoch for those.
         let mut epoch_history = BTreeMap::new();
+        let (rest_value_tau, rest_rand_value_tau) = extract_value_taus::<E, P>(
+            &prover_param,
+            &ckpt.value_state,
+            &ckpt.rand_value_state,
+        );
         epoch_history.insert(
             ckpt.epoch,
             EpochSnapshot {
                 index_commitment: ckpt.index_commitment.clone(),
                 value_commitment: ckpt.value_commitment.clone(),
-                rand_index_poly: rand_index_poly.clone(),
+                rand_index_poly: Some(rand_index_poly.clone()),
                 rand_index_commitment: ckpt.rand_index_commitment.clone(),
-                rand_index_state: ckpt.rand_index_state.clone(),
-                rand_value_poly: rand_value_poly.clone(),
+                rand_index_state: Some(ckpt.rand_index_state.clone()),
+                rand_value_poly: Some(rand_value_poly.clone()),
                 rand_value_commitment: ckpt.rand_value_commitment.clone(),
-                rand_value_state: ckpt.rand_value_state.clone(),
+                rand_value_state: Some(ckpt.rand_value_state.clone()),
+                value_tau: rest_value_tau,
+                rand_value_tau: rest_rand_value_tau,
             },
         );
 
@@ -487,10 +534,68 @@ where
             r_value: ckpt.r_value,
             label_table,
             epoch_history,
+            retain_epoch_polys: true,
             pending: None,
             _phantom: PhantomData,
         })
     }
+
+    /// Wipe this shard back to a fresh epoch-0 state, keeping the
+    /// SRS-derived `(prover_param, verifier_param)` and any wired
+    /// masking client. Equivalent to dropping `self` and re-calling
+    /// `Aegon::init` with the same params, but doesn't require
+    /// cloning the (expensive) PCS parameters.
+    ///
+    /// Used by the cluster benches: between fill_percent stages we
+    /// reset every shard via gRPC, then prefill to the new target —
+    /// avoids the kill-and-restart-with-different-CLI-flag dance.
+    pub fn reset_state(&mut self) -> Result<(), AegonError> {
+        let zero_poly = || SparseMultilinearExtension::from_evaluations(self.log_capacity, &[]);
+        self.epoch = 0;
+        self.index_poly = zero_poly();
+        self.value_poly = zero_poly();
+        self.rand_index_poly = zero_poly();
+        self.rand_value_poly = zero_poly();
+        let (index_commitment, index_state) =
+            commit_with_aux_non_zk::<E, P>(&self.prover_param, &self.index_poly)?;
+        let (value_commitment, value_state) =
+            commit_with_aux_value_side::<E, P>(&self.prover_param, &self.value_poly)?;
+        let (rand_index_commitment, rand_index_state) =
+            commit_with_aux_non_zk::<E, P>(&self.prover_param, &self.rand_index_poly)?;
+        let (rand_value_commitment, rand_value_state) =
+            commit_with_aux_value_side::<E, P>(&self.prover_param, &self.rand_value_poly)?;
+        self.index_commitment = index_commitment.clone();
+        self.index_state = index_state;
+        self.value_commitment = value_commitment.clone();
+        self.value_state = value_state;
+        self.rand_index_commitment = rand_index_commitment.clone();
+        self.rand_index_state = rand_index_state.clone();
+        self.rand_value_commitment = rand_value_commitment.clone();
+        self.rand_value_state = rand_value_state.clone();
+        self.r_index = E::ScalarField::zero();
+        self.r_value = E::ScalarField::zero();
+        self.label_table.clear();
+        self.epoch_history.clear();
+        let (reset_value_tau, reset_rand_value_tau) = self.snapshot_value_taus();
+        self.epoch_history.insert(
+            0,
+            EpochSnapshot {
+                index_commitment,
+                value_commitment,
+                rand_index_poly: Some(self.rand_index_poly.clone()),
+                rand_index_commitment,
+                rand_index_state: Some(rand_index_state),
+                rand_value_poly: Some(self.rand_value_poly.clone()),
+                rand_value_commitment,
+                rand_value_state: Some(rand_value_state),
+                value_tau: reset_value_tau,
+                rand_value_tau: reset_rand_value_tau,
+            },
+        );
+        self.pending = None;
+        Ok(())
+    }
+
     /// **Benchmark-only bulk-load**: populate `count` random
     /// `(slot, h_label, h_value)` entries directly into `index_poly` /
     /// `value_poly`, then recommit and rebuild the prover state. Used
@@ -557,17 +662,20 @@ where
         // Refresh the epoch-0 snapshot so consistency-proof queries
         // against `epoch = 0` see the prefilled state, not the empty
         // state that `setup` originally inserted.
+        let (prefill_value_tau, prefill_rand_value_tau) = self.snapshot_value_taus();
         self.epoch_history.insert(
             0,
             EpochSnapshot {
                 index_commitment: self.index_commitment.clone(),
                 value_commitment: self.value_commitment.clone(),
-                rand_index_poly: self.rand_index_poly.clone(),
+                rand_index_poly: Some(self.rand_index_poly.clone()),
                 rand_index_commitment: self.rand_index_commitment.clone(),
-                rand_index_state: self.rand_index_state.clone(),
-                rand_value_poly: self.rand_value_poly.clone(),
+                rand_index_state: Some(self.rand_index_state.clone()),
+                rand_value_poly: Some(self.rand_value_poly.clone()),
                 rand_value_commitment: self.rand_value_commitment.clone(),
-                rand_value_state: self.rand_value_state.clone(),
+                rand_value_state: Some(self.rand_value_state.clone()),
+                value_tau: prefill_value_tau,
+                rand_value_tau: prefill_rand_value_tau,
             },
         );
         // DELIBERATELY no DB writes here. The architecture has
@@ -608,6 +716,49 @@ where
             rand_value_commitment: self.rand_value_commitment.clone(),
             _e: PhantomData,
         }
+    }
+
+    /// Whether the SRS this server was built against is hiding
+    /// (`commit_zk` adds `tau*h` to value-side commitments). Cheap
+    /// wrapper around the private `prover_param.is_zk()` so trait
+    /// impls outside `Aegon` (in particular the in-process
+    /// `ShardHandle for Aegon` impl) can branch on hiding-ness
+    /// without breaking encapsulation.
+    pub fn is_zk_srs(&self) -> bool {
+        self.prover_param.is_zk()
+    }
+
+    /// Snapshot the current value-side hiding scalars (`tau_f` for
+    /// `value_poly` and `rand_value_poly`). Returns `(None, None)`
+    /// on a non-hiding SRS so callers always get a uniform tuple.
+    ///
+    /// These tiny scalars (32 B each) are retained per-epoch even
+    /// when `retain_epoch_polys=false` drops the full state — the
+    /// masking-server protocol at lookup time needs `tau_f` to
+    /// compute `rho_prime = alpha*tau_f + rho`.
+    fn snapshot_value_taus(&self) -> (Option<P::HidingScalar>, Option<P::HidingScalar>) {
+        if self.prover_param.is_zk() {
+            (
+                Some(P::get_hiding_scalar(&self.value_state)),
+                Some(P::get_hiding_scalar(&self.rand_value_state)),
+            )
+        } else {
+            (None, None)
+        }
+    }
+
+    /// Look up `tau_f` for `value_poly` at a past (or current) epoch.
+    /// Returns `None` if the epoch is not retained OR the snapshot
+    /// was recorded under a non-hiding SRS. Used by lookup-time
+    /// masking of stored §6.4 openings.
+    pub fn value_tau_at_epoch(&self, epoch: u64) -> Option<P::HidingScalar> {
+        self.epoch_history.get(&epoch)?.value_tau.clone()
+    }
+
+    /// Look up `tau_f` for `rand_value_poly` at a past (or current)
+    /// epoch. See [`Self::value_tau_at_epoch`] for semantics.
+    pub fn rand_value_tau_at_epoch(&self, epoch: u64) -> Option<P::HidingScalar> {
+        self.epoch_history.get(&epoch)?.rand_value_tau.clone()
     }
 
     /// Returns the epoch commitment for a past (or current) epoch, if the
@@ -741,21 +892,28 @@ where
                 "publish_phase_1 called while an earlier publish is still pending; call publish_phase_2 first".into(),
             ));
         }
+        let _phase1_total_t = std::time::Instant::now();
+        let _rss_epoch = self.epoch;
+        let _rss_batch = batch.len();
+        let _rss_nnz_idx = self.index_poly.evaluations.len();
+        log_rss_ctx(
+            "phase1.enter",
+            &format!(
+                "epoch={} batch={} nnz_idx={}",
+                _rss_epoch, _rss_batch, _rss_nnz_idx
+            ),
+        );
 
-        // Snapshot prev epoch state — the invariance proof is over
-        // (prev → next), so we capture before mutating.
-        let prev_index_poly = self.index_poly.clone();
-        let prev_value_poly = self.value_poly.clone();
-        let prev_index_com = self.index_commitment.clone();
-        let prev_index_state = self.index_state.clone();
-        let prev_value_com = self.value_commitment.clone();
-        let prev_value_state = self.value_state.clone();
-        let prev_rand_index_poly = self.rand_index_poly.clone();
-        let prev_rand_index_com = self.rand_index_commitment.clone();
-        let prev_rand_index_state = self.rand_index_state.clone();
-        let prev_rand_value_poly = self.rand_value_poly.clone();
-        let prev_rand_value_com = self.rand_value_commitment.clone();
-        let prev_rand_value_state = self.rand_value_state.clone();
+        // No prev_* snapshot needed. The data polynomials (index, value)
+        // get mutated in place by the apply-writes loop below, and the
+        // data commitments / states are combined in place at the end of
+        // phase 1. The rand polynomials and their commitments / states
+        // are NOT touched in phase 1; they remain at their prior-epoch
+        // values until phase 2's pre-update opening pass captures any
+        // openings against them, then phase 2 mutates them in place too.
+        // This eliminates the 4 × (poly + state + commitment) clones the
+        // previous version paid per publish, which at log_capacity = 27
+        // dominated shard RSS (~10 GB peak per call).
 
         // Apply writes AND build delta polys in one pass. The deltas
         // are sparse polynomials with support exactly equal to the
@@ -767,6 +925,7 @@ where
         #[cfg(feature = "tracing_instrument")]
         let _apply_writes_span =
             tracing::debug_span!("Aegon::Phase1::ApplyWritesBuildDeltas").entered();
+        let _apply_writes_t = std::time::Instant::now();
         let mut delta_index_poly: SparseMultilinearExtension<E::ScalarField> =
             SparseMultilinearExtension::from_evaluations(self.index_poly.num_vars, &[]);
         let mut delta_value_poly: SparseMultilinearExtension<E::ScalarField> =
@@ -824,6 +983,16 @@ where
         }
         #[cfg(feature = "tracing_instrument")]
         drop(_apply_writes_span);
+        log_rss_ctx("phase1.post_delta_build", &format!("epoch={}", _rss_epoch));
+        if super::instrument::publish_profile_enabled() {
+            eprintln!(
+                "[pub-profile] phase1.apply_writes_and_build_deltas: {:.3} ms (batch={} new_label={} value_change={})",
+                _apply_writes_t.elapsed().as_secs_f64() * 1000.0,
+                _rss_batch,
+                new_label_slots.len(),
+                value_change_slots.len(),
+            );
+        }
 
         // Commit + aux the delta polynomials (size `batch`). Cost is
         // `O(batch)` for `P::commit` and `O(k · batch)` for the
@@ -834,55 +1003,84 @@ where
         // `new_com = prev_com + delta_com` and `new_state = prev_state +
         // delta_state` — for the hiding case, this carries
         // `tau_new = tau_prev + tau_delta` through `iadd_scaled`.
-        let (delta_index_com, delta_index_state) =
-            commit_with_aux_non_zk::<E, P>(&self.prover_param, &delta_index_poly)?;
-        let (delta_value_com, delta_value_state) =
-            commit_with_aux_value_side::<E, P>(&self.prover_param, &delta_value_poly)?;
+        // Index- and value-side delta commits are independent — they
+        // touch disjoint SRS bases and produce independent (com, state)
+        // pairs. Run them on two rayon threads via `join` so the bigger
+        // of the two sets the wall time instead of the sum.
+        let _delta_commit_t = std::time::Instant::now();
+        let (idx_res, val_res) = rayon::join(
+            || commit_with_aux_non_zk::<E, P>(&self.prover_param, &delta_index_poly),
+            || commit_with_aux_value_side::<E, P>(&self.prover_param, &delta_value_poly),
+        );
+        let (delta_index_com, delta_index_state) = idx_res?;
+        let (delta_value_com, delta_value_state) = val_res?;
+        log_rss_ctx("phase1.post_delta_commits", &format!("epoch={}", _rss_epoch));
+        if super::instrument::publish_profile_enabled() {
+            eprintln!(
+                "[pub-profile] phase1.delta_commits_parallel: {:.3} ms (delta_index_nnz={} delta_value_nnz={})",
+                _delta_commit_t.elapsed().as_secs_f64() * 1000.0,
+                delta_index_poly.evaluations.len(),
+                delta_value_poly.evaluations.len(),
+            );
+        }
 
-        // Homomorphism on commitments and on the prover state:
-        //   new_com   = prev_com   + delta_com
-        //   new_state = prev_state + delta_state    (sparse-walk FMA)
-        // Both ops cost `O(|support(delta)|)` group ops, independent
-        // of how big the prior epoch's support is. See
+        // Homomorphism on commitments and on the prover state — done IN
+        // PLACE on `self.*`:
+        //   self.X_commitment += delta_X_com
+        //   self.X_state      += delta_X_state    (sparse-walk FMA)
+        // Both ops cost `O(|support(delta)|)` group ops, independent of
+        // how big the prior epoch's support is. See
         // `KZHKState::iadd_scaled` for the per-row primitive.
+        //
+        // After this block `self.index_commitment`, `self.value_commitment`,
+        // `self.index_state`, `self.value_state` are all the NEW
+        // (post-publish) data-side values. `self.index_poly` and
+        // `self.value_poly` were already updated in the apply-writes
+        // loop. The rand_* fields remain at their prior epoch — phase 2
+        // updates them.
         #[cfg(feature = "tracing_instrument")]
         let _combine_span = tracing::debug_span!("Aegon::Phase1::CombineHomomorphic").entered();
-        let new_index_com = prev_index_com.clone() + delta_index_com.clone();
-        let new_value_com = prev_value_com.clone() + delta_value_com.clone();
-        let mut new_index_state = prev_index_state.clone();
-        P::fma_state(
-            &self.prover_param,
-            &mut new_index_state,
-            E::ScalarField::one(),
-            &delta_index_state,
-        )?;
-        let mut new_value_state = prev_value_state.clone();
-        P::fma_state(
-            &self.prover_param,
-            &mut new_value_state,
-            E::ScalarField::one(),
-            &delta_value_state,
-        )?;
+        let _combine_t = std::time::Instant::now();
+        let new_index_com = self.index_commitment.clone() + delta_index_com.clone();
+        let new_value_com = self.value_commitment.clone() + delta_value_com.clone();
+        self.index_commitment = new_index_com.clone();
+        self.value_commitment = new_value_com.clone();
+        let _com_combine_ms = _combine_t.elapsed().as_secs_f64() * 1000.0;
+        // Split-borrow `index_state` and `value_state` so the two
+        // `fma_state` calls (each O(|support(delta)|·k) group ops) run
+        // on disjoint state vectors in parallel via `rayon::join`.
+        // `prover_param` and the delta states are `&` shared by both
+        // closures, which is fine because they're read-only.
+        let one = E::ScalarField::one();
+        let _fma_t = std::time::Instant::now();
+        {
+            let pp = &self.prover_param;
+            let is: &mut P::State = &mut self.index_state;
+            let vs: &mut P::State = &mut self.value_state;
+            let (idx_fma, val_fma) = rayon::join(
+                || P::fma_state(pp, is, one, &delta_index_state),
+                || P::fma_state(pp, vs, one, &delta_value_state),
+            );
+            idx_fma?;
+            val_fma?;
+        }
         #[cfg(feature = "tracing_instrument")]
         drop(_combine_span);
+        log_rss_ctx("phase1.post_combine", &format!("epoch={}", _rss_epoch));
+        if super::instrument::publish_profile_enabled() {
+            eprintln!(
+                "[pub-profile] phase1.commit_combine: {:.3} ms",
+                _com_combine_ms,
+            );
+            eprintln!(
+                "[pub-profile] phase1.fma_state_parallel: {:.3} ms",
+                _fma_t.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
 
         self.pending = Some(PendingPublish {
-            prev_index_poly,
-            prev_value_poly,
-            prev_index_com,
-            prev_index_state,
-            prev_value_com,
-            prev_value_state,
-            prev_rand_index_poly,
-            prev_rand_index_com,
-            prev_rand_index_state,
-            prev_rand_value_poly,
-            prev_rand_value_com,
-            prev_rand_value_state,
-            new_index_com: new_index_com.clone(),
-            new_index_state,
-            new_value_com: new_value_com.clone(),
-            new_value_state,
+            delta_index_poly,
+            delta_value_poly,
             delta_index_com,
             delta_value_com,
             delta_index_state,
@@ -890,6 +1088,13 @@ where
             new_label_slots,
             value_change_slots,
         });
+        log_rss_ctx("phase1.exit", &format!("epoch={}", _rss_epoch));
+        if super::instrument::publish_profile_enabled() {
+            eprintln!(
+                "[pub-profile] PHASE1_TOTAL: {:.3} ms",
+                _phase1_total_t.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
 
         Ok((new_index_com, new_value_com))
     }
@@ -909,6 +1114,9 @@ where
         new_r_index: E::ScalarField,
         new_r_value: E::ScalarField,
     ) -> Result<(EpochCommitment<E, P>, HistoryOpenings<E, P>), AegonError> {
+        let _phase2_total_t = std::time::Instant::now();
+        let _rss_epoch = self.epoch;
+        log_rss_ctx("phase2.enter", &format!("epoch={}", _rss_epoch));
         let pending = self.pending.take().ok_or_else(|| {
             AegonError::Config(
                 "publish_phase_2 called without a pending publish; call publish_phase_1 first"
@@ -916,22 +1124,8 @@ where
             )
         })?;
         let PendingPublish {
-            prev_index_poly,
-            prev_value_poly,
-            prev_index_com,
-            prev_index_state,
-            prev_value_com,
-            prev_value_state,
-            prev_rand_index_poly,
-            prev_rand_index_com,
-            prev_rand_index_state,
-            prev_rand_value_poly,
-            prev_rand_value_com,
-            prev_rand_value_state,
-            new_index_com,
-            new_index_state,
-            new_value_com,
-            new_value_state,
+            delta_index_poly,
+            delta_value_poly,
             delta_index_com,
             delta_value_com,
             delta_index_state,
@@ -940,23 +1134,31 @@ where
             value_change_slots,
         } = pending;
 
-        // §6.4 step 1: open `rand_index` and `rand_value` at each
-        // new-label slot **before** the rand-polys are mutated. The
-        // openings bind against the prior-epoch rand commitments
-        // (`prev_rand_*_com`); evaluations are zero by construction
-        // (a brand-new slot has had no chain delta applied to it
-        // through any prior epoch), but the PCS proof is still required
-        // for the future history-check verifier.
+        // Build the placement_idx map up-front — we need it both for
+        // pre-opening value-only-update slots (below) and for assembling
+        // value_change_entries (further down).
+        let mut placement_idx: std::collections::HashMap<Vec<bool>, usize> =
+            std::collections::HashMap::with_capacity(new_label_slots.len());
+        for (i, slot) in new_label_slots.iter().enumerate() {
+            placement_idx.insert(slot.clone(), i);
+        }
+
+        // §6.4 step 1 (PRE-update openings): open `rand_index` and
+        // `rand_value` at every new-label slot **before** the
+        // rand-polynomials are mutated. The openings bind against the
+        // prior-epoch rand commitments — which at this point are still
+        // `self.rand_*_commitment` (phase 1 doesn't touch rand_*; the
+        // homomorphic combine below is the first mutation, and we run
+        // it AFTER capturing these openings). Evaluations are zero by
+        // construction (a brand-new slot has had no chain delta
+        // applied to it through any prior epoch), but the PCS proof is
+        // still required for the future history-check verifier.
         #[cfg(feature = "tracing_instrument")]
         let _pre_openings_span = tracing::debug_span!(
             "Aegon::Phase2::PreUpdateOpenings",
             new_slots = new_label_slots.len()
         )
         .entered();
-        let mut pre_rand_index: Vec<(E::ScalarField, P::Proof)> =
-            Vec::with_capacity(new_label_slots.len());
-        let mut pre_rand_value: Vec<(E::ScalarField, P::Proof)> =
-            Vec::with_capacity(new_label_slots.len());
         // Publish-time openings:
         // * `rand_index` is label-side, plain commit ⇒ plain opening.
         // * `rand_value` is value-side, hiding commit ⇒ goes through
@@ -964,86 +1166,158 @@ where
         //   opening under a hiding SRS. The masking-server protocol
         //   is intentionally NOT on the publish hot path ("not in
         //   the publish"); inline sampling is fine here.
-        for slot_bits in &new_label_slots {
-            pre_rand_index.push(open_at_point_non_zk::<E, P>(
-                &self.prover_param,
-                &prev_rand_index_poly,
-                &prev_rand_index_com,
-                &prev_rand_index_state,
-                slot_bits,
-                &self.dims,
-                b"aegon.rand_index.open",
-            )?);
-            pre_rand_value.push(open_at_point::<E, P>(
-                &self.prover_param,
-                &prev_rand_value_poly,
-                &prev_rand_value_com,
-                &prev_rand_value_state,
-                slot_bits,
-                &self.dims,
-                b"aegon.rand_value.open",
-            )?);
-        }
+        //
+        // All openings touch `&self.*` read-only — the homomorphic
+        // combine below is the first mutation, and it runs after this
+        // pass completes — so the per-slot work parallelizes cleanly.
+        // KZH-k opening at log_cap=27, k=9 is `O(k · BTreeMap::get)`
+        // per call (~50–100 µs); at 8 K new placements per shard this
+        // pass is the wall of phase 2. Rayon `par_iter` over the slot
+        // list spreads it across the shard's CPUs.
+        let pp = &self.prover_param;
+        let dims = &self.dims;
+        let _pre_open_t = std::time::Instant::now();
+        let pre_pairs: Vec<((E::ScalarField, P::Proof), (E::ScalarField, P::Proof))> =
+            new_label_slots
+                .par_iter()
+                .map(|slot_bits| -> Result<_, AegonError> {
+                    let ri = open_at_point_non_zk::<E, P>(
+                        pp,
+                        &self.rand_index_poly,
+                        &self.rand_index_commitment,
+                        &self.rand_index_state,
+                        slot_bits,
+                        dims,
+                        b"aegon.rand_index.open",
+                    )?;
+                    let rv = open_at_point_non_zk::<E, P>(
+                        pp,
+                        &self.rand_value_poly,
+                        &self.rand_value_commitment,
+                        &self.rand_value_state,
+                        slot_bits,
+                        dims,
+                        b"aegon.rand_value.open",
+                    )?;
+                    Ok((ri, rv))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+        let (pre_rand_index, pre_rand_value): (
+            Vec<(E::ScalarField, P::Proof)>,
+            Vec<(E::ScalarField, P::Proof)>,
+        ) = pre_pairs.into_iter().unzip();
+
+        // Pre-update `rand_value` openings for value-only-update slots
+        // (subset of `value_change_slots` that aren't new placements).
+        // Captured here so we can pair them with their post-update
+        // counterparts after the in-place rand mutation below. Also
+        // parallelized — each call is an independent read of
+        // `self.rand_value_*`.
+        let voup_pre_rand_value: std::collections::HashMap<
+            Vec<bool>,
+            (E::ScalarField, P::Proof),
+        > = value_change_slots
+            .par_iter()
+            .filter(|slot_bits| !placement_idx.contains_key(*slot_bits))
+            .map(|slot_bits| -> Result<_, AegonError> {
+                let p = open_at_point_non_zk::<E, P>(
+                    pp,
+                    &self.rand_value_poly,
+                    &self.rand_value_commitment,
+                    &self.rand_value_state,
+                    slot_bits,
+                    dims,
+                    b"aegon.rand_value.open",
+                )?;
+                Ok((slot_bits.clone(), p))
+            })
+            .collect::<Result<std::collections::HashMap<_, _>, _>>()?;
         #[cfg(feature = "tracing_instrument")]
         drop(_pre_openings_span);
+        if super::instrument::publish_profile_enabled() {
+            eprintln!(
+                "[pub-profile] phase2.pre_openings_parallel: {:.3} ms (placements={} voup={})",
+                _pre_open_t.elapsed().as_secs_f64() * 1000.0,
+                new_label_slots.len(),
+                voup_pre_rand_value.len(),
+            );
+        }
 
-        // Update rand polynomials: `rand_{n+1} = rand_n + r_n · ∆`.
-        // The polynomial update is still done pointwise on the sparse
-        // evaluation tables (cheap, `O(|support(∆)|)`), because future
-        // openings of `rand_*_poly` need it to be consistent with the
-        // commitment we publish below.
-        update_rand(
-            &mut self.rand_index_poly,
-            &prev_index_poly,
-            &self.index_poly,
-            new_r_index,
-        );
-        update_rand(
-            &mut self.rand_value_poly,
-            &prev_value_poly,
-            &self.value_poly,
-            new_r_value,
-        );
+        // Update rand polynomials in place: `rand_{n+1} = rand_n + r · ∆`,
+        // using the explicit delta polynomials stashed by phase 1 (we
+        // don't need prev/new pairs because the delta IS poly_{n+1} −
+        // poly_n by construction in phase 1). Cost is
+        // `O(|support(∆)|)`. The index and value updates touch disjoint
+        // fields of `self` and can run on two rayon threads.
+        let _rand_update_t = std::time::Instant::now();
+        {
+            let rip: &mut SparseMultilinearExtension<E::ScalarField> = &mut self.rand_index_poly;
+            let rvp: &mut SparseMultilinearExtension<E::ScalarField> = &mut self.rand_value_poly;
+            rayon::join(
+                || update_rand_with_delta(rip, &delta_index_poly, new_r_index),
+                || update_rand_with_delta(rvp, &delta_value_poly, new_r_value),
+            );
+        }
+        if super::instrument::publish_profile_enabled() {
+            eprintln!(
+                "[pub-profile] phase2.update_rand_polys_parallel: {:.3} ms",
+                _rand_update_t.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
 
-        // No new MSM for the rand commitments. Phase 1 already
-        // committed + aux'd the data-side delta (`delta_index_com`,
-        // `delta_index_state` and friends). Since rand_{n+1} − rand_n =
-        // r_X · ∆_X holds pointwise on the polynomial, the same
-        // homomorphism holds on commitments and on the prover state:
-        //   new_rand_X_com   = prev_rand_X_com   + r_X · delta_X_com
-        //   new_rand_X_state = prev_rand_X_state + r_X · delta_X_state
+        // Homomorphic combine on rand commitments / states — done IN
+        // PLACE on `self.rand_*`. After this block, all four rand_*
+        // fields on self hold the NEW (post-publish) values.
+        //   self.rand_X_commitment = rand_X_commitment + r_X · delta_X_com
+        //   self.rand_X_state     += r_X · delta_X_state    (sparse FMA)
         // The `+ r_X ·` part is one scalar-mul on the commitment group
         // element and `O(k · batch)` group ops on the state (only
         // touched cells get updated — see `KZHKState::iadd_scaled`).
+        // The two FMAs touch disjoint state fields ⇒ split-borrow +
+        // rayon::join.
         #[cfg(feature = "tracing_instrument")]
         let _combine_rand_span =
             tracing::debug_span!("Aegon::Phase2::CombineRandHomomorphic").entered();
-        let new_rand_index_com = prev_rand_index_com.clone()
+        let _rand_combine_t = std::time::Instant::now();
+        let new_rand_index_com = self.rand_index_commitment.clone()
             + delta_index_com.clone() * new_r_index;
-        let new_rand_value_com = prev_rand_value_com.clone()
+        let new_rand_value_com = self.rand_value_commitment.clone()
             + delta_value_com.clone() * new_r_value;
-        let mut new_rand_index_state = prev_rand_index_state.clone();
-        P::fma_state(
-            &self.prover_param,
-            &mut new_rand_index_state,
-            new_r_index,
-            &delta_index_state,
-        )?;
-        let mut new_rand_value_state = prev_rand_value_state.clone();
-        P::fma_state(
-            &self.prover_param,
-            &mut new_rand_value_state,
-            new_r_value,
-            &delta_value_state,
-        )?;
+        self.rand_index_commitment = new_rand_index_com.clone();
+        self.rand_value_commitment = new_rand_value_com.clone();
+        let _rand_com_combine_ms = _rand_combine_t.elapsed().as_secs_f64() * 1000.0;
+        let _rand_fma_t = std::time::Instant::now();
+        {
+            let pp = &self.prover_param;
+            let ris: &mut P::State = &mut self.rand_index_state;
+            let rvs: &mut P::State = &mut self.rand_value_state;
+            let (rfi, rfv) = rayon::join(
+                || P::fma_state(pp, ris, new_r_index, &delta_index_state),
+                || P::fma_state(pp, rvs, new_r_value, &delta_value_state),
+            );
+            rfi?;
+            rfv?;
+        }
         #[cfg(feature = "tracing_instrument")]
         drop(_combine_rand_span);
+        log_rss_ctx("phase2.post_rand_combine", &format!("epoch={}", _rss_epoch));
+        if super::instrument::publish_profile_enabled() {
+            eprintln!(
+                "[pub-profile] phase2.rand_commit_combine: {:.3} ms",
+                _rand_com_combine_ms,
+            );
+            eprintln!(
+                "[pub-profile] phase2.rand_fma_state_parallel: {:.3} ms",
+                _rand_fma_t.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
 
-        // §6.4 step 2: open `rand_index` and `rand_value` (now at the
-        // new epoch) and `value` (also at the new epoch — the
-        // value-poly was committed at the end of phase 1) at every
-        // new-label slot. Together with the pre-openings above, this
-        // pins both endpoints of the update equation
+        // §6.4 step 2 (POST-update openings): open `rand_index` and
+        // `rand_value` (now at the new epoch) and `value` (also at the
+        // new epoch — `self.value_poly` was committed at the end of
+        // phase 1) at every new-label slot. Together with the
+        // pre-openings above, this pins both endpoints of the update
+        // equation
         // `rand_X_new(s) − rand_X_old(s) = r_X · (data_X_new(s) − 0)`
         // at every slot the verifier needs to check.
         #[cfg(feature = "tracing_instrument")]
@@ -1052,61 +1326,71 @@ where
             new_slots = new_label_slots.len()
         )
         .entered();
+        // All three openings per slot are pure reads on now-mutated
+        // `self.*` (rand and value sides). Parallelize over slots —
+        // this is symmetric to the pre-pass and roughly the same wall
+        // weight. At 8K new placements per shard this trio dominates
+        // phase 2 alongside the pre-pass.
+        let pp = &self.prover_param;
+        let dims = &self.dims;
+        let _post_open_t = std::time::Instant::now();
+        let post_triples: Vec<(
+            (E::ScalarField, P::Proof),
+            (E::ScalarField, P::Proof),
+            (E::ScalarField, P::Proof),
+        )> = new_label_slots
+            .par_iter()
+            .map(|slot_bits| -> Result<_, AegonError> {
+                let ri = open_at_point_non_zk::<E, P>(
+                    pp,
+                    &self.rand_index_poly,
+                    &self.rand_index_commitment,
+                    &self.rand_index_state,
+                    slot_bits,
+                    dims,
+                    b"aegon.rand_index.open",
+                )?;
+                let rv = open_at_point_non_zk::<E, P>(
+                    pp,
+                    &self.rand_value_poly,
+                    &self.rand_value_commitment,
+                    &self.rand_value_state,
+                    slot_bits,
+                    dims,
+                    b"aegon.rand_value.open",
+                )?;
+                let v = open_at_point_non_zk::<E, P>(
+                    pp,
+                    &self.value_poly,
+                    &self.value_commitment,
+                    &self.value_state,
+                    slot_bits,
+                    dims,
+                    b"aegon.value.open",
+                )?;
+                Ok((ri, rv, v))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let mut post_rand_index: Vec<(E::ScalarField, P::Proof)> =
             Vec::with_capacity(new_label_slots.len());
         let mut post_rand_value: Vec<(E::ScalarField, P::Proof)> =
             Vec::with_capacity(new_label_slots.len());
         let mut post_value: Vec<(E::ScalarField, P::Proof)> =
             Vec::with_capacity(new_label_slots.len());
-        for slot_bits in &new_label_slots {
-            // `rand_index` is label-side (plain commit ⇒ plain open).
-            post_rand_index.push(open_at_point_non_zk::<E, P>(
-                &self.prover_param,
-                &self.rand_index_poly,
-                &new_rand_index_com,
-                &new_rand_index_state,
-                slot_bits,
-                &self.dims,
-                b"aegon.rand_index.open",
-            )?);
-            // `rand_value` / `value` are value-side (hiding commit ⇒
-            // inline-ZK opening via auto-dispatch).
-            post_rand_value.push(open_at_point::<E, P>(
-                &self.prover_param,
-                &self.rand_value_poly,
-                &new_rand_value_com,
-                &new_rand_value_state,
-                slot_bits,
-                &self.dims,
-                b"aegon.rand_value.open",
-            )?);
-            post_value.push(open_at_point::<E, P>(
-                &self.prover_param,
-                &self.value_poly,
-                &new_value_com,
-                &new_value_state,
-                slot_bits,
-                &self.dims,
-                b"aegon.value.open",
-            )?);
+        for (ri, rv, v) in post_triples {
+            post_rand_index.push(ri);
+            post_rand_value.push(rv);
+            post_value.push(v);
         }
         #[cfg(feature = "tracing_instrument")]
         drop(_post_openings_span);
-
-        // The prev_*_poly / prev_*_state / prev_*_com bindings the
-        // destructure pulled out of `PendingPublish` were threaded into
-        // the old `build_invariance_proof` helper. With both that
-        // helper and the empty `InvarianceProof` marker gone, suppress
-        // the unused-binding warnings explicitly so the destructure
-        // pattern stays one place.
-        let _ = (
-            &prev_index_poly,
-            &prev_index_state,
-            &prev_value_poly,
-            &prev_value_state,
-            &prev_index_com,
-            &prev_value_com,
-        );
+        if super::instrument::publish_profile_enabled() {
+            eprintln!(
+                "[pub-profile] phase2.post_openings_parallel: {:.3} ms (placements={})",
+                _post_open_t.elapsed().as_secs_f64() * 1000.0,
+                new_label_slots.len(),
+            );
+        }
 
         // Assemble the §6.4 history witness bundle. Per-slot evals +
         // proofs come from the two passes above, addressed by the
@@ -1149,110 +1433,146 @@ where
             slots = value_change_slots.len()
         )
         .entered();
-        // Build a quick lookup from slot_bits → index into the §6.4
-        // bundle so the new-placement branch is O(1) per slot rather
-        // than O(new_label_slots.len()).
-        let mut placement_idx: std::collections::HashMap<Vec<bool>, usize> =
-            std::collections::HashMap::with_capacity(new_label_slots.len());
-        for (i, slot) in new_label_slots.iter().enumerate() {
-            placement_idx.insert(slot.clone(), i);
-        }
-        let mut value_change_entries: Vec<ValueChangeEntry<E, P>> =
-            Vec::with_capacity(value_change_slots.len());
-        for slot_bits in &value_change_slots {
-            if let Some(&i) = placement_idx.get(slot_bits) {
-                // Brand-new placement: reuse the already-computed
-                // openings from the §6.4 pre/post passes.
-                value_change_entries.push(ValueChangeEntry {
-                    slot_bits: slot_bits.clone(),
-                    rand_value_pre_eval: pre_rand_value[i].0,
-                    rand_value_pre_proof: pre_rand_value[i].1.clone(),
-                    rand_value_post_eval: post_rand_value[i].0,
-                    rand_value_post_proof: post_rand_value[i].1.clone(),
-                    value_post_eval: post_value[i].0,
-                    value_post_proof: post_value[i].1.clone(),
-                });
-            } else {
-                // Value-only update on a slot that was already
-                // occupied. The §6.4 placement loop skipped this slot,
-                // so open all three afresh — pre against the prior-
-                // epoch rand_value commitment+state, post against the
-                // new-epoch ones, value against the new-epoch value
-                // commitment.
-                let pre = open_at_point::<E, P>(
-                    &self.prover_param,
-                    &prev_rand_value_poly,
-                    &prev_rand_value_com,
-                    &prev_rand_value_state,
-                    slot_bits,
-                    &self.dims,
-                    b"aegon.rand_value.open",
-                )?;
-                let post = open_at_point::<E, P>(
-                    &self.prover_param,
-                    &self.rand_value_poly,
-                    &new_rand_value_com,
-                    &new_rand_value_state,
-                    slot_bits,
-                    &self.dims,
-                    b"aegon.rand_value.open",
-                )?;
-                let val = open_at_point::<E, P>(
-                    &self.prover_param,
-                    &self.value_poly,
-                    &new_value_com,
-                    &new_value_state,
-                    slot_bits,
-                    &self.dims,
-                    b"aegon.value.open",
-                )?;
-                value_change_entries.push(ValueChangeEntry {
-                    slot_bits: slot_bits.clone(),
-                    rand_value_pre_eval: pre.0,
-                    rand_value_pre_proof: pre.1,
-                    rand_value_post_eval: post.0,
-                    rand_value_post_proof: post.1,
-                    value_post_eval: val.0,
-                    value_post_proof: val.1,
-                });
-            }
-        }
+        // Parallelize over value_change_slots. Placement entries do no
+        // crypto (just copy from the §6.4 bundle, free). VOUP entries
+        // do 2 openings each — same per-call cost as the §6.4 passes,
+        // so worth distributing across cores. `voup_pre_rand_value` is
+        // a `HashMap` populated above; we read (not remove) here to
+        // keep the closure `Fn` instead of `FnMut`.
+        let _vc_open_t = std::time::Instant::now();
+        let value_change_entries: Vec<ValueChangeEntry<E, P>> = value_change_slots
+            .par_iter()
+            .map(|slot_bits| -> Result<ValueChangeEntry<E, P>, AegonError> {
+                if let Some(&i) = placement_idx.get(slot_bits) {
+                    // Brand-new placement: reuse the already-computed
+                    // openings from the §6.4 pre/post passes.
+                    Ok(ValueChangeEntry {
+                        slot_bits: slot_bits.clone(),
+                        rand_value_pre_eval: pre_rand_value[i].0,
+                        rand_value_pre_proof: pre_rand_value[i].1.clone(),
+                        rand_value_post_eval: post_rand_value[i].0,
+                        rand_value_post_proof: post_rand_value[i].1.clone(),
+                        value_post_eval: post_value[i].0,
+                        value_post_proof: post_value[i].1.clone(),
+                    })
+                } else {
+                    // Value-only update on a slot that was already
+                    // occupied. The §6.4 placement loop skipped this
+                    // slot, so we pre-captured the pre-update
+                    // rand_value opening above (in
+                    // `voup_pre_rand_value`); the post-update
+                    // rand_value and value openings are computed fresh
+                    // against the now-mutated `self.*` state.
+                    let pre = voup_pre_rand_value
+                        .get(slot_bits)
+                        .expect("pre-opening captured for every value-only-update slot")
+                        .clone();
+                    let post = open_at_point_non_zk::<E, P>(
+                        pp,
+                        &self.rand_value_poly,
+                        &self.rand_value_commitment,
+                        &self.rand_value_state,
+                        slot_bits,
+                        dims,
+                        b"aegon.rand_value.open",
+                    )?;
+                    let val = open_at_point_non_zk::<E, P>(
+                        pp,
+                        &self.value_poly,
+                        &self.value_commitment,
+                        &self.value_state,
+                        slot_bits,
+                        dims,
+                        b"aegon.value.open",
+                    )?;
+                    Ok(ValueChangeEntry {
+                        slot_bits: slot_bits.clone(),
+                        rand_value_pre_eval: pre.0,
+                        rand_value_pre_proof: pre.1,
+                        rand_value_post_eval: post.0,
+                        rand_value_post_proof: post.1,
+                        value_post_eval: val.0,
+                        value_post_proof: val.1,
+                    })
+                }
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         #[cfg(feature = "tracing_instrument")]
         drop(_value_change_span);
+        if super::instrument::publish_profile_enabled() {
+            eprintln!(
+                "[pub-profile] phase2.value_change_openings_parallel: {:.3} ms (entries={} voup_fresh_opens={})",
+                _vc_open_t.elapsed().as_secs_f64() * 1000.0,
+                value_change_slots.len(),
+                value_change_slots
+                    .iter()
+                    .filter(|s| !placement_idx.contains_key(*s))
+                    .count(),
+            );
+        }
 
         let history = HistoryOpenings {
             entries: new_label_entries,
             value_changes: value_change_entries,
         };
 
-        // Commit the new epoch to live state and history.
+        // Finalize the new epoch. `self.*` already holds the new
+        // commitments / states / polynomials (mutated in place during
+        // phase 1 and earlier in this phase), so the only state we
+        // still need to update here is the Fiat-Shamir chain randomness
+        // and the epoch counter.
         #[cfg(feature = "tracing_instrument")]
         let _finalize_span = tracing::debug_span!("Aegon::Phase2::FinalizeEpoch").entered();
-        self.index_commitment = new_index_com.clone();
-        self.index_state = new_index_state;
-        self.value_commitment = new_value_com.clone();
-        self.value_state = new_value_state;
-        self.rand_index_commitment = new_rand_index_com.clone();
-        self.rand_index_state = new_rand_index_state.clone();
-        self.rand_value_commitment = new_rand_value_com.clone();
-        self.rand_value_state = new_rand_value_state.clone();
         self.r_index = new_r_index;
         self.r_value = new_r_value;
         self.epoch += 1;
 
+        // When `retain_epoch_polys` is false (bench mode), keep only the
+        // four commitments per epoch and drop the rand polys + states.
+        // `epoch_commitment(epoch)` (used by `verify_sharded_invariance`)
+        // reads only the commitments; the dropped fields are needed only
+        // by `open_rand_*_at_slot_in_epoch`, which the bench doesn't
+        // call. Frees ~50 MB/epoch — turns an OOM at ~280 epochs into a
+        // run that scales linearly through 90% fill.
+        let (snap_rand_index_poly, snap_rand_index_state, snap_rand_value_poly, snap_rand_value_state) =
+            if self.retain_epoch_polys {
+                (
+                    Some(self.rand_index_poly.clone()),
+                    Some(self.rand_index_state.clone()),
+                    Some(self.rand_value_poly.clone()),
+                    Some(self.rand_value_state.clone()),
+                )
+            } else {
+                (None, None, None, None)
+            };
+        // Always snapshot the new epoch's value-side `tau_f` scalars.
+        // Even with `retain_epoch_polys=false` (bench mode) we keep
+        // these so lookup_history's masking layer can find the right
+        // `tau_f` per epoch. Two 32-byte field elements per epoch —
+        // ~256 KB at 4K epochs, independent of `retain_epoch_polys`.
+        let (publish_value_tau, publish_rand_value_tau) = self.snapshot_value_taus();
         self.epoch_history.insert(
             self.epoch,
             EpochSnapshot {
-                index_commitment: new_index_com,
-                value_commitment: new_value_com,
-                rand_index_poly: self.rand_index_poly.clone(),
-                rand_index_commitment: new_rand_index_com,
-                rand_index_state: new_rand_index_state,
-                rand_value_poly: self.rand_value_poly.clone(),
-                rand_value_commitment: new_rand_value_com,
-                rand_value_state: new_rand_value_state,
+                index_commitment: self.index_commitment.clone(),
+                value_commitment: self.value_commitment.clone(),
+                rand_index_poly: snap_rand_index_poly,
+                rand_index_commitment: self.rand_index_commitment.clone(),
+                rand_index_state: snap_rand_index_state,
+                rand_value_poly: snap_rand_value_poly,
+                rand_value_commitment: self.rand_value_commitment.clone(),
+                rand_value_state: snap_rand_value_state,
+                value_tau: publish_value_tau,
+                rand_value_tau: publish_rand_value_tau,
             },
         );
+        log_rss_ctx("phase2.exit", &format!("epoch={}", self.epoch));
+        if super::instrument::publish_profile_enabled() {
+            eprintln!(
+                "[pub-profile] PHASE2_TOTAL: {:.3} ms",
+                _phase2_total_t.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
 
         Ok((self.current_commitment(), history))
     }
@@ -1454,6 +1774,10 @@ where
     /// Used by sharded consistency proofs to open both `s0` and the
     /// current epoch at the same probe point. Label-side opening:
     /// auto-dispatches on SRS hiding-ness (inline-ZK under hiding).
+    ///
+    /// Returns `AegonError::InvalidEpoch` when `epoch` is unknown OR
+    /// when its snapshot was recorded with `retain_epoch_polys = false`
+    /// (the polys + state were dropped on purpose to save memory).
     pub fn open_rand_index_at_slot_in_epoch(
         &self,
         slot_bits: &[bool],
@@ -1463,12 +1787,20 @@ where
             .epoch_history
             .get(&epoch)
             .ok_or(AegonError::InvalidEpoch(epoch))?;
+        let poly = snap
+            .rand_index_poly
+            .as_ref()
+            .ok_or(AegonError::InvalidEpoch(epoch))?;
+        let state = snap
+            .rand_index_state
+            .as_ref()
+            .ok_or(AegonError::InvalidEpoch(epoch))?;
         // Label-side: plain commit ⇒ plain opening.
         open_at_point_non_zk::<E, P>(
             &self.prover_param,
-            &snap.rand_index_poly,
+            poly,
             &snap.rand_index_commitment,
-            &snap.rand_index_state,
+            state,
             slot_bits,
             &self.dims,
             b"aegon.rand_index.open",
@@ -1478,6 +1810,9 @@ where
     /// Open `rand_value_poly` at `slot_bits` for some retained `epoch`.
     /// Value-side opening — hiding (ZK) via the masking-server
     /// protocol.
+    ///
+    /// Returns `AegonError::InvalidEpoch` when `epoch` is unknown OR
+    /// when its snapshot was recorded with `retain_epoch_polys = false`.
     pub fn open_rand_value_at_slot_in_epoch(
         &self,
         slot_bits: &[bool],
@@ -1487,10 +1822,18 @@ where
             .epoch_history
             .get(&epoch)
             .ok_or(AegonError::InvalidEpoch(epoch))?;
+        let poly = snap
+            .rand_value_poly
+            .as_ref()
+            .ok_or(AegonError::InvalidEpoch(epoch))?;
+        let state = snap
+            .rand_value_state
+            .as_ref()
+            .ok_or(AegonError::InvalidEpoch(epoch))?;
         self.open_value_side_at_point(
-            &snap.rand_value_poly,
+            poly,
             &snap.rand_value_commitment,
-            &snap.rand_value_state,
+            state,
             slot_bits,
             b"aegon.rand_value.open",
         )
@@ -1601,6 +1944,24 @@ where
             .epoch_history
             .get(&s0)
             .ok_or(AegonError::InvalidEpoch(s0))?;
+        // Pair-openings reach back to `s0`'s polynomial state — only
+        // available when `retain_epoch_polys` was true at that publish.
+        let snap_s0_rand_index_poly = snap_s0
+            .rand_index_poly
+            .as_ref()
+            .ok_or(AegonError::InvalidEpoch(s0))?;
+        let snap_s0_rand_index_state = snap_s0
+            .rand_index_state
+            .as_ref()
+            .ok_or(AegonError::InvalidEpoch(s0))?;
+        let snap_s0_rand_value_poly = snap_s0
+            .rand_value_poly
+            .as_ref()
+            .ok_or(AegonError::InvalidEpoch(s0))?;
+        let snap_s0_rand_value_state = snap_s0
+            .rand_value_state
+            .as_ref()
+            .ok_or(AegonError::InvalidEpoch(s0))?;
         let (bool_index, ctr0) = self
             .label_table
             .get(label)
@@ -1619,9 +1980,9 @@ where
             let pair = open_pair_non_zk::<E, P>(
                 &self.prover_param,
                 &point,
-                &snap_s0.rand_index_poly,
+                snap_s0_rand_index_poly,
                 &snap_s0.rand_index_commitment,
-                &snap_s0.rand_index_state,
+                snap_s0_rand_index_state,
                 &self.rand_index_poly,
                 &self.rand_index_commitment,
                 &self.rand_index_state,
@@ -1634,9 +1995,9 @@ where
         let value_witness = open_pair::<E, P>(
             &self.prover_param,
             &value_point,
-            &snap_s0.rand_value_poly,
+            snap_s0_rand_value_poly,
             &snap_s0.rand_value_commitment,
-            &snap_s0.rand_value_state,
+            snap_s0_rand_value_state,
             &self.rand_value_poly,
             &self.rand_value_commitment,
             &self.rand_value_state,
@@ -1802,6 +2163,31 @@ where
     Ok((com, state))
 }
 
+/// Free-fn analogue of [`Aegon::snapshot_value_taus`] for code paths
+/// (init / restore / prefill) where `self` isn't yet built. Same
+/// rule: under a hiding SRS, capture each value-side poly's `tau_f`
+/// via `P::get_hiding_scalar`; under a non-hiding SRS, return
+/// `(None, None)`.
+fn extract_value_taus<E, P>(
+    pp: &P::ProverParam,
+    value_state: &P::State,
+    rand_value_state: &P::State,
+) -> (Option<P::HidingScalar>, Option<P::HidingScalar>)
+where
+    E: Pairing,
+    P: AegonPcs<E>,
+    P::ProverParam: akd_core::aegon_crypto::pcs::PCSGlobalParam,
+{
+    if pp.is_zk() {
+        (
+            Some(P::get_hiding_scalar(value_state)),
+            Some(P::get_hiding_scalar(rand_value_state)),
+        )
+    } else {
+        (None, None)
+    }
+}
+
 /// `rand += r · (next - prev)` on sparse evaluation tables. The support
 /// of the result is the union of the supports of `rand`, `prev`, and
 /// `next`; we walk each non-zero entry of `(next - prev)` exactly once.
@@ -1835,6 +2221,33 @@ fn update_rand<F: ark_ff::Field>(
             rand.evaluations.remove(&idx);
         } else {
             rand.evaluations.insert(idx, updated);
+        }
+    }
+}
+
+/// Same as [`update_rand`] but takes the delta polynomial directly,
+/// avoiding the need to keep `prev` and `next` polynomials side-by-side
+/// in memory. The caller (publish_phase_2) already builds `delta` in
+/// phase_1, so this saves cloning prev across the phase boundary.
+///
+/// Computes `rand += r · delta` slot by slot, dropping any slot whose
+/// updated value becomes zero.
+fn update_rand_with_delta<F: ark_ff::Field>(
+    rand: &mut SparseMultilinearExtension<F>,
+    delta: &SparseMultilinearExtension<F>,
+    r: F,
+) {
+    for (idx, d) in &delta.evaluations {
+        if d.is_zero() {
+            continue;
+        }
+        let contribution = r * *d;
+        let cur = rand.evaluations.get(idx).copied().unwrap_or(F::ZERO);
+        let updated = cur + contribution;
+        if updated.is_zero() {
+            rand.evaluations.remove(idx);
+        } else {
+            rand.evaluations.insert(*idx, updated);
         }
     }
 }

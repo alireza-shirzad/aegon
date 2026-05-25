@@ -63,6 +63,7 @@ run_one() {
     --samples-per-batch "$SAMPLES_PER_BATCH" \
     --setup-seed "$SETUP_SEED" \
     --prefill-seed "$PREFILL_SEED" \
+    --private \
     --out "$out"
   log "$label: wrote $out"
 }

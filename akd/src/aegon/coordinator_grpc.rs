@@ -193,7 +193,7 @@ where
     /// consistent so a single proof from a very full table still
     /// fits.
     fn wrap_service(this: Self) -> CoordinatorServiceServer<Self> {
-        const MAX_MSG_BYTES: usize = 1024 * 1024 * 1024;
+        const MAX_MSG_BYTES: usize = 8 * 1024 * 1024 * 1024;
         CoordinatorServiceServer::new(this)
             .max_decoding_message_size(MAX_MSG_BYTES)
             .max_encoding_message_size(MAX_MSG_BYTES)
@@ -456,7 +456,7 @@ where
             .block_on(endpoint.connect())
             .map_err(|e| AegonError::Config(format!("connect '{}': {e}", cfg.endpoint)))?;
         // Same 1 GiB ceiling as the server side.
-        const MAX_MSG_BYTES: usize = 1024 * 1024 * 1024;
+        const MAX_MSG_BYTES: usize = 8 * 1024 * 1024 * 1024;
         let client = CoordinatorServiceClient::new(channel)
             .max_decoding_message_size(MAX_MSG_BYTES)
             .max_encoding_message_size(MAX_MSG_BYTES);

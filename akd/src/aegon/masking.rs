@@ -74,7 +74,7 @@ fn status_to_err(s: Status) -> AegonError {
 // directions. Masking packages are smaller (KZH-k sparse `r` with
 // ~`k * N^{1/k}` non-zero coefficients) but the same cap removes
 // any ambient size pressure as `num_vars` grows.
-const MAX_MSG_BYTES: usize = 1024 * 1024 * 1024;
+const MAX_MSG_BYTES: usize = 8 * 1024 * 1024 * 1024;
 
 // ---------- masking server --------------------------------------------
 

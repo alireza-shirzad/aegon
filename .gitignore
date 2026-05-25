@@ -23,3 +23,6 @@ Cargo.lock
 *.iml
 
 /artifacts/
+# Generated SRS artifacts — derived from setup_seed + kzh_k, regeneratable,
+# and far too large for git (multi-GB binary files).
+bench-results/srs/

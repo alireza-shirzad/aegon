@@ -106,13 +106,15 @@ struct Args {
     #[arg(long, value_delimiter = ',')]
     endpoints: Vec<String>,
 
-    /// Fill percentages to bench. In **local mode**, iterates through
-    /// all values (prefilling the in-process shard to each level
-    /// between sweep stages). In **distributed mode**, only the first
-    /// is used (and recorded as metadata; the cluster operator is
-    /// responsible for matching the actual prefill).
-    /// Default: 0,30,60,90.
-    #[arg(long, value_delimiter = ',', default_values_t = vec![0u32, 30, 60, 90])]
+    /// Fill percentages to bench. Stages are walked in sorted order;
+    /// between stages we run *real* publishes (not the in-memory
+    /// prefill_random shortcut) until the dictionary reaches the
+    /// target count. That populates Redis open-addressing state,
+    /// history openings, and the FS chain — so each measured
+    /// publish runs against the same kind of state a production
+    /// cluster would have. The cost of the warmup grows with the
+    /// fill ceiling, so the default caps at 30%.
+    #[arg(long, value_delimiter = ',', default_values_t = vec![0u32, 30])]
     fill_percents: Vec<u32>,
 
     /// Comma-separated batch sizes to sweep at every fill level.
@@ -124,15 +126,22 @@ struct Args {
     #[arg(long, default_value_t = 3)]
     samples_per_batch: usize,
 
+    /// Batch size used by the inter-stage warmup publishes. Large
+    /// batches amortise the per-publish protocol overhead so the
+    /// warmup finishes in a sensible time at large fill levels.
+    /// Pick a value at the high end of `--batch-sizes` for the
+    /// regime (e.g. 2048 for small/medium, 131072 for large).
+    #[arg(long, default_value_t = 16384)]
+    warmup_batch_size: u64,
+
     /// Setup seed. Must match the seed used by the cluster's shards
     /// when running in distributed mode (so the SRS is identical).
     #[arg(long, default_value_t = 42)]
     setup_seed: u64,
 
-    /// Prefill seed base. For local mode, shard `i` is prefilled
-    /// with seed `prefill_seed + i` — mirrors `bench-cluster.sh`'s
-    /// `PREFILL_SEED + i` convention so local + distributed runs
-    /// produce the same prefill pattern at a given seed.
+    /// Prefill seed base. Kept on the CLI for back-compat with
+    /// existing scripts; the bench now uses real publishes for
+    /// warmup so this only flavours per-stage label namespaces.
     #[arg(long, default_value_t = 1)]
     prefill_seed: u64,
 
@@ -146,6 +155,19 @@ struct Args {
     /// with `--db-url`.
     #[arg(long)]
     db_path: Option<PathBuf>,
+
+    /// Enable hiding (`private=true`) mode. Must match the SRS the
+    /// cluster was set up with. Defaults to true now that the
+    /// benches are run against the production-style hiding SRS.
+    /// Accepts: `--private`, `--private true`, `--private false`,
+    /// or omit it to take the default.
+    #[arg(
+        long,
+        default_value_t = true,
+        num_args = 0..=1,
+        default_missing_value = "true",
+    )]
+    private: bool,
 
     /// Output JSON path.
     #[arg(long)]
@@ -218,14 +240,6 @@ fn main() -> ExitCode {
         );
         return ExitCode::from(2);
     }
-    if !local_mode && args.fill_percents.len() > 1 {
-        eprintln!(
-            "warning: distributed mode honours only the first --fill-percents value ({}); \
-             the rest will be ignored. Run separately for each fill level via \
-             `bench-cluster.sh publish-bench` with a matching PUBLISH_FILL_PCT.",
-            args.fill_percents[0]
-        );
-    }
 
     let k = args.kzh_k.unwrap_or_else(|| optimal_kzh_k(args.shard_log_capacity));
     let log_n_shards = if local_mode { 0 } else {
@@ -257,56 +271,82 @@ fn main() -> ExitCode {
     };
 
     // ---- sweep ----
-    let stages_to_run: Vec<u32> = if local_mode {
-        args.fill_percents.clone()
-    } else {
-        vec![args.fill_percents[0]]
-    };
+    // Stages are walked in sorted order. Between stages we run real
+    // publishes (the same code path the measurement uses) until the
+    // dict reaches the next target_count. Each real publish updates:
+    //   * each shard's index/value/rand polynomials and their commits
+    //   * the FS chain (r_index, r_value)
+    //   * the coordinator's Redis open-addressing state
+    //   * §6.4 history openings for every new label
+    //
+    // So when we then measure a publish batch onto the warmed dict,
+    // it's running against the same state shape a production cluster
+    // would have at that fill level — no shortcuts.
+    let mut stages_to_run: Vec<u32> = args.fill_percents.clone();
+    stages_to_run.sort();
+    stages_to_run.dedup();
 
     let mut stage_records: Vec<StageRecord> = Vec::with_capacity(stages_to_run.len());
+    // Tracks total entries inserted across all stages so far —
+    // warmup at stage N=30 picks up where measurement at stage N=0
+    // left off. Measurements add a small amount per sample (we
+    // increment after each publish below); the warmup loop will
+    // top up from current_count to target_count.
+    let mut current_count: u64 = 0;
+    // Disjoint label namespace for warmup vs measurement: warmup
+    // uses indices in [1e18, 2e18), measurements use < 1e14.
+    let warmup_namespace_base: u64 = 1_000_000_000_000_000_000;
     for &fill_pct in &stages_to_run {
         let true_capacity: u64 = 1u64 << args.true_log_capacity;
         let target_count: u64 = ((true_capacity as u128) * (fill_pct as u128) / 100u128) as u64;
 
-        if local_mode {
-            // Iterate fill levels via prefill. Note: prefill is
-            // additive — each call to `prefill_random_per_shard`
-            // appends `target_count` random entries on top of the
-            // currently-empty shard. For a multi-stage walk we'd want
-            // to either re-build the server between stages or have a
-            // "set fill to exactly N" call. Simplest correct path:
-            // rebuild the server for each fill_pct so every stage
-            // starts from a fresh epoch-0 state at the target count.
-            //
-            // Cost of rebuild: one SRS-gen pass per stage. At
-            // shard_log_cap=22 ~5s; at 28 ~5-10 minutes. Acceptable
-            // for a one-shot bench run.
-            if !stage_records.is_empty() {
-                eprintln!("[publish-bench] rebuilding server for fill_pct={fill_pct}%");
-                server = match build_server(&args, k, log_n_shards) {
-                    Ok(s) => s,
+        if current_count < target_count {
+            let to_add = target_count - current_count;
+            eprintln!(
+                "[publish-bench] warmup: publishing {to_add} entries via real publish \
+                 (batches of {}) to reach {fill_pct}% of 2^{} \
+                 (current={current_count} -> target={target_count}) [{}]",
+                args.warmup_batch_size,
+                args.true_log_capacity,
+                if local_mode { "local" } else { "distributed" },
+            );
+            let warmup_t0 = Instant::now();
+            while current_count < target_count {
+                let chunk = std::cmp::min(args.warmup_batch_size, target_count - current_count);
+                let updates: Vec<(Vec<u8>, Vec<u8>)> = (0..chunk)
+                    .map(|i| {
+                        let idx = warmup_namespace_base + current_count + i;
+                        (phone_label(idx), rsa_value(idx))
+                    })
+                    .collect();
+                match server.publish(&updates) {
+                    Ok(_) => {},
                     Err(e) => {
-                        eprintln!("[publish-bench] rebuild error: {e}");
+                        eprintln!("[publish-bench] warmup publish error: {e}");
                         return ExitCode::from(1);
                     },
-                };
-            }
-            if target_count > 0 {
-                eprintln!(
-                    "[publish-bench] prefilling {target_count} entries ({fill_pct}% of 2^{})",
-                    args.true_log_capacity
-                );
-                if let Err(e) =
-                    server.prefill_random_per_shard(target_count, args.prefill_seed)
+                }
+                current_count += chunk;
+                if current_count % (args.warmup_batch_size * 10) == 0
+                    || current_count >= target_count
                 {
-                    eprintln!("[publish-bench] prefill error: {e}");
-                    return ExitCode::from(1);
+                    let elapsed = warmup_t0.elapsed().as_secs_f64();
+                    eprintln!(
+                        "[publish-bench]   warmup progress: {current_count}/{target_count} ({:.1}% of target) in {:.1}s",
+                        100.0 * current_count as f64 / target_count.max(1) as f64,
+                        elapsed,
+                    );
                 }
             }
-        } else {
+            let warmup_secs = warmup_t0.elapsed().as_secs_f64();
             eprintln!(
-                "[publish-bench] (distributed) assuming cluster is prefilled to {target_count} entries ({fill_pct}% of 2^{})",
-                args.true_log_capacity
+                "[publish-bench] warmup to {fill_pct}% done in {:.1}s",
+                warmup_secs
+            );
+        } else if current_count > target_count {
+            eprintln!(
+                "[publish-bench] note: current_count={current_count} already past fill_pct={fill_pct}% target={target_count} \
+                 — skipping warmup, but measurement is recorded at the actual current fill"
             );
         }
 
@@ -345,6 +385,10 @@ fn main() -> ExitCode {
                 };
                 let ms = t.elapsed().as_secs_f64() * 1000.0;
                 samples_ms.push(ms);
+                // Each measurement publish adds batch_size entries to
+                // the dict; track so the next stage's warmup math is
+                // correct ("how much further from here to target").
+                current_count += batch_size as u64;
 
                 // Record commit sizes on the first sample of each
                 // batch. Sum per-class across shards.
@@ -427,7 +471,7 @@ fn build_server(args: &Args, k: usize, log_n_shards: usize) -> Result<Sharded, A
     let mut builder = ShardedAegonConfig::<Bn254, Pcs>::builder()
         .shard_log_capacity(args.shard_log_capacity)
         .log_n_shards(log_n_shards)
-        .private(false)
+        .private(args.private)
         .kzh_k(k);
     if args.endpoints.is_empty() {
         builder = builder.shards(ShardTransport::InProcess);

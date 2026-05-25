@@ -76,7 +76,7 @@ pub mod proto {
 }
 
 // Match shard/coordinator/masking transports — 1 GiB cap on both sides.
-pub(crate) const MAX_MSG_BYTES: usize = 1024 * 1024 * 1024;
+pub(crate) const MAX_MSG_BYTES: usize = 8 * 1024 * 1024 * 1024;
 
 // Target chunk size on the wire for slab streaming. 64 MiB at ~64 B per
 // G1Affine works out to ~1M points per chunk on BN254. Lets the

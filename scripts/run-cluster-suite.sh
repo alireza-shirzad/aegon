@@ -74,6 +74,9 @@ export LOCAL_LOOKUP_BENCH_DIR="$RESULTS_DIR/lookup"
 # Prefix per-fill JSON filenames so they don't collide with the
 # medium 2-shard cluster run (run-medium-cluster.sh uses "medium-").
 export LOCAL_OUT_NAME_PREFIX="${LOCAL_OUT_NAME_PREFIX:-large-}"
+# Large warmup batch — at 30% of 2^32 = ~1.3B entries, warmup
+# needs ~10k publishes at 131072 to finish in reasonable time.
+export PUBLISH_WARMUP_BATCH_SIZE="${PUBLISH_WARMUP_BATCH_SIZE:-131072}"
 
 # --- Phase 1: up ---
 if [[ "${SKIP_UP:-0}" != "1" ]]; then
@@ -85,15 +88,20 @@ if [[ "${SKIP_DEPLOY:-0}" != "1" ]]; then
   run_phase "cluster-deploy" "$REPO_ROOT/scripts/bench-cluster.sh" deploy || exit $?
 fi
 
-# --- Phase 3: bootstrap ---
-if [[ "${SKIP_BOOTSTRAP:-0}" != "1" ]]; then
-  run_phase "cluster-bootstrap" "$REPO_ROOT/scripts/bench-cluster.sh" bootstrap || exit $?
+# --- Phase 3: setup-bench (centralized-SRS gen + broadcast + size metrics) ---
+# This replaces the old distributed-SRS bootstrap. setup-bench:
+#   1. Generates the SRS on shard-0.
+#   2. scp's it to every other shard at $REMOTE_SRS_PATH.
+#   3. Emits {gen_seconds, broadcast_seconds, srs_bytes} JSON.
+# publish-bench + lookup-bench restart shards per-stage with
+# --srs-path, so we don't need a separate "bootstrap"/"start" step.
+if [[ "${SKIP_SETUP_BENCH:-0}" != "1" ]]; then
+  run_phase "cluster-setup-bench" "$REPO_ROOT/scripts/bench-cluster.sh" setup-bench || exit $?
 fi
 
-# --- Phase 4: setup-bench (distributed setup metrics) ---
-if [[ "${SKIP_SETUP_BENCH:-0}" != "1" ]]; then
-  run_phase "cluster-setup-bench" "$REPO_ROOT/scripts/bench-cluster.sh" setup-bench \
-    || log "WARN: setup-bench failed; continuing with publish-bench"
+# --- Phase 4: start-shards (once; bench binaries drive prefill via RPC) ---
+if [[ "${SKIP_START_SHARDS:-0}" != "1" ]]; then
+  run_phase "cluster-start-shards" "$REPO_ROOT/scripts/bench-cluster.sh" start-shards || exit $?
 fi
 
 # --- Phase 5: publish-bench (walks fills) ---

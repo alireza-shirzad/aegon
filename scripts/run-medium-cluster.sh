@@ -63,9 +63,19 @@ export PROJECT
 export N_SHARDS="${N_SHARDS:-2}"
 export SHARD_LOG_CAPACITY="${SHARD_LOG_CAPACITY:-27}"
 export KZH_K="${KZH_K:-9}"
+# PUBLISH_TRUE_LOG_CAP / LOOKUP_TRUE_LOG_CAP are now auto-derived
+# by bench-cluster.sh from N_SHARDS and SHARD_LOG_CAPACITY (medium
+# → 27 + 1 - 2 = 26). Override here only if you want a different
+# addressable space than the cluster's physical one.
 # Medium batch sizes; large uses 4096..131072.
 export PUBLISH_BATCH_SIZES="${PUBLISH_BATCH_SIZES:-64,128,256,512,1024,2048}"
 export LOOKUP_PUBLISH_BATCH_SIZES="${LOOKUP_PUBLISH_BATCH_SIZES:-${PUBLISH_BATCH_SIZES}}"
+# Warmup batch sized to medium-regime sweet spot. We empirically tested
+# batch=65536 in v9 expecting MSM amortization; it was ~2x SLOWER per
+# entry (3.9 ms vs 1.9 ms at batch=16384). Likely the KZH-k FK
+# acceleration tables overflow L3 at the bigger batch, so per-entry cost
+# spikes from cache misses. v6's 16384 stays in cache.
+export PUBLISH_WARMUP_BATCH_SIZE="${PUBLISH_WARMUP_BATCH_SIZE:-16384}"
 
 # Outputs — distinct filenames so medium and large don't overwrite
 # each other in the same results dirs.
@@ -92,24 +102,21 @@ if [[ "${SKIP_DEPLOY:-0}" != "1" ]]; then
   run_phase "medium-deploy" "$REPO_ROOT/scripts/bench-cluster.sh" deploy || exit $?
 fi
 
-# --- Phase 3: bootstrap ---
-if [[ "${SKIP_BOOTSTRAP:-0}" != "1" ]]; then
-  run_phase "medium-bootstrap" "$REPO_ROOT/scripts/bench-cluster.sh" bootstrap || exit $?
-fi
-
-# --- Phase 4: setup-bench ---
+# --- Phase 3: setup-bench (per-shard parallel SRS gen) ---
 if [[ "${SKIP_SETUP_BENCH:-0}" != "1" ]]; then
-  run_phase "medium-setup-bench" "$REPO_ROOT/scripts/bench-cluster.sh" setup-bench \
-    || log "WARN: setup-bench failed; continuing with publish-bench"
+  run_phase "medium-setup-bench" "$REPO_ROOT/scripts/bench-cluster.sh" setup-bench || exit $?
 fi
 
-# --- Phase 5: publish-bench ---
-if [[ "${SKIP_PUBLISH_BENCH:-0}" != "1" ]]; then
-  run_phase "medium-publish-bench" "$REPO_ROOT/scripts/bench-cluster.sh" publish-bench \
-    || log "WARN: publish-bench failed; continuing with lookup-bench"
+# --- Phase 4: start-shards (once; bench binaries drive prefill via RPC) ---
+if [[ "${SKIP_START_SHARDS:-0}" != "1" ]]; then
+  run_phase "medium-start-shards" "$REPO_ROOT/scripts/bench-cluster.sh" start-shards || exit $?
 fi
 
-# --- Phase 6: lookup-bench ---
+# --- Phase 5: combined lookup-bench (folds in publish-bench per fill) ---
+# Standalone publish-bench was removed: aegon_lookup_bench walks
+# --fill-percents internally, climbing each fill via real publish
+# (no shortcut) and running lookups + audit + publish-batch-sweep
+# at every level. The warmup work is paid exactly once per fill.
 if [[ "${SKIP_LOOKUP_BENCH:-0}" != "1" ]]; then
   run_phase "medium-lookup-bench" "$REPO_ROOT/scripts/bench-cluster.sh" lookup-bench \
     || log "WARN: lookup-bench failed; tearing down anyway"
