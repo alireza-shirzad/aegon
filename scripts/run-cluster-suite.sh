@@ -99,7 +99,15 @@ if [[ "${SKIP_SETUP_BENCH:-0}" != "1" ]]; then
   run_phase "cluster-setup-bench" "$REPO_ROOT/scripts/bench-cluster.sh" setup-bench || exit $?
 fi
 
-# --- Phase 4: start-shards (once; bench binaries drive prefill via RPC) ---
+# --- Phase 4a: start-masking (background masking server prebuilds packages) ---
+# Must happen before start-shards: shards boot with --masking-addr and
+# their first value-side opening will fetch_package from the masking
+# server, so the masking server has to be listening already.
+if [[ "${SKIP_START_MASKING:-0}" != "1" && "${ENABLE_MASKING_SERVER:-1}" == "1" ]]; then
+  run_phase "cluster-start-masking" "$REPO_ROOT/scripts/bench-cluster.sh" start-masking || exit $?
+fi
+
+# --- Phase 4b: start-shards (once; bench binaries drive prefill via RPC) ---
 if [[ "${SKIP_START_SHARDS:-0}" != "1" ]]; then
   run_phase "cluster-start-shards" "$REPO_ROOT/scripts/bench-cluster.sh" start-shards || exit $?
 fi
