@@ -99,19 +99,17 @@ where
     /// `vec![log_capacity / k; k]`.
     dims: Vec<usize>,
 
-    prover_param: P::ProverParam,
+    prover_param: std::sync::Arc<P::ProverParam>,
     verifier_param: P::VerifierParam,
 
-    /// Optional client to the cluster's masking server. When set,
-    /// every value-side opening fetches a one-shot
-    /// [`P::MaskingPackage`] from the server and uses
-    /// [`P::open_zk_with_package`] to mint a hiding opening. When
-    /// `None` and the SRS is hiding, value-side openings fall back to
-    /// generating a fresh masking package in-process — useful for
-    /// tests that don't want to spin up a masking server. When `None`
-    /// and the SRS is non-hiding, value-side openings degrade to
-    /// plain non-ZK openings.
-    masking_client: Option<std::sync::Arc<super::masking::MaskingClient<E, P>>>,
+    /// Source of pre-built [`P::MaskingPackage`]s. In hiding mode
+    /// (private = true) this is always populated: cluster shards wire
+    /// up a remote [`super::masking::MaskingClient`] via
+    /// [`Self::set_masking_source`], and in-process / test instances
+    /// get a default in-process [`super::masking::MaskingPool`] built
+    /// at construction time. In non-hiding mode the field stays
+    /// `None` and value-side openings degrade to plain non-ZK proofs.
+    masking_client: Option<std::sync::Arc<dyn super::masking::MaskingSource<E, P>>>,
 
     epoch: u64,
 
@@ -264,7 +262,14 @@ where
     /// Generate an SRS, trim it, and initialise an empty Aegon. The
     /// PCS-specific configuration (e.g. `k` and `zk` for KZH-k) is
     /// read off the `AegonConfig`.
-    pub fn setup<R: Rng>(rng: &mut R, config: &AegonConfig<E, P>) -> Result<Self, AegonError> {
+    pub fn setup<R: Rng>(rng: &mut R, config: &AegonConfig<E, P>) -> Result<Self, AegonError>
+    where
+        E: Send + Sync + 'static,
+        P: Send + Sync + 'static,
+        P::ProverParam: Send + Sync + 'static,
+        P::MaskingPackage: Send + 'static,
+        E::ScalarField: Send + Sync + 'static,
+    {
         // For multilinear PCSs, `supported_size` is the number of
         // variables (paper / trait docs), not the hypercube size.
         let srs = P::gen_srs_for_testing(config.pcs_config.clone(), rng, config.log_capacity)?;
@@ -284,7 +289,40 @@ where
         prover_param: P::ProverParam,
         verifier_param: P::VerifierParam,
         config: &AegonConfig<E, P>,
-    ) -> Result<Self, AegonError> {
+    ) -> Result<Self, AegonError>
+    where
+        E: Send + Sync + 'static,
+        P: Send + Sync + 'static,
+        P::ProverParam: Send + Sync + 'static,
+        P::MaskingPackage: Send + 'static,
+        E::ScalarField: Send + Sync + 'static,
+    {
+        Self::init_with_arc(std::sync::Arc::new(prover_param), verifier_param, config)
+    }
+
+    /// Same as [`Self::init`] but takes an already-wrapped
+    /// `Arc<P::ProverParam>` so the caller can share the param with
+    /// other consumers (e.g. an external [`super::masking::MaskingPool`]
+    /// or a sibling Aegon instance) without paying a deep clone.
+    ///
+    /// In hiding mode (`config.private = true`) this constructor
+    /// builds a default in-process [`super::masking::MaskingPool`]
+    /// (2 producer threads, queue=16) so that every value-side opening
+    /// can fetch a pre-built masking package — same architecture as
+    /// the cluster path. Cluster shards override this with a remote
+    /// [`super::masking::MaskingClient`] via [`Self::set_masking_source`].
+    pub fn init_with_arc(
+        prover_param: std::sync::Arc<P::ProverParam>,
+        verifier_param: P::VerifierParam,
+        config: &AegonConfig<E, P>,
+    ) -> Result<Self, AegonError>
+    where
+        E: Send + Sync + 'static,
+        P: Send + Sync + 'static,
+        P::ProverParam: Send + Sync + 'static,
+        P::MaskingPackage: Send + 'static,
+        E::ScalarField: Send + Sync + 'static,
+    {
         if prover_param.is_zk() != config.private {
             return Err(AegonError::Config(format!(
                 "config.private = {} but PCS prover param is_zk() = {} — check that pcs_config matches the privacy flag",
@@ -351,12 +389,32 @@ where
             },
         );
 
+        // Default-on in-process masking pool for hiding mode. Cluster
+        // shards swap this for a remote `MaskingClient` after init via
+        // `set_masking_source`; tests / single-shard in-process benches
+        // use this as-is so they exercise the same architecture as the
+        // cluster path (value-side openings dequeue a pre-built package
+        // rather than generating it inline on the critical path).
+        let masking_client: Option<
+            std::sync::Arc<dyn super::masking::MaskingSource<E, P>>,
+        > = if config.private {
+            let pool = super::masking::MaskingPool::<E, P>::new(
+                std::sync::Arc::clone(&prover_param),
+                log_capacity,
+                /* queue_size */ 16,
+                /* producer_count */ 2,
+            );
+            Some(std::sync::Arc::new(pool))
+        } else {
+            None
+        };
+
         Ok(Self {
             log_capacity,
             dims,
             prover_param,
             verifier_param,
-            masking_client: None,
+            masking_client,
             epoch: 0,
             index_poly,
             value_poly,
@@ -380,16 +438,19 @@ where
         })
     }
 
-    /// Wire up a [`super::masking::MaskingClient`] so this shard's
-    /// value-side openings fetch one-shot masking packages from the
-    /// cluster's masking server (instead of generating them inline).
-    /// Call before binding the gRPC socket; the field is consulted on
-    /// every value-side open.
-    pub fn set_masking_client(
+    /// Replace the masking source used for value-side openings.
+    ///
+    /// In hiding mode Aegon constructs a default in-process
+    /// [`super::masking::MaskingPool`] automatically, so callers only
+    /// need this when they want a different source — typically a
+    /// cluster shard swapping the local pool for a remote
+    /// [`super::masking::MaskingClient`]. Call before binding the gRPC
+    /// socket; the field is consulted on every value-side open.
+    pub fn set_masking_source(
         &mut self,
-        client: std::sync::Arc<super::masking::MaskingClient<E, P>>,
+        source: std::sync::Arc<dyn super::masking::MaskingSource<E, P>>,
     ) {
-        self.masking_client = Some(client);
+        self.masking_client = Some(source);
     }
 
     /// Toggle whether each `publish` retains the rand polynomials + PCS
@@ -459,7 +520,13 @@ where
     where
         P::Commitment: Clone,
         P::State: Clone,
+        E: Send + Sync + 'static,
+        P: Send + Sync + 'static,
+        P::ProverParam: Send + Sync + 'static,
+        P::MaskingPackage: Send + 'static,
+        E::ScalarField: Send + Sync + 'static,
     {
+        let prover_param = std::sync::Arc::new(prover_param);
         if prover_param.is_zk() != config.private {
             return Err(AegonError::Config(format!(
                 "config.private = {} but PCS prover param is_zk() = {}",
@@ -511,12 +578,29 @@ where
             label_table.insert(label, (bits, ctr));
         }
 
+        // Same default-pool wiring as `init_with_arc` — restored
+        // Aegon instances exercise the masking-server architecture
+        // identically to fresh ones.
+        let masking_client: Option<
+            std::sync::Arc<dyn super::masking::MaskingSource<E, P>>,
+        > = if config.private {
+            let pool = super::masking::MaskingPool::<E, P>::new(
+                std::sync::Arc::clone(&prover_param),
+                log_capacity,
+                /* queue_size */ 16,
+                /* producer_count */ 2,
+            );
+            Some(std::sync::Arc::new(pool))
+        } else {
+            None
+        };
+
         Ok(Self {
             log_capacity,
             dims,
             prover_param,
             verifier_param,
-            masking_client: None,
+            masking_client,
             epoch: ckpt.epoch,
             index_poly,
             value_poly,
@@ -557,13 +641,13 @@ where
         self.rand_index_poly = zero_poly();
         self.rand_value_poly = zero_poly();
         let (index_commitment, index_state) =
-            commit_with_aux_non_zk::<E, P>(&self.prover_param, &self.index_poly)?;
+            commit_with_aux_non_zk::<E, P>(self.prover_param.as_ref(), &self.index_poly)?;
         let (value_commitment, value_state) =
-            commit_with_aux_value_side::<E, P>(&self.prover_param, &self.value_poly)?;
+            commit_with_aux_value_side::<E, P>(self.prover_param.as_ref(), &self.value_poly)?;
         let (rand_index_commitment, rand_index_state) =
-            commit_with_aux_non_zk::<E, P>(&self.prover_param, &self.rand_index_poly)?;
+            commit_with_aux_non_zk::<E, P>(self.prover_param.as_ref(), &self.rand_index_poly)?;
         let (rand_value_commitment, rand_value_state) =
-            commit_with_aux_value_side::<E, P>(&self.prover_param, &self.rand_value_poly)?;
+            commit_with_aux_value_side::<E, P>(self.prover_param.as_ref(), &self.rand_value_poly)?;
         self.index_commitment = index_commitment.clone();
         self.index_state = index_state;
         self.value_commitment = value_commitment.clone();
@@ -652,9 +736,9 @@ where
         // `Aegon::init`: label side plain, value side hiding (when
         // SRS supports it).
         let (com_i, state_i) =
-            commit_with_aux_non_zk::<E, P>(&self.prover_param, &self.index_poly)?;
+            commit_with_aux_non_zk::<E, P>(self.prover_param.as_ref(), &self.index_poly)?;
         let (com_v, state_v) =
-            commit_with_aux_value_side::<E, P>(&self.prover_param, &self.value_poly)?;
+            commit_with_aux_value_side::<E, P>(self.prover_param.as_ref(), &self.value_poly)?;
         self.index_commitment = com_i;
         self.index_state = state_i;
         self.value_commitment = com_v;
@@ -1008,9 +1092,13 @@ where
         // pairs. Run them on two rayon threads via `join` so the bigger
         // of the two sets the wall time instead of the sum.
         let _delta_commit_t = std::time::Instant::now();
+        // Borrow the inner `&P::ProverParam` once so the closures capture
+        // the bare reference (Send iff `P::ProverParam: Sync`) rather
+        // than the surrounding `&Arc<>` (which would need `P::ProverParam: Send`).
+        let pp = self.prover_param.as_ref();
         let (idx_res, val_res) = rayon::join(
-            || commit_with_aux_non_zk::<E, P>(&self.prover_param, &delta_index_poly),
-            || commit_with_aux_value_side::<E, P>(&self.prover_param, &delta_value_poly),
+            || commit_with_aux_non_zk::<E, P>(pp, &delta_index_poly),
+            || commit_with_aux_value_side::<E, P>(pp, &delta_value_poly),
         );
         let (delta_index_com, delta_index_state) = idx_res?;
         let (delta_value_com, delta_value_state) = val_res?;
@@ -1054,7 +1142,7 @@ where
         let one = E::ScalarField::one();
         let _fma_t = std::time::Instant::now();
         {
-            let pp = &self.prover_param;
+            let pp = self.prover_param.as_ref();
             let is: &mut P::State = &mut self.index_state;
             let vs: &mut P::State = &mut self.value_state;
             let (idx_fma, val_fma) = rayon::join(
@@ -1174,7 +1262,7 @@ where
         // per call (~50–100 µs); at 8 K new placements per shard this
         // pass is the wall of phase 2. Rayon `par_iter` over the slot
         // list spreads it across the shard's CPUs.
-        let pp = &self.prover_param;
+        let pp = self.prover_param.as_ref();
         let dims = &self.dims;
         let _pre_open_t = std::time::Instant::now();
         let pre_pairs: Vec<((E::ScalarField, P::Proof), (E::ScalarField, P::Proof))> =
@@ -1288,7 +1376,7 @@ where
         let _rand_com_combine_ms = _rand_combine_t.elapsed().as_secs_f64() * 1000.0;
         let _rand_fma_t = std::time::Instant::now();
         {
-            let pp = &self.prover_param;
+            let pp = self.prover_param.as_ref();
             let ris: &mut P::State = &mut self.rand_index_state;
             let rvs: &mut P::State = &mut self.rand_value_state;
             let (rfi, rfv) = rayon::join(
@@ -1331,7 +1419,7 @@ where
         // this is symmetric to the pre-pass and roughly the same wall
         // weight. At 8K new placements per shard this trio dominates
         // phase 2 alongside the pre-pass.
-        let pp = &self.prover_param;
+        let pp = self.prover_param.as_ref();
         let dims = &self.dims;
         let _post_open_t = std::time::Instant::now();
         let post_triples: Vec<(
@@ -1647,15 +1735,20 @@ where
             return Ok(non_zk_proof);
         }
         let point = bool_index_to_point::<E::ScalarField>(slot_bits);
-        let package = match &self.masking_client {
-            Some(client) => client
-                .fetch_package(self.log_capacity)
-                .map_err(|e| AegonError::Config(format!("masking fetch: {e}")))?,
-            None => P::generate_masking_package(&self.prover_param, self.log_capacity)?,
-        };
+        // Hiding mode always has a masking source — either the
+        // default in-process pool wired by `init_with_arc` or a
+        // remote `MaskingClient` swapped in via `set_masking_source`.
+        let source = self.masking_client.as_ref().ok_or_else(|| {
+            AegonError::Config(
+                "hiding-mode Aegon missing a MaskingSource — this should be impossible".into(),
+            )
+        })?;
+        let package = source
+            .fetch_package(self.log_capacity)
+            .map_err(|e| AegonError::Config(format!("masking fetch: {e}")))?;
         let mut tr = IOPTranscript::<E::ScalarField>::new(transcript_label);
         let proof = P::remask_with_package(
-            &self.prover_param,
+            self.prover_param.as_ref(),
             commitment,
             &point,
             value,
@@ -1696,7 +1789,7 @@ where
         // through the ZK path.
         if !self.prover_param.is_zk() {
             return open_at_point_non_zk::<E, P>(
-                &self.prover_param,
+                self.prover_param.as_ref(),
                 poly,
                 com,
                 state,
@@ -1712,15 +1805,19 @@ where
             .get(&usize_idx)
             .copied()
             .unwrap_or_else(<E::ScalarField as Zero>::zero);
-        let package = match &self.masking_client {
-            Some(client) => client
-                .fetch_package(self.log_capacity)
-                .map_err(|e| AegonError::Config(format!("masking fetch: {e}")))?,
-            None => P::generate_masking_package(&self.prover_param, self.log_capacity)?,
-        };
+        // Hiding mode always has a masking source — see comment in
+        // `remask_value_side_proof`.
+        let source = self.masking_client.as_ref().ok_or_else(|| {
+            AegonError::Config(
+                "hiding-mode Aegon missing a MaskingSource — this should be impossible".into(),
+            )
+        })?;
+        let package = source
+            .fetch_package(self.log_capacity)
+            .map_err(|e| AegonError::Config(format!("masking fetch: {e}")))?;
         let mut tr = IOPTranscript::<E::ScalarField>::new(transcript_label);
         let (proof, _) = P::open_zk_with_package(
-            &self.prover_param,
+            self.prover_param.as_ref(),
             com,
             DenseOrSparseMLERef::Sparse(poly),
             &point,
@@ -1744,7 +1841,7 @@ where
         // must be plain too — match `commit_with_aux_non_zk` in
         // `init`/`restore`.
         open_at_point_non_zk::<E, P>(
-            &self.prover_param,
+            self.prover_param.as_ref(),
             &self.index_poly,
             &self.index_commitment,
             &self.index_state,
@@ -1797,7 +1894,7 @@ where
             .ok_or(AegonError::InvalidEpoch(epoch))?;
         // Label-side: plain commit ⇒ plain opening.
         open_at_point_non_zk::<E, P>(
-            &self.prover_param,
+            self.prover_param.as_ref(),
             poly,
             &snap.rand_index_commitment,
             state,
@@ -1871,7 +1968,7 @@ where
     ) -> Result<(E::ScalarField, P::Proof), AegonError> {
         // Label-side: plain commit ⇒ plain opening.
         open_at_point_non_zk::<E, P>(
-            &self.prover_param,
+            self.prover_param.as_ref(),
             &self.rand_index_poly,
             &self.rand_index_commitment,
             &self.rand_index_state,
@@ -1900,7 +1997,7 @@ where
         for ctr in 0..=*ctr0 {
             let probe_bits = H::h_bits(ctr, label, self.log_capacity);
             let (evaluation, proof) = open_at_point_non_zk::<E, P>(
-                &self.prover_param,
+                self.prover_param.as_ref(),
                 &self.index_poly,
                 &self.index_commitment,
                 &self.index_state,
@@ -1978,7 +2075,7 @@ where
 
             // Label-side: plain commit ⇒ plain pair-opening.
             let pair = open_pair_non_zk::<E, P>(
-                &self.prover_param,
+                self.prover_param.as_ref(),
                 &point,
                 snap_s0_rand_index_poly,
                 &snap_s0.rand_index_commitment,
@@ -1993,7 +2090,7 @@ where
         // Value half: open rand_value at the user's slot.
         let value_point = bool_index_to_point::<E::ScalarField>(bool_index);
         let value_witness = open_pair::<E, P>(
-            &self.prover_param,
+            self.prover_param.as_ref(),
             &value_point,
             snap_s0_rand_value_poly,
             &snap_s0.rand_value_commitment,

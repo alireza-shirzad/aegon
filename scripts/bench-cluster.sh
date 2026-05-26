@@ -48,7 +48,7 @@
 #     committed-use. Tear down promptly when not benching.
 #   * Previous defaults (32 shards × log_cap=29) exceeded n2-standard-16
 #     RAM at 60%+ fill. The 128/27 split keeps all four fill stages
-#     (0/30/60/90%) on commodity n2-standard-16 with no per-stage
+#     (1/30/60/90%) on commodity n2-standard-16 with no per-stage
 #     reconfiguration.
 #   * Redis is provisioned on its own small VM. In the current
 #     architecture (coord-owns-everything), the shard's `--db-url` is
@@ -758,6 +758,11 @@ cmd_start_masking() {
   # without state — if the VM reboots, a fresh queue rebuilds in
   # seconds.
   log "[$mname] launching aegon_masking_server :$MASKING_PORT (queue=$MASKING_QUEUE_SIZE producers=$MASKING_PRODUCERS)"
+  # fire-and-forget: setsid + nohup detach the server from the SSH
+  # session, but IAP-tunnel teardown still hangs for many minutes
+  # because some fd remains attached. We use `remote ... fire-and-forget`
+  # which kills the SSH client after a short grace window. The server
+  # itself keeps running — we verify by polling the port below.
   remote "$mname" "
     if [ -f /tmp/aegon-masking.pid ]; then
       kill \$(cat /tmp/aegon-masking.pid) 2>/dev/null || true
@@ -766,7 +771,7 @@ cmd_start_masking() {
     pkill -x aegon_masking_se 2>/dev/null || true
     sleep 1
     cd \$HOME/aegon-run && \
-    nohup $REMOTE_BIN_DIR/aegon_masking_server \
+    setsid nohup $REMOTE_BIN_DIR/aegon_masking_server \
       --bind 0.0.0.0:$MASKING_PORT \
       --num-vars $SHARD_LOG_CAPACITY \
       --kzh-k $KZH_K \
@@ -777,7 +782,7 @@ cmd_start_masking() {
     echo \$! > /tmp/aegon-masking.pid
     disown 2>/dev/null || true
     echo SPAWNED
-  "
+  " fire-and-forget
 
   # Poll until the port is listening (gives the server time to load
   # SRS + start producers).
@@ -998,7 +1003,7 @@ PY
 
 # Publish-time + commit-size benchmark for the large regime.
 #
-# Walks PUBLISH_FILL_PERCENTS (default 0,30,60,90), restarting shards
+# Walks PUBLISH_FILL_PERCENTS (default 1,30,60,90), restarting shards
 # between stages with the per-shard prefill_count needed to hit that
 # fill level vs. the cluster's TRUE log capacity (default 32, i.e.,
 # 2^32 = ~4.3B entries total across 32 shards). For each stage, runs
@@ -1017,7 +1022,7 @@ PY
 # than re-running distributed gen). The script handles that
 # automatically — it runs `bootstrap` between every restart-shards
 # step, which is a no-op on cache hit.
-PUBLISH_FILL_PERCENTS="${PUBLISH_FILL_PERCENTS:-0,30,60,90}"
+PUBLISH_FILL_PERCENTS="${PUBLISH_FILL_PERCENTS:-1,30,60,90}"
 PUBLISH_BATCH_SIZES="${PUBLISH_BATCH_SIZES:-4096,8192,16384,32768,65536,131072}"
 PUBLISH_SAMPLES_PER_BATCH="${PUBLISH_SAMPLES_PER_BATCH:-3}"
 # True (non-over-provisioned) total log capacity, derived from the
@@ -1195,7 +1200,7 @@ cmd_bench() {
 
 # Run aegon_lookup_bench on the coordinator. The lookup bench mirrors
 # the publish-bench cluster flow: walks LOOKUP_FILL_PERCENTS (default
-# 0,30,60,90), restarts shards with the per-shard anonymous prefill
+# 1,30,60,90), restarts shards with the per-shard anonymous prefill
 # matching each fill level, bootstraps (cache hit -> fast), then runs
 # aegon_lookup_bench against the live cluster with a small
 # LOOKUP_PRELOAD_COUNT of sampleable labels published on top. At each
@@ -1592,7 +1597,7 @@ usage: $0 <subcommand>
                    per-shard phase timestamps + inbound/outbound
                    slab bytes + pk/vk/universal sizes.
   publish-bench    Large-regime publish-time + commit-size bench.
-                   Walks PUBLISH_FILL_PERCENTS (default 0,30,60,90),
+                   Walks PUBLISH_FILL_PERCENTS (default 1,30,60,90),
                    restarting shards per stage with the per-shard
                    prefill count for that fill level. For each stage,
                    sweeps PUBLISH_BATCH_SIZES (default
@@ -1607,7 +1612,7 @@ usage: $0 <subcommand>
   bench            Run aegon_coordinator_bench on the coordinator, fetch JSON
   lookup-bench     Large-regime combined lookup + publish bench.
                    Walks LOOKUP_FILL_PERCENTS (default mirrors
-                   PUBLISH_FILL_PERCENTS = 0,30,60,90), restarting
+                   PUBLISH_FILL_PERCENTS = 1,30,60,90), restarting
                    shards per stage with the matching per-shard
                    anonymous prefill. At each stage, publishes
                    LOOKUP_PRELOAD_COUNT (default 1000) sampleable

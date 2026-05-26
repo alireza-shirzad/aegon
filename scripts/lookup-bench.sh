@@ -2,7 +2,7 @@
 # lookup-bench.sh — local lookup + publish + audit bench driver
 # for the small regime only.
 #
-# Walks fill_percents (0,30,60,90 by default) by invoking the bench
+# Walks fill_percents (1,30,60,90 by default) by invoking the bench
 # binary once per fill_percent. Each invocation:
 #   1. Bulk-prefills the dict to the target fill via --initial-prefill-count
 #      (anonymous entries — not lookup-sampleable).
@@ -26,7 +26,7 @@
 #   --------|---------------|--------------|---------------------------
 #   small   | 22            | 20           | 2,4,8,16,32,64
 #
-# Fill percentages (vs. true capacity): 0, 30, 60, 90 — set
+# Fill percentages (vs. true capacity): 1, 30, 60, 90 — set
 # FILL_PERCENTS to override. True capacity for any regime is the
 # shard polynomial size divided by `OVER_PROVISIONING_FACTOR` (= 4);
 # see `akd/src/aegon/config.rs`.
@@ -38,7 +38,7 @@
 #
 # Tunables (env):
 #   OUT_DIR             output directory (default /tmp/aegon-lookup)
-#   FILL_PERCENTS       comma-separated overrides (default 0,30,60,90)
+#   FILL_PERCENTS       comma-separated overrides (default 1,30,60,90)
 #   LOOKUP_NS_SIZE      lookup-sampleable namespace size at each
 #                       stage > 0 (default 1000)
 #   LOOKUP_SAMPLES      lookup samples per stage (default 20)
@@ -54,7 +54,7 @@
 set -euo pipefail
 
 OUT_DIR="${OUT_DIR:-/tmp/aegon-lookup}"
-FILL_PERCENTS="${FILL_PERCENTS:-0,30,60,90}"
+FILL_PERCENTS="${FILL_PERCENTS:-1,30,60,90}"
 LOOKUP_NS_SIZE="${LOOKUP_NS_SIZE:-1000}"
 LOOKUP_SAMPLES="${LOOKUP_SAMPLES:-20}"
 PUBLISH_SAMPLES="${PUBLISH_SAMPLES:-3}"

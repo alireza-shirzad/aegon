@@ -129,6 +129,13 @@ pub struct ShardedAegonConfig<E: Pairing, P: AegonPcs<E>> {
     /// Coordinator-side label→value store. Defaults to
     /// [`DbSource::None`] (no DB; lookup returns an empty value).
     pub db: DbSource,
+    /// If set, every in-process shard's [`Aegon`] will fetch its
+    /// per-opening masking packages from a remote `aegon_masking_server`
+    /// at this endpoint instead of using the default in-process
+    /// [`super::masking::MaskingPool`]. Only honoured for
+    /// [`ShardTransport::InProcess`] — remote shards configure their
+    /// own masking source via `aegon_shard_server`'s `--masking-addr`.
+    pub masking_addr: Option<String>,
     pub _e: PhantomData<E>,
 }
 
@@ -270,6 +277,7 @@ pub struct ShardedAegonConfigBuilder<E: Pairing, P: AegonPcs<E>> {
     shards: ShardTransport,
     srs: SrsSource,
     db: DbSource,
+    masking_addr: Option<String>,
     _e: PhantomData<E>,
 }
 
@@ -289,6 +297,7 @@ impl<E: Pairing, P: AegonPcs<E>> ShardedAegonConfigBuilder<E, P> {
             shards: ShardTransport::default(),
             srs: SrsSource::default(),
             db: DbSource::default(),
+            masking_addr: None,
             _e: PhantomData,
         }
     }
@@ -329,6 +338,18 @@ impl<E: Pairing, P: AegonPcs<E>> ShardedAegonConfigBuilder<E, P> {
     /// `ShardTransport::InProcess`.
     pub fn shards(mut self, v: ShardTransport) -> Self {
         self.shards = v;
+        self
+    }
+
+    /// Wire every in-process shard to a remote `aegon_masking_server`
+    /// at this endpoint (e.g. `"http://127.0.0.1:50061"`). Each shard's
+    /// [`Aegon`] swaps its default in-process [`super::masking::MaskingPool`]
+    /// for a [`super::masking::MaskingClient`] connected to the server,
+    /// matching the cluster shard architecture. Has no effect when
+    /// [`ShardTransport::Remote`] is selected (remote shards configure
+    /// their own masking source).
+    pub fn masking_addr(mut self, v: impl Into<String>) -> Self {
+        self.masking_addr = Some(v.into());
         self
     }
 
@@ -383,6 +404,7 @@ impl<E: Pairing, P: AegonPcs<E>> ShardedAegonConfigBuilder<E, P> {
             shards: self.shards,
             srs: self.srs,
             db: self.db,
+            masking_addr: self.masking_addr,
             _e: PhantomData,
         })
     }
@@ -1105,14 +1127,30 @@ where
                     shard_config.log_capacity,
                     verifier_param.clone(),
                 );
+                // If a remote masking server endpoint is configured,
+                // connect once and share the client across all shards.
+                // MaskingClient is Clone-cheap (Arc-wrapped worker
+                // thread under the hood), so sharing is fine.
+                let masking_source: Option<
+                    std::sync::Arc<dyn super::masking::MaskingSource<E, P>>,
+                > = if let Some(addr) = &config.masking_addr {
+                    let client =
+                        super::masking::MaskingClient::<E, P>::connect(addr.clone())?;
+                    Some(std::sync::Arc::new(client))
+                } else {
+                    None
+                };
                 let mut shards: Vec<Box<dyn super::shard_grpc::ShardHandle<E, P, H>>> =
                     Vec::with_capacity(n_shards);
                 for _ in 0..n_shards {
-                    let aegon = Aegon::<E, P, H>::init(
+                    let mut aegon = Aegon::<E, P, H>::init(
                         prover_param.clone(),
                         verifier_param.clone(),
                         &shard_config,
                     )?;
+                    if let Some(src) = &masking_source {
+                        aegon.set_masking_source(std::sync::Arc::clone(src));
+                    }
                     shards.push(Box::new(aegon));
                 }
                 (shards, dims, vctx)

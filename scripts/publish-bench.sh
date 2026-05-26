@@ -21,7 +21,7 @@
 #
 # Tunables (env):
 #   OUT_DIR          output directory (default /tmp/aegon-publish)
-#   FILL_PERCENTS    comma-separated overrides (default 0,30,60,90)
+#   FILL_PERCENTS    comma-separated overrides (default 1,30,60,90)
 #   SAMPLES_PER_BATCH per batch_size (default 3)
 #   SETUP_SEED       SRS RNG seed (default 42)
 #   PREFILL_SEED     prefill RNG seed base (default 1)
@@ -33,7 +33,7 @@
 set -euo pipefail
 
 OUT_DIR="${OUT_DIR:-/tmp/aegon-publish}"
-FILL_PERCENTS="${FILL_PERCENTS:-0,30,60,90}"
+FILL_PERCENTS="${FILL_PERCENTS:-1,30,60,90}"
 SAMPLES_PER_BATCH="${SAMPLES_PER_BATCH:-3}"
 SETUP_SEED="${SETUP_SEED:-42}"
 PREFILL_SEED="${PREFILL_SEED:-1}"
@@ -80,5 +80,5 @@ log "for the medium (2-shard) and large (128-shard) regimes, run:"
 log "    PROJECT=<gcp-project> N_SHARDS=2   ./scripts/bench-cluster.sh up   # medium"
 log "    PROJECT=<gcp-project> N_SHARDS=128 ./scripts/bench-cluster.sh up   # large"
 log "and chain through deploy / publish-bench / down. The cluster path"
-log "walks the same fill_percents = 0/30/60/90 by restarting shards"
+log "walks the same fill_percents = 1/30/60/90 by restarting shards"
 log "between stages and emits one JSON per fill level."

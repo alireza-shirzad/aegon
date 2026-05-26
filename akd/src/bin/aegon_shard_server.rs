@@ -358,15 +358,15 @@ async fn main() -> ExitCode {
             .await;
     }
 
-    // Wire up the cluster's masking server (if any) so the shard's
-    // value-side openings fetch one-shot ZK packages from it instead
-    // of generating them inline. Done before prefill / serve so the
-    // very first opening that hits the shard uses the masking
-    // server.
+    // Cluster path: if --masking-addr is set, swap out Aegon's
+    // default in-process MaskingPool for a remote MaskingClient.
+    // Aegon always has *some* masking source in hiding mode (built
+    // by `Aegon::init_with_arc`); the local pool is only kept when
+    // no remote endpoint is configured (e.g. single-shard dev).
     if let Some(addr) = &args.masking_addr {
         eprintln!("connecting to masking server at {addr}");
         match akd::aegon::masking::MaskingClient::<Bn254, Pcs>::connect(addr.clone()) {
-            Ok(client) => aegon.set_masking_client(std::sync::Arc::new(client)),
+            Ok(client) => aegon.set_masking_source(std::sync::Arc::new(client)),
             Err(e) => {
                 eprintln!("error connecting to masking server '{addr}': {e}");
                 return ExitCode::from(1);

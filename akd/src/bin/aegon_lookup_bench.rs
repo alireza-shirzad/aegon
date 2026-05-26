@@ -74,7 +74,7 @@
 //! aegon_lookup_bench \
 //!   --shard-log-capacity 22 --true-log-capacity 20 --kzh-k 10 \
 //!   --setup-seed 42 --n-shards 1 \
-//!   --fill-percents 0,30,60,90 \
+//!   --fill-percents 1,30,60,90 \
 //!   --samples-per-level 20 \
 //!   --publish-batch-sizes 2,4,8,16,32,64 --publish-samples-per-batch 3 \
 //!   --output /tmp/aegon-lookup-bench.json
@@ -247,6 +247,14 @@ struct Args {
     /// that's free on the bench host.
     #[arg(long, default_value = "127.0.0.1:50190")]
     coordinator_listen: String,
+
+    /// Remote `aegon_masking_server` endpoint (e.g.
+    /// `http://127.0.0.1:50061`). When set, every in-process shard's
+    /// value-side opening fetches its masking package from the server
+    /// instead of using the default in-process pool. Use this to
+    /// exercise the same architecture as the cluster path.
+    #[arg(long)]
+    masking_addr: Option<String>,
 
     /// Sweep points: comma-separated **lookup-sampleable** label
     /// counts that the bench will publish up to before sampling
@@ -444,6 +452,10 @@ fn main() -> ExitCode {
         builder = builder.db(DbSource::Redis(url.clone()));
     } else if let Some(path) = &args.db_path {
         builder = builder.db(DbSource::Rocks(path.clone()));
+    }
+    if let Some(addr) = &args.masking_addr {
+        eprintln!("bench: in-process shards will fetch masking packages from {addr}");
+        builder = builder.masking_addr(addr.clone());
     }
     let cfg = match builder.build() {
         Ok(c) => c,
