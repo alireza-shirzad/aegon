@@ -82,7 +82,15 @@ SAMPLES_PER_BATCH="${SAMPLES_PER_BATCH:-1}"
 SETUP_SEED="${SETUP_SEED:-42}"
 PREFILL_SEED="${PREFILL_SEED:-1}"
 SHARD_MACHINE_TYPE="${SHARD_MACHINE_TYPE:-n2-standard-16}"
-COORD_MACHINE_TYPE="${COORD_MACHINE_TYPE:-n2-standard-4}"
+# Coordinator uses the same machine type as the shards by default. The
+# coordinator's in-memory footprint (open-addressing slot index over the
+# 2^true_log_capacity keyspace + per-shard connection/batch buffers +
+# RocksDB memtables) scales with keyspace size and shard count, so the
+# small n2-standard-4 (16 GB) that sufficed for the medium regime OOM-kills
+# at the large regime (2^32 keyspace, 128 shards). Matching the shard type
+# keeps every node's CPU/RAM identical across the cluster; override with
+# COORD_MACHINE_TYPE=... if you need a different size.
+COORD_MACHINE_TYPE="${COORD_MACHINE_TYPE:-$SHARD_MACHINE_TYPE}"
 # Coordinator boot disk is shared with the RocksDB store at
 # $COORD_DB_PATH. Must fit the AKD history for the deepest fill we
 # drive. Defaults sized for 90% medium (60M entries, ~200KB/entry
@@ -181,7 +189,11 @@ wait_for_ssh() {
   local i
   for ((i = 1; i <= max_tries; i++)); do
     if timeout "$per_try_secs" gcloud compute ssh "$instance" \
-         --zone="$ZONE" --tunnel-through-iap --quiet --command="true" \
+         --zone="$ZONE" --tunnel-through-iap --strict-host-key-checking=no --quiet \
+         --ssh-flag="-o UserKnownHostsFile=/dev/null" \
+         --ssh-flag="-o StrictHostKeyChecking=no" \
+         --ssh-flag="-o LogLevel=ERROR" \
+         --command="true" \
          >/dev/null 2>&1; then
       log "[$instance] SSH ready after $i attempt(s)"
       return 0
@@ -194,8 +206,17 @@ wait_for_ssh() {
 remote() {
   local instance="$1"
   local cmd="$2"
+  # VM names get reused across cluster create/destroy cycles, so new
+  # VMs trip strict host-key checking against stale entries in
+  # ~/.ssh/google_compute_known_hosts. IAP is the real auth boundary;
+  # bypass the SSH-layer host-key check.
+  local ssh_flags=(
+    --ssh-flag="-o UserKnownHostsFile=/dev/null"
+    --ssh-flag="-o StrictHostKeyChecking=no"
+    --ssh-flag="-o LogLevel=ERROR"
+  )
   if [[ "${3:-}" == "stream" ]]; then
-    gcloud compute ssh "$instance" --zone="$ZONE" --tunnel-through-iap --command="$cmd"
+    gcloud compute ssh "$instance" --zone="$ZONE" --tunnel-through-iap --strict-host-key-checking=no "${ssh_flags[@]}" --command="$cmd"
   elif [[ "${3:-}" == "fire-and-forget" ]]; then
     # IAP-tunnel ssh teardown can hang for minutes after the remote
     # command exits. For start commands where the remote process is
@@ -208,28 +229,35 @@ remote() {
     # cold sessions we've seen 30-60s. Cutting the SSH session before
     # the remote shell reaches `nohup ... &` leaves the shard server
     # un-launched and silently absent at bootstrap time.
-    gcloud compute ssh "$instance" --zone="$ZONE" --tunnel-through-iap \
-      --quiet --command="$cmd" &
+    gcloud compute ssh "$instance" --zone="$ZONE" --tunnel-through-iap --strict-host-key-checking=no \
+      --quiet "${ssh_flags[@]}" --command="$cmd" &
     local _ssh_pid=$!
     ( sleep 120 && kill "$_ssh_pid" 2>/dev/null ) &
     local _watchdog_pid=$!
     wait "$_ssh_pid" 2>/dev/null || true
     kill "$_watchdog_pid" 2>/dev/null || true
   else
-    gcloud compute ssh "$instance" --zone="$ZONE" --tunnel-through-iap --quiet --command="$cmd"
+    gcloud compute ssh "$instance" --zone="$ZONE" --tunnel-through-iap --strict-host-key-checking=no --quiet "${ssh_flags[@]}" --command="$cmd"
   fi
 }
 
+# Same rationale as remote(): bypass host-key checks for scp too.
+SCP_HOSTKEY_FLAGS=(
+  --scp-flag="-o UserKnownHostsFile=/dev/null"
+  --scp-flag="-o StrictHostKeyChecking=no"
+  --scp-flag="-o LogLevel=ERROR"
+)
+
 scp_to() {
   local instance="$1"; shift
-  gcloud compute scp --zone="$ZONE" --tunnel-through-iap --quiet "$@" "$instance:/tmp/"
+  gcloud compute scp --zone="$ZONE" --tunnel-through-iap --strict-host-key-checking=no --quiet "${SCP_HOSTKEY_FLAGS[@]}" "$@" "$instance:/tmp/"
 }
 
 scp_from() {
   local instance="$1"; shift
   local src="$1"; shift
   local dst="$1"; shift
-  gcloud compute scp --zone="$ZONE" --tunnel-through-iap --quiet "$instance:$src" "$dst"
+  gcloud compute scp --zone="$ZONE" --tunnel-through-iap --strict-host-key-checking=no --quiet "${SCP_HOSTKEY_FLAGS[@]}" "$instance:$src" "$dst"
 }
 
 shard_name() { echo "${SHARD_TAG}-$1"; }
@@ -484,7 +512,11 @@ start_shard() {
   # could eat the entire budget before the remote bash even started.
   local spawn_out spawn_rc=0
   spawn_out="$(timeout 300 gcloud compute ssh "$name" --zone="$ZONE" \
-    --tunnel-through-iap --quiet --command="$spawn_cmd" 2>&1)" \
+    --tunnel-through-iap --quiet \
+    --ssh-flag="-o UserKnownHostsFile=/dev/null" \
+    --ssh-flag="-o StrictHostKeyChecking=no" \
+    --ssh-flag="-o LogLevel=ERROR" \
+    --command="$spawn_cmd" 2>&1)" \
     || spawn_rc=$?
   if [[ "$spawn_out" == *"FAILED: SRS file not present"* ]]; then
     printf '%s\n' "$spawn_out"
@@ -505,25 +537,43 @@ start_shard() {
 # IAP teardown lag is bounded.
 wait_for_shard_ready() {
   local name="$1"
-  local deadline=$((SECONDS + ${WAIT_READY_SECONDS:-1200}))
+  # At N_SHARDS=128 the start-shards parallel fan-out launches 128
+  # of these probe loops simultaneously, each making a fresh gcloud
+  # ssh-via-IAP call every poll interval. The IAP tunnel concurrency
+  # ceiling means many probes time out even when the shard IS
+  # listening (the probe SSH never reaches the remote in time).
+  # Bumping the per-probe timeout + slowing the poll cadence + a
+  # longer overall deadline gives the loop room to eventually
+  # confirm readiness without falsely failing the start-shards phase.
+  local deadline=$((SECONDS + ${WAIT_READY_SECONDS:-3600}))
+  local probe_timeout="${WAIT_READY_PROBE_TIMEOUT:-90}"
+  local probe_interval="${WAIT_READY_PROBE_INTERVAL:-30}"
   local probe_cmd="ss -tln 2>/dev/null | grep -qE ':$SHARD_PORT\\b' && echo READY || echo NOT_READY"
   while (( SECONDS < deadline )); do
     local out=""
     # `|| true` shields the assignment from `set -e` — a probe that
     # fails (timeout, transient IAP-tunnel hiccup) should let us
     # keep polling, not exit the subshell.
-    out="$(timeout 30 gcloud compute ssh "$name" --zone="$ZONE" \
-      --tunnel-through-iap --quiet --command="$probe_cmd" 2>/dev/null)" \
+    out="$(timeout "$probe_timeout" gcloud compute ssh "$name" --zone="$ZONE" \
+      --tunnel-through-iap --quiet \
+      --ssh-flag="-o UserKnownHostsFile=/dev/null" \
+      --ssh-flag="-o StrictHostKeyChecking=no" \
+      --ssh-flag="-o LogLevel=ERROR" \
+      --command="$probe_cmd" 2>/dev/null)" \
       || true
     if grep -qE '^READY$' <<<"$out"; then
       log "[$name] READY (listening on :$SHARD_PORT)"
       return 0
     fi
-    sleep 10
+    sleep "$probe_interval"
   done
-  log "[$name] still not listening after ${WAIT_READY_SECONDS:-1200}s; tailing remote log:"
-  timeout 60 gcloud compute ssh "$name" --zone="$ZONE" --tunnel-through-iap \
-    --quiet --command="tail -n 30 /tmp/aegon-shard.log 2>/dev/null" || true
+  log "[$name] still not listening after ${WAIT_READY_SECONDS:-3600}s; tailing remote log:"
+  timeout 60 gcloud compute ssh "$name" --zone="$ZONE" --tunnel-through-iap --strict-host-key-checking=no \
+    --quiet \
+    --ssh-flag="-o UserKnownHostsFile=/dev/null" \
+    --ssh-flag="-o StrictHostKeyChecking=no" \
+    --ssh-flag="-o LogLevel=ERROR" \
+    --command="tail -n 30 /tmp/aegon-shard.log 2>/dev/null" || true
   return 1
 }
 
@@ -909,8 +959,12 @@ cmd_setup_bench() {
       # `time -p` (POSIX) emits "real X.XX" on stderr, robust across
       # bash/dash. We grep "^real " out of stderr and round.
       local t0; t0="$(date +%s.%N)"
-      timeout 3600 gcloud compute ssh "$name" --zone="$ZONE" --tunnel-through-iap \
-        --quiet --command "mkdir -p \$HOME/aegon-run \$HOME/artifacts/srs && cd \$HOME/aegon-run && \
+      timeout 3600 gcloud compute ssh "$name" --zone="$ZONE" --tunnel-through-iap --strict-host-key-checking=no \
+        --quiet \
+        --ssh-flag="-o UserKnownHostsFile=/dev/null" \
+        --ssh-flag="-o StrictHostKeyChecking=no" \
+        --ssh-flag="-o LogLevel=ERROR" \
+        --command "mkdir -p \$HOME/aegon-run \$HOME/artifacts/srs && cd \$HOME/aegon-run && \
           rm -f $REMOTE_SRS_PATH && \
           $REMOTE_BIN_DIR/aegon_srs_gen \
             --shard-log-capacity $SHARD_LOG_CAPACITY \
@@ -1133,40 +1187,139 @@ cmd_publish_bench() {
   remote "$cname" "sudo rm -rf $COORD_DB_PATH && sudo mkdir -p $COORD_DB_PATH && sudo chown \$(whoami) $COORD_DB_PATH"
 
   local remote_out="/tmp/aegon-publish-bench.json"
+  local remote_log="/tmp/aegon-publish-bench.log"
   local local_out="$LOCAL_PUBLISH_BENCH_DIR/${LOCAL_OUT_NAME_PREFIX:-}publish.json"
+  local local_log="$LOCAL_PUBLISH_BENCH_DIR/${LOCAL_OUT_NAME_PREFIX:-}publish-bench.log"
+  mkdir -p "$LOCAL_PUBLISH_BENCH_DIR"
+  : > "$local_log"
   # PUBLISH_WARMUP_BATCH_SIZE controls how big the inter-stage
   # warmup publishes are. Pick a value at or above the high end of
   # PUBLISH_BATCH_SIZES so warmup time scales sensibly with
   # cluster size (e.g. 2048 for medium, 131072 for large).
   local warmup_batch="${PUBLISH_WARMUP_BATCH_SIZE:-16384}"
-  log "[$cname] running aegon_publish_bench (distributed, fills=$PUBLISH_FILL_PERCENTS, warmup_batch=$warmup_batch)"
-  # RocksDB at scale opens one fd per SST file (plus WAL + manifest).
-  # 30% medium accumulates 3000+ SSTs over the warmup — default 1024
-  # ulimit blows up with "Too many open files". `sudo prlimit` bumps
-  # both soft + hard for the running shell so the bench binary
-  # inherits the higher limit.
-  remote "$cname" \
-    "sudo prlimit --pid \$\$ --nofile=1048576:1048576 && \
-     mkdir -p \$HOME/aegon-run && cd \$HOME/aegon-run && \
-     $REMOTE_BIN_DIR/aegon_publish_bench \
-       --shard-log-capacity $SHARD_LOG_CAPACITY \
-       --true-log-capacity $PUBLISH_TRUE_LOG_CAP \
-       --kzh-k $KZH_K \
-       --n-shards $N_SHARDS \
-       --endpoints $shard_csv \
-       --fill-percents $PUBLISH_FILL_PERCENTS \
-       --batch-sizes $PUBLISH_BATCH_SIZES \
-       --warmup-batch-size $warmup_batch \
-       --samples-per-batch $PUBLISH_SAMPLES_PER_BATCH \
-       --setup-seed $SETUP_SEED \
-       --prefill-seed $PREFILL_SEED \
-       --db-path $COORD_DB_PATH \
-       --private \
-       --out $remote_out" \
-    stream
 
-  log "retrieving $remote_out -> $local_out"
-  scp_from "$cname" "$remote_out" "$local_out"
+  # Launch the bench inside a systemd transient unit so it SURVIVES
+  # SSH disconnects. The previous `remote ... stream` design held a
+  # single IAP-tunneled SSH session open for the entire bench, which
+  # at large scale (hours of warmup work) exceeded IAP's session
+  # lifetime and exited with rc=255 mid-run. systemd-run reparents
+  # the bench to systemd so SSH death can't reach it; we drive
+  # log streaming + completion via short, recoverable SSH probes.
+  # Mirrors the cmd_lookup_bench pattern (see below).
+  local unit="aegon-publish-bench"
+  local me; me="$(whoami)"
+  log "[$cname] starting aegon_publish_bench as systemd unit '$unit' (distributed, fills=$PUBLISH_FILL_PERCENTS, warmup_batch=$warmup_batch)"
+  remote "$cname" "
+    sudo systemctl reset-failed $unit 2>/dev/null || true
+    sudo systemctl stop $unit 2>/dev/null || true
+    rm -f $remote_log $remote_out
+    mkdir -p /home/$me/aegon-run
+    sudo systemd-run \
+      --unit=$unit \
+      --description='Aegon publish-bench' \
+      --uid=$me --gid=$me \
+      --working-directory=/home/$me/aegon-run \
+      --setenv=HOME=/home/$me \
+      --property=LimitNOFILE=1048576 \
+      bash -c '
+        cd /home/$me/aegon-run
+        $REMOTE_BIN_DIR/aegon_publish_bench \
+          --shard-log-capacity $SHARD_LOG_CAPACITY \
+          --true-log-capacity $PUBLISH_TRUE_LOG_CAP \
+          --kzh-k $KZH_K \
+          --n-shards $N_SHARDS \
+          --endpoints $shard_csv \
+          --fill-percents $PUBLISH_FILL_PERCENTS \
+          --batch-sizes $PUBLISH_BATCH_SIZES \
+          --warmup-batch-size $warmup_batch \
+          --samples-per-batch $PUBLISH_SAMPLES_PER_BATCH \
+          --setup-seed $SETUP_SEED \
+          --prefill-seed $PREFILL_SEED \
+          --db-path $COORD_DB_PATH \
+          --private \
+          --out $remote_out > $remote_log 2>&1
+      '
+    echo LAUNCHED
+  "
+
+  # Poll-loop on the LOCAL side. Each iteration is a short, recoverable
+  # ssh command. When the systemd unit deactivates, we exit the loop.
+  log "[$cname] polling $unit + streaming $remote_log -> $local_log (resilient to SSH death)"
+  local printed_bytes=0
+  local poll_rc=0
+  while true; do
+    local total_bytes
+    total_bytes="$(timeout 60 gcloud compute ssh "$cname" \
+      --zone="$ZONE" --tunnel-through-iap --strict-host-key-checking=no --quiet \
+      --ssh-flag="-o UserKnownHostsFile=/dev/null" \
+      --ssh-flag="-o StrictHostKeyChecking=no" \
+      --ssh-flag="-o LogLevel=ERROR" \
+      --command="wc -c < $remote_log 2>/dev/null || echo 0" 2>/dev/null \
+      | tr -d '[:space:]')"
+    total_bytes="${total_bytes:-0}"
+    if [[ "$total_bytes" =~ ^[0-9]+$ ]] && (( total_bytes > printed_bytes )); then
+      timeout 60 gcloud compute ssh "$cname" \
+        --zone="$ZONE" --tunnel-through-iap --strict-host-key-checking=no --quiet \
+        --ssh-flag="-o UserKnownHostsFile=/dev/null" \
+        --ssh-flag="-o StrictHostKeyChecking=no" \
+        --ssh-flag="-o LogLevel=ERROR" \
+        --command="tail -c +$((printed_bytes + 1)) $remote_log 2>/dev/null" 2>/dev/null \
+        | tee -a "$local_log" >&2
+      printed_bytes=$total_bytes
+    fi
+    local active
+    active="$(timeout 60 gcloud compute ssh "$cname" \
+      --zone="$ZONE" --tunnel-through-iap --strict-host-key-checking=no --quiet \
+      --ssh-flag="-o UserKnownHostsFile=/dev/null" \
+      --ssh-flag="-o StrictHostKeyChecking=no" \
+      --ssh-flag="-o LogLevel=ERROR" \
+      --command="systemctl is-active $unit 2>/dev/null || true" 2>/dev/null \
+      | tr -d '[:space:]')"
+    if [[ "$active" != "active" && "$active" != "activating" ]]; then
+      log "[$cname] $unit final state: '$active' ($total_bytes bytes printed)"
+      local exit_code
+      exit_code="$(timeout 60 gcloud compute ssh "$cname" \
+        --zone="$ZONE" --tunnel-through-iap --strict-host-key-checking=no --quiet \
+        --ssh-flag="-o UserKnownHostsFile=/dev/null" \
+        --ssh-flag="-o StrictHostKeyChecking=no" \
+        --ssh-flag="-o LogLevel=ERROR" \
+        --command="systemctl show $unit --property=ExecMainStatus --value 2>/dev/null || echo 0" 2>/dev/null \
+        | tr -d '[:space:]')"
+      poll_rc="${exit_code:-1}"
+      break
+    fi
+    sleep 60
+  done
+
+  # Flush any final bytes the last poll missed.
+  local total_bytes_final
+  total_bytes_final="$(timeout 60 gcloud compute ssh "$cname" \
+    --zone="$ZONE" --tunnel-through-iap --strict-host-key-checking=no --quiet \
+    --ssh-flag="-o UserKnownHostsFile=/dev/null" \
+    --ssh-flag="-o StrictHostKeyChecking=no" \
+    --ssh-flag="-o LogLevel=ERROR" \
+    --command="wc -c < $remote_log 2>/dev/null || echo 0" 2>/dev/null \
+    | tr -d '[:space:]')"
+  total_bytes_final="${total_bytes_final:-0}"
+  if [[ "$total_bytes_final" =~ ^[0-9]+$ ]] && (( total_bytes_final > printed_bytes )); then
+    timeout 60 gcloud compute ssh "$cname" \
+      --zone="$ZONE" --tunnel-through-iap --strict-host-key-checking=no --quiet \
+      --ssh-flag="-o UserKnownHostsFile=/dev/null" \
+      --ssh-flag="-o StrictHostKeyChecking=no" \
+      --ssh-flag="-o LogLevel=ERROR" \
+      --command="tail -c +$((printed_bytes + 1)) $remote_log 2>/dev/null" 2>/dev/null \
+      | tee -a "$local_log" >&2
+  fi
+
+  # Always try to fetch the JSON — even on failure, the bench may have
+  # flushed partial data (one stage per completed fill_percent).
+  log "retrieving $remote_out -> $local_out (regardless of exit status)"
+  scp_from "$cname" "$remote_out" "$local_out" 2>/dev/null \
+    || log "WARN: scp_from $remote_out failed (no output produced or coord unreachable)"
+  if (( poll_rc != 0 )); then
+    log "[$cname] aegon_publish_bench exited with status $poll_rc"
+    return "$poll_rc"
+  fi
   log "publish-bench complete: $local_out"
 }
 
@@ -1348,13 +1501,19 @@ cmd_lookup_bench() {
     # rather than line count so each poll is O(diff) not O(whole log).
     local total_bytes
     total_bytes="$(timeout 60 gcloud compute ssh "$cname" \
-      --zone="$ZONE" --tunnel-through-iap --quiet \
+      --zone="$ZONE" --tunnel-through-iap --strict-host-key-checking=no --quiet \
+      --ssh-flag="-o UserKnownHostsFile=/dev/null" \
+      --ssh-flag="-o StrictHostKeyChecking=no" \
+      --ssh-flag="-o LogLevel=ERROR" \
       --command="wc -c < $remote_log 2>/dev/null || echo 0" 2>/dev/null \
       | tr -d '[:space:]')"
     total_bytes="${total_bytes:-0}"
     if [[ "$total_bytes" =~ ^[0-9]+$ ]] && (( total_bytes > printed_bytes )); then
       timeout 60 gcloud compute ssh "$cname" \
-        --zone="$ZONE" --tunnel-through-iap --quiet \
+        --zone="$ZONE" --tunnel-through-iap --strict-host-key-checking=no --quiet \
+        --ssh-flag="-o UserKnownHostsFile=/dev/null" \
+        --ssh-flag="-o StrictHostKeyChecking=no" \
+        --ssh-flag="-o LogLevel=ERROR" \
         --command="tail -c +$((printed_bytes + 1)) $remote_log 2>/dev/null" 2>/dev/null \
         | tee -a "$local_log" >&2
       printed_bytes=$total_bytes
@@ -1363,7 +1522,10 @@ cmd_lookup_bench() {
     # Check unit status. is-active prints active|inactive|failed.
     local active
     active="$(timeout 60 gcloud compute ssh "$cname" \
-      --zone="$ZONE" --tunnel-through-iap --quiet \
+      --zone="$ZONE" --tunnel-through-iap --strict-host-key-checking=no --quiet \
+      --ssh-flag="-o UserKnownHostsFile=/dev/null" \
+      --ssh-flag="-o StrictHostKeyChecking=no" \
+      --ssh-flag="-o LogLevel=ERROR" \
       --command="systemctl is-active $unit 2>/dev/null || true" 2>/dev/null \
       | tr -d '[:space:]')"
     if [[ "$active" != "active" && "$active" != "activating" ]]; then
@@ -1371,7 +1533,10 @@ cmd_lookup_bench() {
       # Capture the unit's exit code.
       local exit_code
       exit_code="$(timeout 60 gcloud compute ssh "$cname" \
-        --zone="$ZONE" --tunnel-through-iap --quiet \
+        --zone="$ZONE" --tunnel-through-iap --strict-host-key-checking=no --quiet \
+        --ssh-flag="-o UserKnownHostsFile=/dev/null" \
+        --ssh-flag="-o StrictHostKeyChecking=no" \
+        --ssh-flag="-o LogLevel=ERROR" \
         --command="systemctl show $unit --property=ExecMainStatus --value 2>/dev/null || echo 0" 2>/dev/null \
         | tr -d '[:space:]')"
       poll_rc="${exit_code:-1}"
@@ -1383,13 +1548,19 @@ cmd_lookup_bench() {
   # Flush any final bytes the last poll missed.
   local total_bytes_final
   total_bytes_final="$(timeout 60 gcloud compute ssh "$cname" \
-    --zone="$ZONE" --tunnel-through-iap --quiet \
+    --zone="$ZONE" --tunnel-through-iap --strict-host-key-checking=no --quiet \
+    --ssh-flag="-o UserKnownHostsFile=/dev/null" \
+    --ssh-flag="-o StrictHostKeyChecking=no" \
+    --ssh-flag="-o LogLevel=ERROR" \
     --command="wc -c < $remote_log 2>/dev/null || echo 0" 2>/dev/null \
     | tr -d '[:space:]')"
   total_bytes_final="${total_bytes_final:-0}"
   if [[ "$total_bytes_final" =~ ^[0-9]+$ ]] && (( total_bytes_final > printed_bytes )); then
     timeout 60 gcloud compute ssh "$cname" \
-      --zone="$ZONE" --tunnel-through-iap --quiet \
+      --zone="$ZONE" --tunnel-through-iap --strict-host-key-checking=no --quiet \
+      --ssh-flag="-o UserKnownHostsFile=/dev/null" \
+      --ssh-flag="-o StrictHostKeyChecking=no" \
+      --ssh-flag="-o LogLevel=ERROR" \
       --command="tail -c +$((printed_bytes + 1)) $remote_log 2>/dev/null" 2>/dev/null \
       | tee -a "$local_log" >&2
   fi

@@ -113,12 +113,18 @@ if [[ "${SKIP_START_SHARDS:-0}" != "1" ]]; then
 fi
 
 # --- Phase 5: publish-bench (walks fills) ---
-if [[ "${SKIP_PUBLISH_BENCH:-0}" != "1" ]]; then
+# DISABLED BY DEFAULT to match run-medium-cluster.sh, which finished
+# cleanly. The standalone publish-bench is redundant: aegon_lookup_bench
+# (Phase 6) walks --fill-percents internally, climbing each fill via real
+# publish and running its own publish-batch sweep at every level — the
+# same per-fill `publish_bench` data the plots consume. Running both just
+# duplicates hours of warmup work. Set SKIP_PUBLISH_BENCH=0 to force it.
+if [[ "${SKIP_PUBLISH_BENCH:-1}" != "1" ]]; then
   run_phase "cluster-publish-bench" "$REPO_ROOT/scripts/bench-cluster.sh" publish-bench \
     || log "WARN: publish-bench failed; continuing with lookup-bench"
 fi
 
-# --- Phase 6: lookup-bench (walks fills) ---
+# --- Phase 6: lookup-bench (walks fills; folds in publish-batch sweep) ---
 if [[ "${SKIP_LOOKUP_BENCH:-0}" != "1" ]]; then
   run_phase "cluster-lookup-bench" "$REPO_ROOT/scripts/bench-cluster.sh" lookup-bench \
     || log "WARN: lookup-bench failed; tearing down anyway"
