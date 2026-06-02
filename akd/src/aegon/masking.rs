@@ -434,6 +434,91 @@ where
     }
 }
 
+// ---------- MaskingClientPool (round-robin over many servers) ---------
+//
+// One shard backed by a single remote masking server caps at that
+// server's per-package generation rate (~120 pkg/s for nv=27/k=9,
+// ~185 pkg/s for nv=22/k=7). The small/medium regimes use only 1-2
+// shards, so per-shard masking assignment can't spread load across
+// more than 1-2 servers, which means provisioning extra masking VMs
+// is wasted unless we round-robin requests across them at the shard.
+//
+// `MaskingClientPool` wraps `Vec<MaskingClient>` and a shared atomic
+// cursor: every `fetch_package` increments the cursor and dispatches
+// to `clients[cursor % N]`. Concurrent calls race on the cursor (this
+// is fine — `Ordering::Relaxed` is enough because we only care that
+// the increment is atomic, not its global ordering). Under a uniform
+// arrival rate this gives even load across all N servers; under a
+// burst it still spreads cleanly because every individual fetch picks
+// the next slot.
+pub struct MaskingClientPool<E, P>
+where
+    E: Pairing,
+    P: AegonPcs<E>,
+{
+    clients: Vec<MaskingClient<E, P>>,
+    cursor: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl<E, P> MaskingClientPool<E, P>
+where
+    E: Pairing,
+    P: AegonPcs<E>,
+    P::MaskingPackage: CanonicalDeserialize,
+{
+    /// Connect to every endpoint in `endpoints` and wrap the resulting
+    /// clients in a round-robin pool. Returns an error if any
+    /// individual connection fails (we don't degrade silently — the
+    /// caller asked for N servers).
+    pub fn connect_all(endpoints: &[String]) -> Result<Self, AegonError> {
+        if endpoints.is_empty() {
+            return Err(AegonError::Config(
+                "MaskingClientPool::connect_all: endpoints is empty".into(),
+            ));
+        }
+        let mut clients = Vec::with_capacity(endpoints.len());
+        for ep in endpoints {
+            clients.push(MaskingClient::<E, P>::connect(ep.clone())?);
+        }
+        Ok(Self {
+            clients,
+            cursor: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        })
+    }
+
+    pub fn fetch_package(&self, num_vars: usize) -> Result<P::MaskingPackage, AegonError> {
+        let i = self
+            .cursor
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            % self.clients.len();
+        self.clients[i].fetch_package(num_vars)
+    }
+}
+
+impl<E, P> Clone for MaskingClientPool<E, P>
+where
+    E: Pairing,
+    P: AegonPcs<E>,
+{
+    fn clone(&self) -> Self {
+        Self {
+            clients: self.clients.clone(),
+            cursor: Arc::clone(&self.cursor),
+        }
+    }
+}
+
+impl<E, P> MaskingSource<E, P> for MaskingClientPool<E, P>
+where
+    E: Pairing + Send + Sync,
+    P: AegonPcs<E> + Send + Sync,
+    P::MaskingPackage: CanonicalDeserialize,
+{
+    fn fetch_package(&self, num_vars: usize) -> Result<P::MaskingPackage, AegonError> {
+        MaskingClientPool::fetch_package(self, num_vars)
+    }
+}
+
 // ---------- MaskingPool (in-process source) ---------------------------
 
 /// In-process masking-package pool. Mirrors the cluster

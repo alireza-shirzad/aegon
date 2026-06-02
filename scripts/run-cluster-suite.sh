@@ -77,6 +77,37 @@ export LOCAL_OUT_NAME_PREFIX="${LOCAL_OUT_NAME_PREFIX:-large-}"
 # Large warmup batch — at 30% of 2^32 = ~1.3B entries, warmup
 # needs ~10k publishes at 131072 to finish in reasonable time.
 export PUBLISH_WARMUP_BATCH_SIZE="${PUBLISH_WARMUP_BATCH_SIZE:-131072}"
+# Bench-client must hold the in-process coord state up to 10% fill.
+# Footprint: ~26 GB fixed (2^32 open-addressing index) + ~165 B/entry
+# (measured from the v1 OOM trace at 5% / 215M entries → 61.2 GB).
+# 10% × 2^32 ≈ 430M entries → ~97 GB working set; n2-highmem-32 gives
+# 256 GB so there's ~160 GB headroom for RocksDB memtables/block cache,
+# tokio buffers, and audit-time scratch state. Cost delta vs the
+# n2-standard-16 default is ~$1.10/h × ~24h ≈ $27 for the whole run.
+# The 32 vCPUs also help drive the conc=512/1024 throughput sweep.
+export BENCH_CLIENT_MACHINE_TYPE="${BENCH_CLIENT_MACHINE_TYPE:-n2-highmem-32}"
+# Fill levels: low-fill sweep 1..10%. Real-publish climb to high fill is
+# infeasible at large scale — 90% of 2^32 = 3.9B entries ≈ 10 days at the
+# coordinator's ~4.4k entries/s. Coordinator memory is FLAT (~26 GB, the
+# fixed 2^32 keyspace index), so fill level is time-bound, not RAM-bound.
+# A 1..10% sweep (cumulative 429M entries ≈ 27 h climb) gives a 10-point
+# low-fill curve. Both publish-bench (if enabled) and lookup-bench read it.
+export PUBLISH_FILL_PERCENTS="${PUBLISH_FILL_PERCENTS:-1,2,3,4,5,6,7,8,9,10}"
+# Masking server count. One masking server caps at ~120 pkg/sec for the
+# large-regime config (nv=27, k=9). The v1 large run at 25 servers
+# (3000 pkg/s ceiling) showed the throughput plateau hitting the masking
+# ceiling exactly — no headroom to expose the *next* bottleneck. Bumping
+# to 35 (4200 pkg/s ceiling) gives ~40% headroom over the 3 k QPS target
+# so the latency-knee curve clearly clears 3000 QPS before bending.
+# Each masking VM is n2-standard-16 (~$0.78/h); 35 × ~$27/h is small
+# next to the 128-shard bill. Shards round-robin by shard_id mod N.
+export N_MASKING_SERVERS="${N_MASKING_SERVERS:-35}"
+# Throughput sweep concurrency levels for large. Pushed higher than
+# small/medium because with 25 masking servers the system can absorb
+# ~3000 QPS; at conc=256 we'd be Little's-Law-bounded around 1500-3000
+# QPS depending on actual latency, which might fall short. 512/1024 are
+# added so we definitively saturate whatever the next bottleneck is.
+export LOOKUP_THROUGHPUT_CONCURRENCIES="${LOOKUP_THROUGHPUT_CONCURRENCIES:-1,4,16,64,256,512,1024}"
 
 # --- Phase 1: up ---
 if [[ "${SKIP_UP:-0}" != "1" ]]; then

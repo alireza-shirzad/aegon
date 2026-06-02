@@ -323,13 +323,22 @@ impl RocksDb {
         // slot, history, label_placement, value_history). At
         // batch=16384 that lands in ~1.5 s of inline write time, plus
         // bursty compaction stalls if the L0 level saturates faster
-        // than background compactions can drain it. Defaults targeted
+        // than background compactions can drain it. Defaults target
         // small embedded workloads — we need to widen the runway.
 
-        // Use all 4 coord vCPUs for compaction + flush threads. Per
+        // Use all coord vCPUs for compaction + flush threads. Per
         // rocksdb docs, this should be set early before any other
         // background-job knobs (which override the per-pool sizes).
-        opts.increase_parallelism(4);
+        // 16 matches the n2-standard-16 default coord; override with
+        // AEGON_ROCKSDB_PARALLELISM if running on a different shape.
+        let parallelism: i32 = std::env::var("AEGON_ROCKSDB_PARALLELISM")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(16);
+        opts.increase_parallelism(parallelism);
+        // Multiple concurrent L0→L1 subcompactions so a single large
+        // batch doesn't sequentialize compaction work on one core.
+        opts.set_max_subcompactions(4);
         // Bigger memtable → fewer L0 flushes per publish. 256 MB
         // holds ~200 K small ops (estimated 1 KB each post-LZ4) — a
         // couple of publishes at batch=16384 before any flush.
@@ -356,6 +365,43 @@ impl RocksDb {
         // -1 because the coord's only writer is the bench process and
         // mid-bench durability matters less than throughput.
         opts.set_use_fsync(false);
+
+        // Block cache: keep recently-read SST blocks in RAM so
+        // compaction-side reads (and re-reads of hot keyspace) don't
+        // round-trip the SSD. Default RocksDB cache is 8 MB; for the
+        // large coord (64 GB RAM, ~26 GB taken by the keyspace index)
+        // we have ~30 GB free, of which 16 GB makes a safe cache cap.
+        // Shards have the same RAM but much smaller per-shard state,
+        // so the LRU just won't fill — no waste. Override with
+        // AEGON_ROCKSDB_BLOCK_CACHE_GB.
+        let block_cache_gb: u64 = std::env::var("AEGON_ROCKSDB_BLOCK_CACHE_GB")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(16);
+        if block_cache_gb > 0 {
+            let cache = rocksdb::Cache::new_lru_cache((block_cache_gb * 1024 * 1024 * 1024) as usize);
+            let mut block_opts = rocksdb::BlockBasedOptions::default();
+            block_opts.set_block_cache(&cache);
+            // 16 KB blocks balance random-read latency against cache
+            // granularity — RocksDB default is 4 KB which fragments
+            // the cache for our larger value payloads.
+            block_opts.set_block_size(16 * 1024);
+            opts.set_block_based_table_factory(&block_opts);
+        }
+
+        // Diagnostic stats — emitted to RocksDB's LOG file alongside
+        // the DB. AEGON_ROCKSDB_STATS_DUMP_SEC=60 turns on one-minute
+        // snapshots of compaction throughput, L0 file count, and
+        // stall time so we can confirm whether write stalls actually
+        // drive the publish-latency growth at high fill.
+        let stats_dump_sec: u32 = std::env::var("AEGON_ROCKSDB_STATS_DUMP_SEC")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        if stats_dump_sec > 0 {
+            opts.enable_statistics();
+            opts.set_stats_dump_period_sec(stats_dump_sec);
+        }
 
         let inner = rocksdb::DB::open(&opts, path)
             .map_err(|e| AegonError::Database(format!("open rocksdb {path:?}: {e}")))?;

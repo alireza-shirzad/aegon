@@ -248,13 +248,17 @@ struct Args {
     #[arg(long, default_value = "127.0.0.1:50190")]
     coordinator_listen: String,
 
-    /// Remote `aegon_masking_server` endpoint (e.g.
-    /// `http://127.0.0.1:50061`). When set, every in-process shard's
-    /// value-side opening fetches its masking package from the server
-    /// instead of using the default in-process pool. Use this to
-    /// exercise the same architecture as the cluster path.
-    #[arg(long)]
-    masking_addr: Option<String>,
+    /// Comma-separated list of remote `aegon_masking_server` endpoints
+    /// (e.g. `http://127.0.0.1:50061,http://127.0.0.1:50062`). When
+    /// set, every in-process shard's value-side opening fetches its
+    /// masking package from the server(s) instead of using the default
+    /// in-process pool. Multiple endpoints are dispatched round-robin
+    /// via `MaskingClientPool`, matching the cluster shard
+    /// architecture and unlocking >1 masking server's worth of
+    /// throughput per shard. May be repeated, or pass a single
+    /// comma-separated string.
+    #[arg(long = "masking-addr", value_delimiter = ',')]
+    masking_addr: Vec<String>,
 
     /// Sweep points: comma-separated **lookup-sampleable** label
     /// counts that the bench will publish up to before sampling
@@ -329,6 +333,61 @@ struct Args {
     /// toward the available epoch chain). Set to 0 to skip auditing.
     #[arg(long, default_value_t = 5)]
     audit_samples: usize,
+
+    /// Concurrency levels for the per-stage **throughput sweep**.
+    /// Comma-separated list, e.g. `1,4,16,64,256`. Empty list (the
+    /// default) skips the sweep entirely. Runs after lookup samples
+    /// + audit, before publish_bench, so the cluster state is exactly
+    /// what audit just saw. Each level spawns N concurrent client
+    /// tasks that loop on a single chosen RPC kind
+    /// (`--throughput-lookup-kind`) for `--throughput-window-secs`
+    /// seconds; the achieved QPS at each level + p50/p90/p99 latency
+    /// land in the JSON's `concurrency_sweep` block.
+    #[arg(long, value_delimiter = ',', default_value = "")]
+    throughput_concurrencies: Vec<usize>,
+
+    /// Measurement window per concurrency level, in seconds.
+    #[arg(long, default_value_t = 20)]
+    throughput_window_secs: u64,
+
+    /// Warmup window per concurrency level (latencies discarded).
+    /// Lets the tonic channels reach steady state and the masking
+    /// queue fill before we count.
+    #[arg(long, default_value_t = 3)]
+    throughput_warmup_secs: u64,
+
+    /// Which lookup RPC the throughput sweep drives. One of:
+    /// `label`, `value` (label+value chain — the realistic client
+    /// flow), `history`, `label_history`.
+    #[arg(long, default_value = "value")]
+    throughput_lookup_kind: String,
+
+    /// Per-RPC timeout in the throughput sweep, in seconds. Bounds
+    /// the resource footprint of a stalled request (gRPC buffer +
+    /// pending future) so high concurrency can't pile up forever.
+    /// Requests that exceed this deadline count as errors.
+    #[arg(long, default_value_t = 10)]
+    throughput_rpc_timeout_secs: u64,
+
+    /// Early-stop trigger: error rate (errors / attempts) at which
+    /// we abort the sweep at the current fill level. Lets us bail
+    /// before the sweep cascades a cluster failure. 0 = disabled.
+    #[arg(long, default_value_t = 0.25)]
+    throughput_max_error_rate: f64,
+
+    /// Early-stop trigger: p99 latency (ms) at which we stop
+    /// climbing concurrency at the current fill level. The sweep
+    /// completes the current level's measurement and skips the
+    /// remaining (higher) concurrencies. 0 = disabled.
+    #[arg(long, default_value_t = 60000)]
+    throughput_max_p99_ms: u64,
+
+    /// Health check before each concurrency level: a single
+    /// sequential lookup with a tight timeout. If it fails, abort
+    /// the sweep at this fill level entirely (preserves the climb
+    /// for remaining fill levels). 0 = disabled.
+    #[arg(long, default_value_t = 5)]
+    throughput_health_check_timeout_secs: u64,
 
     /// Where to write the JSON timing report.
     #[arg(long)]
@@ -453,9 +512,13 @@ fn main() -> ExitCode {
     } else if let Some(path) = &args.db_path {
         builder = builder.db(DbSource::Rocks(path.clone()));
     }
-    if let Some(addr) = &args.masking_addr {
-        eprintln!("bench: in-process shards will fetch masking packages from {addr}");
-        builder = builder.masking_addr(addr.clone());
+    if !args.masking_addr.is_empty() {
+        eprintln!(
+            "bench: in-process shards will fetch masking packages from {} server(s): {:?}",
+            args.masking_addr.len(),
+            args.masking_addr,
+        );
+        builder = builder.masking_addrs(args.masking_addr.clone());
     }
     let cfg = match builder.build() {
         Ok(c) => c,
@@ -765,18 +828,24 @@ fn main() -> ExitCode {
             };
 
             // (c) Client lookup_label via raw tonic RPC (no verify).
-            // This measures network RTT + protobuf decode on the
-            // client side, not verify cost. We re-clone the client per
-            // call because tonic's generated client takes `&mut self`
-            // and we need it to be Send across the await.
-            let t = Instant::now();
+            // We re-clone the client per call because tonic's
+            // generated client takes `&mut self` and we need it to be
+            // Send across the await. Latency is read out of the
+            // server-reported `server_processing_micros` field on the
+            // response, so it excludes network RTT and client-side
+            // protobuf decode — what we actually report is "server
+            // handler wall time" (which under load includes tokio
+            // queue-wait).
             let label_req = LookupLabelRequest {
                 label: label.clone(),
             };
             let mut rc_label = raw_client.clone();
             let client_label_result =
                 driver_rt.block_on(async move { rc_label.lookup_label(label_req).await });
-            let client_label_ns = t.elapsed().as_nanos() as u64;
+            let client_label_ns = match &client_label_result {
+                Ok(resp) => resp.get_ref().server_processing_micros.saturating_mul(1000),
+                Err(_) => 0,
+            };
             if let Err(e) = client_label_result {
                 eprintln!("error: raw RPC lookup_label at level {target}: {e}");
                 return ExitCode::from(1);
@@ -793,11 +862,13 @@ fn main() -> ExitCode {
             let value_req = LookupValueRequest {
                 slot: slot_req_bytes,
             };
-            let t = Instant::now();
             let mut rc_value = raw_client.clone();
             let client_value_result =
                 driver_rt.block_on(async move { rc_value.lookup_value(value_req).await });
-            let client_value_ns = t.elapsed().as_nanos() as u64;
+            let client_value_ns = match &client_value_result {
+                Ok(resp) => resp.get_ref().server_processing_micros.saturating_mul(1000),
+                Err(_) => 0,
+            };
             if let Err(e) = client_value_result {
                 eprintln!("error: raw RPC lookup_value at level {target}: {e}");
                 return ExitCode::from(1);
@@ -826,11 +897,13 @@ fn main() -> ExitCode {
             let history_req = LookupHistoryRequest {
                 label: label.clone(),
             };
-            let t = Instant::now();
             let mut rc_history = raw_client.clone();
             let client_history_result =
                 driver_rt.block_on(async move { rc_history.lookup_history(history_req).await });
-            let client_history_ns = t.elapsed().as_nanos() as u64;
+            let client_history_ns = match &client_history_result {
+                Ok(resp) => resp.get_ref().server_processing_micros.saturating_mul(1000),
+                Err(_) => 0,
+            };
             if let Err(e) = client_history_result {
                 eprintln!("error: raw RPC lookup_history at level {target}: {e}");
                 return ExitCode::from(1);
@@ -862,11 +935,13 @@ fn main() -> ExitCode {
             let label_history_req = LookupLabelHistoryRequest {
                 label: label.clone(),
             };
-            let t = Instant::now();
             let mut rc_lh = raw_client.clone();
             let client_label_history_result = driver_rt
                 .block_on(async move { rc_lh.lookup_label_history(label_history_req).await });
-            let client_label_history_ns = t.elapsed().as_nanos() as u64;
+            let client_label_history_ns = match &client_label_history_result {
+                Ok(resp) => resp.get_ref().server_processing_micros.saturating_mul(1000),
+                Err(_) => 0,
+            };
             if let Err(e) = client_label_history_result {
                 eprintln!("error: raw RPC lookup_label_history at level {target}: {e}");
                 return ExitCode::from(1);
@@ -952,16 +1027,20 @@ fn main() -> ExitCode {
             let label_resp = LookupLabelResponse {
                 slot: slot_bytes.clone(),
                 proof: label_proof_bytes.clone(),
+                server_processing_micros: 0,
             };
             let value_resp_with_value = LookupValueResponse {
                 proof: value_proof_bytes.clone(),
                 value: value.clone(),
+                server_processing_micros: 0,
             };
             let history_resp = LookupHistoryResponse {
                 history: history_bytes.clone(),
+                server_processing_micros: 0,
             };
             let label_history_resp = LookupLabelHistoryResponse {
                 history: label_history_bytes.clone(),
+                server_processing_micros: 0,
             };
             let label_wire_bytes = label_resp.encoded_len();
             let value_wire_bytes = value_resp_with_value.encoded_len();
@@ -1205,6 +1284,341 @@ fn main() -> ExitCode {
             }
         }
 
+        // CHECKPOINT after audit, before the (potentially destructive)
+        // throughput sweep. The sweep can stress shards / coord / the
+        // masking queue at high concurrency — if it triggers an OOM
+        // or cascade failure we don't want to lose this level's
+        // already-paid lookup + audit samples. The flush is cheap
+        // (single JSON write) so we do it unconditionally; sweeps and
+        // publish_bench will overwrite the same file with richer data
+        // at the end of the level.
+        {
+            let lookup_block_so_far = format!(
+                "      \"lookup\": {{\n        \"sample_count\": {sc},\n        \"samples\": [\n{samples}\n        ]\n      }}",
+                sc = samples_json.len(),
+                samples = samples_json.join(",\n"),
+            );
+            let audit_block_so_far = match &audit_json {
+                Some(b) => format!(",\n      \"audit\": {{\n{b}\n      }}"),
+                None => String::new(),
+            };
+            let partial_level_block = format!(
+                "    {{\n      \"preload_count\": {target},\n      \"current_count_after_topup\": {current_count},\n      \"preload_publish_ms_total\": {preload_publish_ms_total:.4},\n      \"rss_kb\": {rss},\n{lookup_block}{audit_block}\n    }}",
+                target = target,
+                current_count = current_count,
+                preload_publish_ms_total = preload_publish_ms_total,
+                rss = rss_kb,
+                lookup_block = lookup_block_so_far,
+                audit_block = audit_block_so_far,
+            );
+            let mut tmp_reports = level_reports.clone();
+            tmp_reports.push(partial_level_block);
+            let json = render_levels_json(
+                &args,
+                &preload_counts,
+                local_mode,
+                effective_n_shards,
+                log_n_shards,
+                k,
+                setup_ms,
+                initial_prefill_ms,
+                &tmp_reports,
+            );
+            match File::create(&args.output)
+                .and_then(|mut f| f.write_all(json.as_bytes()))
+            {
+                Ok(()) => eprintln!(
+                    "[lookup-bench] CHECKPOINT: persisted level {}/{} lookup+audit ({})",
+                    level_idx + 1,
+                    preload_counts.len(),
+                    args.output.display(),
+                ),
+                Err(e) => eprintln!(
+                    "[lookup-bench] WARN: checkpoint write to {:?} failed: {e}",
+                    args.output
+                ),
+            }
+        }
+
+        // ---- per-stage throughput sweep (optional) ---------------
+        // For each concurrency N in `--throughput-concurrencies`,
+        // spawn N tokio tasks that pound the coord gRPC endpoint
+        // with the chosen lookup kind, then record achieved QPS +
+        // latency quantiles. Runs after audit and BEFORE
+        // publish_bench so the cluster state is exactly what audit
+        // measured — the sweep itself doesn't add epochs.
+        //
+        // Notes on design:
+        //   - The "value" kind does the realistic two-RPC client
+        //     flow: lookup_label → lookup_value with the resolved
+        //     slot. The full chain is timed so the per-request
+        //     latency reflects what a real client experiences.
+        //   - Other kinds are single-RPC.
+        //   - Each task uses an independent linear-congruential
+        //     sequence over [0, current_count), so they cover the
+        //     label space without coordinating.
+        //   - The hot loop continues running through warmup; only
+        //     latencies recorded after `measuring = true` count.
+        let mut concurrency_sweep_json: Option<String> = None;
+        if !args.throughput_concurrencies.is_empty() && current_count > 0 {
+            use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+            let kind = args.throughput_lookup_kind.clone();
+            let valid_kinds = ["label", "value", "history", "label_history"];
+            if !valid_kinds.contains(&kind.as_str()) {
+                eprintln!(
+                    "error: invalid --throughput-lookup-kind {kind:?} (expected one of {valid_kinds:?})"
+                );
+                return ExitCode::from(2);
+            }
+
+            let rpc_timeout = Duration::from_secs(args.throughput_rpc_timeout_secs.max(1));
+            let mut sweep_blocks: Vec<String> = Vec::with_capacity(args.throughput_concurrencies.len());
+            let mut aborted = false;
+            for &concurrency in &args.throughput_concurrencies {
+                if concurrency == 0 {
+                    continue;
+                }
+
+                // Health probe before each new concurrency level: a
+                // single sequential lookup with a tight timeout. If
+                // it fails, the cluster is in trouble — bail the
+                // sweep so we don't make it worse.
+                if args.throughput_health_check_timeout_secs > 0 {
+                    let probe_timeout = Duration::from_secs(args.throughput_health_check_timeout_secs);
+                    let probe_label = phone_label(0);
+                    let mut probe_client = raw_client.clone();
+                    let probe_ok = driver_rt.block_on(async {
+                        tokio::time::timeout(
+                            probe_timeout,
+                            probe_client.lookup_label(LookupLabelRequest { label: probe_label }),
+                        )
+                        .await
+                        .map(|r| r.is_ok())
+                        .unwrap_or(false)
+                    });
+                    if !probe_ok {
+                        eprintln!(
+                            "  throughput_sweep: HEALTH PROBE FAILED before concurrency={concurrency} — \
+                             aborting sweep at this fill level to protect the cluster"
+                        );
+                        aborted = true;
+                        break;
+                    }
+                }
+
+                eprintln!(
+                    "  throughput_sweep: kind={kind} concurrency={concurrency} window={}s warmup={}s rpc_timeout={}s",
+                    args.throughput_window_secs, args.throughput_warmup_secs, rpc_timeout.as_secs(),
+                );
+
+                let stop = Arc::new(AtomicBool::new(false));
+                let measuring = Arc::new(AtomicBool::new(false));
+                let err_count = Arc::new(AtomicU64::new(0));
+                let attempt_count = Arc::new(AtomicU64::new(0));
+
+                let (all_latencies, elapsed_s) = driver_rt.block_on(async {
+                    let mut handles: Vec<tokio::task::JoinHandle<Vec<f64>>> =
+                        Vec::with_capacity(concurrency);
+                    for task_id in 0..concurrency {
+                        let mut client = raw_client.clone();
+                        let stop = Arc::clone(&stop);
+                        let measuring = Arc::clone(&measuring);
+                        let err_count = Arc::clone(&err_count);
+                        let attempt_count = Arc::clone(&attempt_count);
+                        let kind = kind.clone();
+                        let current_count_u64 = current_count as u64;
+                        let h = tokio::spawn(async move {
+                            let mut lat: Vec<f64> = Vec::new();
+                            // Per-task LCG seed so tasks pick
+                            // disjoint-ish label sequences.
+                            let mut seq: u64 = (task_id as u64)
+                                .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                                ^ 0xDEAD_BEEF_CAFE_F00D;
+                            while !stop.load(Ordering::Relaxed) {
+                                seq = seq
+                                    .wrapping_mul(6364136223846793005)
+                                    .wrapping_add(1442695040888963407);
+                                let idx = seq % current_count_u64.max(1);
+                                let label = phone_label(idx);
+                                attempt_count.fetch_add(1, Ordering::Relaxed);
+                                // Latency is read from the response's
+                                // `server_processing_micros` field, not
+                                // a client-side wall-clock measurement.
+                                // This isolates server-induced latency
+                                // (incl. queue-wait inside the handler
+                                // under load) from network RTT and
+                                // client-side decode overhead.
+                                let server_micros: Option<u64> = match kind.as_str() {
+                                    "label" => {
+                                        let req = LookupLabelRequest { label };
+                                        match tokio::time::timeout(rpc_timeout, client.lookup_label(req)).await {
+                                            Ok(Ok(resp)) => Some(resp.into_inner().server_processing_micros),
+                                            _ => None,
+                                        }
+                                    },
+                                    "value" => {
+                                        // Realistic two-step: label
+                                        // probe, then value at slot.
+                                        // Both legs inside the same
+                                        // timeout budget. Sum the two
+                                        // server-side processing
+                                        // intervals to get the total
+                                        // server work for the chained
+                                        // operation.
+                                        let chained = async {
+                                            let lbl_req = LookupLabelRequest { label: label.clone() };
+                                            let lbl_resp = client.lookup_label(lbl_req).await?;
+                                            let lbl_inner = lbl_resp.into_inner();
+                                            let slot = lbl_inner.slot;
+                                            let val_req = LookupValueRequest { slot };
+                                            let val_resp = client.lookup_value(val_req).await?;
+                                            let val_inner = val_resp.into_inner();
+                                            Ok::<u64, tonic::Status>(
+                                                lbl_inner.server_processing_micros
+                                                    + val_inner.server_processing_micros,
+                                            )
+                                        };
+                                        match tokio::time::timeout(rpc_timeout, chained).await {
+                                            Ok(Ok(us)) => Some(us),
+                                            _ => None,
+                                        }
+                                    },
+                                    "history" => {
+                                        let req = LookupHistoryRequest { label };
+                                        match tokio::time::timeout(rpc_timeout, client.lookup_history(req)).await {
+                                            Ok(Ok(resp)) => Some(resp.into_inner().server_processing_micros),
+                                            _ => None,
+                                        }
+                                    },
+                                    "label_history" => {
+                                        let req = LookupLabelHistoryRequest { label };
+                                        match tokio::time::timeout(rpc_timeout, client.lookup_label_history(req)).await {
+                                            Ok(Ok(resp)) => Some(resp.into_inner().server_processing_micros),
+                                            _ => None,
+                                        }
+                                    },
+                                    _ => unreachable!(),
+                                };
+                                let Some(us) = server_micros else {
+                                    err_count.fetch_add(1, Ordering::Relaxed);
+                                    continue;
+                                };
+                                let dur_ms = us as f64 / 1000.0;
+                                if measuring.load(Ordering::Relaxed) {
+                                    lat.push(dur_ms);
+                                }
+                            }
+                            lat
+                        });
+                        handles.push(h);
+                    }
+
+                    // Warmup
+                    tokio::time::sleep(Duration::from_secs(args.throughput_warmup_secs)).await;
+                    // Measure
+                    measuring.store(true, Ordering::Relaxed);
+                    let start = Instant::now();
+                    tokio::time::sleep(Duration::from_secs(args.throughput_window_secs)).await;
+                    measuring.store(false, Ordering::Relaxed);
+                    let elapsed = start.elapsed().as_secs_f64();
+                    // Stop
+                    stop.store(true, Ordering::Relaxed);
+                    let mut all = Vec::new();
+                    for h in handles {
+                        if let Ok(l) = h.await {
+                            all.extend(l);
+                        }
+                    }
+                    (all, elapsed)
+                });
+
+                let n_requests = all_latencies.len() as u64;
+                let mut sorted = all_latencies.clone();
+                sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                let q = |frac: f64| -> f64 {
+                    if sorted.is_empty() {
+                        return f64::NAN;
+                    }
+                    let idx =
+                        ((sorted.len() - 1) as f64 * frac).round() as usize;
+                    sorted[idx.min(sorted.len() - 1)]
+                };
+                let p50 = q(0.50);
+                let p90 = q(0.90);
+                let p99 = q(0.99);
+                let qps = n_requests as f64 / elapsed_s.max(1e-9);
+                let errs = err_count.load(Ordering::Relaxed);
+                let attempts = attempt_count.load(Ordering::Relaxed);
+                let err_rate = if attempts > 0 { errs as f64 / attempts as f64 } else { 0.0 };
+                eprintln!(
+                    "    qps={qps:.0}  n={n_requests}  attempts={attempts}  errs={errs} ({err_pct:.1}%)  p50={p50:.1}ms  p90={p90:.1}ms  p99={p99:.1}ms",
+                    err_pct = err_rate * 100.0,
+                );
+                sweep_blocks.push(format!(
+                    concat!(
+                        "          {{\n",
+                        "            \"concurrency\": {c},\n",
+                        "            \"n_requests\": {n},\n",
+                        "            \"errors\": {errs},\n",
+                        "            \"window_s\": {ws:.3},\n",
+                        "            \"qps\": {qps:.3},\n",
+                        "            \"latency_ms_p50\": {p50:.3},\n",
+                        "            \"latency_ms_p90\": {p90:.3},\n",
+                        "            \"latency_ms_p99\": {p99:.3}\n",
+                        "          }}"
+                    ),
+                    c = concurrency,
+                    n = n_requests,
+                    errs = errs,
+                    ws = elapsed_s,
+                    qps = qps,
+                    p50 = p50,
+                    p90 = p90,
+                    p99 = p99,
+                ));
+
+                // Early-stop: bail before climbing concurrency
+                // further if either signal says we're in trouble.
+                if args.throughput_max_error_rate > 0.0 && err_rate >= args.throughput_max_error_rate {
+                    eprintln!(
+                        "  throughput_sweep: error rate {err_pct:.1}% ≥ threshold {thr:.1}% — \
+                         stopping sweep at this fill level",
+                        err_pct = err_rate * 100.0,
+                        thr = args.throughput_max_error_rate * 100.0,
+                    );
+                    aborted = true;
+                    break;
+                }
+                if args.throughput_max_p99_ms > 0 && p99 >= args.throughput_max_p99_ms as f64 {
+                    eprintln!(
+                        "  throughput_sweep: p99 latency {p99:.0}ms ≥ threshold {thr}ms — \
+                         stopping sweep at this fill level",
+                        p99 = p99,
+                        thr = args.throughput_max_p99_ms,
+                    );
+                    aborted = true;
+                    break;
+                }
+            }
+
+            if aborted {
+                eprintln!(
+                    "  throughput_sweep: aborted at this fill level (cluster will continue to next level)"
+                );
+            }
+
+            if !sweep_blocks.is_empty() {
+                concurrency_sweep_json = Some(format!(
+                    concat!(
+                        "        \"lookup_kind\": \"{kind}\",\n",
+                        "        \"samples\": [\n{samples}\n        ]"
+                    ),
+                    kind = args.throughput_lookup_kind,
+                    samples = sweep_blocks.join(",\n"),
+                ));
+            }
+        }
+
         // ---- per-stage publish bench (optional) -------------------
         // After lookups + audit, sweep `--publish-batch-sizes`
         // (each batch run `--publish-samples-per-batch` times) and
@@ -1330,8 +1744,12 @@ fn main() -> ExitCode {
             Some(b) => format!(",\n      \"audit\": {{\n{b}\n      }}"),
             None => String::new(),
         };
+        let concurrency_sweep_block = match concurrency_sweep_json {
+            Some(b) => format!(",\n      \"concurrency_sweep\": {{\n{b}\n      }}"),
+            None => String::new(),
+        };
         let level_block = format!(
-            "    {{\n      \"preload_count\": {target},\n      \"current_count_after_topup\": {current_count},\n      \"preload_publish_ms_total\": {preload_publish_ms_total:.4},\n      \"rss_kb\": {rss},\n{lookup_block}{publish_block}{audit_block}\n    }}",
+            "    {{\n      \"preload_count\": {target},\n      \"current_count_after_topup\": {current_count},\n      \"preload_publish_ms_total\": {preload_publish_ms_total:.4},\n      \"rss_kb\": {rss},\n{lookup_block}{publish_block}{audit_block}{concurrency_sweep_block}\n    }}",
             target = target,
             current_count = current_count,
             preload_publish_ms_total = preload_publish_ms_total,
@@ -1339,6 +1757,7 @@ fn main() -> ExitCode {
             lookup_block = lookup_block,
             publish_block = publish_block,
             audit_block = audit_block,
+            concurrency_sweep_block = concurrency_sweep_block,
         );
         level_reports.push(level_block);
 

@@ -129,13 +129,17 @@ pub struct ShardedAegonConfig<E: Pairing, P: AegonPcs<E>> {
     /// Coordinator-side label→value store. Defaults to
     /// [`DbSource::None`] (no DB; lookup returns an empty value).
     pub db: DbSource,
-    /// If set, every in-process shard's [`Aegon`] will fetch its
-    /// per-opening masking packages from a remote `aegon_masking_server`
-    /// at this endpoint instead of using the default in-process
-    /// [`super::masking::MaskingPool`]. Only honoured for
+    /// If non-empty, every in-process shard's [`Aegon`] will fetch its
+    /// per-opening masking packages from one of these remote
+    /// `aegon_masking_server` endpoints instead of using the default
+    /// in-process [`super::masking::MaskingPool`]. With more than one
+    /// endpoint, requests are spread across servers in round-robin via
+    /// [`super::masking::MaskingClientPool`], so the per-shard masking
+    /// ceiling becomes `N * single-server-rate` instead of just
+    /// single-server-rate. Only honoured for
     /// [`ShardTransport::InProcess`] — remote shards configure their
     /// own masking source via `aegon_shard_server`'s `--masking-addr`.
-    pub masking_addr: Option<String>,
+    pub masking_addrs: Vec<String>,
     pub _e: PhantomData<E>,
 }
 
@@ -277,7 +281,7 @@ pub struct ShardedAegonConfigBuilder<E: Pairing, P: AegonPcs<E>> {
     shards: ShardTransport,
     srs: SrsSource,
     db: DbSource,
-    masking_addr: Option<String>,
+    masking_addrs: Vec<String>,
     _e: PhantomData<E>,
 }
 
@@ -297,7 +301,7 @@ impl<E: Pairing, P: AegonPcs<E>> ShardedAegonConfigBuilder<E, P> {
             shards: ShardTransport::default(),
             srs: SrsSource::default(),
             db: DbSource::default(),
-            masking_addr: None,
+            masking_addrs: Vec::new(),
             _e: PhantomData,
         }
     }
@@ -341,15 +345,25 @@ impl<E: Pairing, P: AegonPcs<E>> ShardedAegonConfigBuilder<E, P> {
         self
     }
 
-    /// Wire every in-process shard to a remote `aegon_masking_server`
-    /// at this endpoint (e.g. `"http://127.0.0.1:50061"`). Each shard's
-    /// [`Aegon`] swaps its default in-process [`super::masking::MaskingPool`]
-    /// for a [`super::masking::MaskingClient`] connected to the server,
-    /// matching the cluster shard architecture. Has no effect when
-    /// [`ShardTransport::Remote`] is selected (remote shards configure
-    /// their own masking source).
-    pub fn masking_addr(mut self, v: impl Into<String>) -> Self {
-        self.masking_addr = Some(v.into());
+    /// Wire every in-process shard to a single remote
+    /// `aegon_masking_server` at this endpoint (e.g.
+    /// `"http://127.0.0.1:50061"`). Convenience wrapper around
+    /// [`Self::masking_addrs`] with a one-element list — see that
+    /// method's docs for the multi-server / round-robin path.
+    pub fn masking_addr(self, v: impl Into<String>) -> Self {
+        self.masking_addrs(vec![v.into()])
+    }
+
+    /// Wire every in-process shard to a *set* of remote
+    /// `aegon_masking_server` endpoints. Each shard's [`Aegon`] swaps
+    /// its default in-process [`super::masking::MaskingPool`] for a
+    /// [`super::masking::MaskingClientPool`] that round-robins package
+    /// fetches across all endpoints. Passing one element gives the
+    /// same behaviour as the old single-endpoint path. Has no effect
+    /// when [`ShardTransport::Remote`] is selected (remote shards
+    /// configure their own masking source).
+    pub fn masking_addrs(mut self, v: Vec<String>) -> Self {
+        self.masking_addrs = v;
         self
     }
 
@@ -404,7 +418,7 @@ impl<E: Pairing, P: AegonPcs<E>> ShardedAegonConfigBuilder<E, P> {
             shards: self.shards,
             srs: self.srs,
             db: self.db,
-            masking_addr: self.masking_addr,
+            masking_addrs: self.masking_addrs,
             _e: PhantomData,
         })
     }
@@ -1127,18 +1141,31 @@ where
                     shard_config.log_capacity,
                     verifier_param.clone(),
                 );
-                // If a remote masking server endpoint is configured,
-                // connect once and share the client across all shards.
-                // MaskingClient is Clone-cheap (Arc-wrapped worker
-                // thread under the hood), so sharing is fine.
+                // If remote masking server endpoints are configured,
+                // connect once and share the client(s) across all shards.
+                // A one-element list builds a single MaskingClient
+                // (same behaviour as before). A multi-element list
+                // builds a MaskingClientPool that round-robins fetches
+                // across all servers, so the per-shard masking
+                // throughput becomes `N * single-server-rate`.
+                // Both are Clone-cheap (Arc-wrapped worker threads
+                // under the hood), so sharing across shards is fine.
                 let masking_source: Option<
                     std::sync::Arc<dyn super::masking::MaskingSource<E, P>>,
-                > = if let Some(addr) = &config.masking_addr {
-                    let client =
-                        super::masking::MaskingClient::<E, P>::connect(addr.clone())?;
-                    Some(std::sync::Arc::new(client))
-                } else {
-                    None
+                > = match config.masking_addrs.len() {
+                    0 => None,
+                    1 => {
+                        let client = super::masking::MaskingClient::<E, P>::connect(
+                            config.masking_addrs[0].clone(),
+                        )?;
+                        Some(std::sync::Arc::new(client))
+                    },
+                    _ => {
+                        let pool = super::masking::MaskingClientPool::<E, P>::connect_all(
+                            &config.masking_addrs,
+                        )?;
+                        Some(std::sync::Arc::new(pool))
+                    },
                 };
                 let mut shards: Vec<Box<dyn super::shard_grpc::ShardHandle<E, P, H>>> =
                     Vec::with_capacity(n_shards);

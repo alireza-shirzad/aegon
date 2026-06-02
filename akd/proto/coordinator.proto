@@ -60,6 +60,12 @@ message LookupLabelResponse {
   // of probe openings against the current epoch's per-shard
   // index_commitment.
   bytes proof = 2;
+  // Server-side processing time for this RPC, in microseconds.
+  // Measured from handler entry to response construction; includes
+  // queue-wait inside the server's tokio runtime when overloaded.
+  // Used by benches to report load-induced latency without
+  // contamination from client-side network/serialization overhead.
+  uint64 server_processing_micros = 3;
 }
 
 message LookupValueRequest {
@@ -79,6 +85,7 @@ message LookupValueResponse {
   // value bytes some other way and verify the proof's `evaluation`
   // matches `H_F(value)` themselves.
   bytes value = 2;
+  uint64 server_processing_micros = 3;
 }
 
 message CommitmentResponse {
@@ -86,6 +93,7 @@ message CommitmentResponse {
   // bulletin-board commitment the client should anchor verifications
   // against. Includes the cross-shard merkle root.
   bytes commitment = 1;
+  uint64 server_processing_micros = 2;
 }
 
 message LookupHistoryRequest {
@@ -102,6 +110,7 @@ message LookupHistoryResponse {
   // cross-checking the returned (prev_root, post_root) pairs against
   // its trusted view of historical bulletin-board roots.
   bytes history = 1;
+  uint64 server_processing_micros = 2;
 }
 
 message LookupLabelHistoryRequest {
@@ -117,6 +126,7 @@ message LookupLabelHistoryResponse {
   // (placement_root, live_root) against its trusted bulletin-board
   // view for the placement epoch and the live epoch.
   bytes history = 1;
+  uint64 server_processing_micros = 2;
 }
 
 message Empty {}

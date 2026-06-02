@@ -76,6 +76,14 @@ export LOOKUP_PUBLISH_BATCH_SIZES="${LOOKUP_PUBLISH_BATCH_SIZES:-${PUBLISH_BATCH
 # acceleration tables overflow L3 at the bigger batch, so per-entry cost
 # spikes from cache misses. v6's 16384 stays in cache.
 export PUBLISH_WARMUP_BATCH_SIZE="${PUBLISH_WARMUP_BATCH_SIZE:-16384}"
+# 4 masking servers so the throughput-sweep curve shows a real climb
+# phase. One masking server (120 pkg/s ceiling at nv=27, k=9) is
+# already saturated by a single-thread bench client (~129 QPS), so
+# the latency-knee plot just shows a vertical pile at the masking
+# ceiling. With 4 masking servers (480 pkg/s ceiling) the bench can
+# climb from conc=1 toward the next bottleneck.
+export N_MASKING_SERVERS="${N_MASKING_SERVERS:-4}"
+export LOOKUP_THROUGHPUT_CONCURRENCIES="${LOOKUP_THROUGHPUT_CONCURRENCIES:-1,4,16,64,256,512,1024}"
 
 # Outputs — distinct filenames so medium and large don't overwrite
 # each other in the same results dirs.

@@ -132,16 +132,21 @@ struct Args {
     #[arg(long, default_value_t = 0)]
     prefill_seed: u64,
 
-    /// Optional address of the cluster's masking server (e.g.
-    /// `http://10.0.0.5:50061`). When set, the shard fetches a one-
-    /// shot `KZHKMaskingPackage` from the masking server before every
-    /// value-side opening (lookup, freshness attestation, history
-    /// re-mask) and produces a hiding opening via
-    /// `P::open_zk_with_package` / `P::remask_with_package`. Leave
-    /// unset for tests; value-side openings then fall back to
-    /// generating a fresh masking package inline.
-    #[arg(long)]
-    masking_addr: Option<String>,
+    /// Comma-separated list of masking-server endpoints (e.g.
+    /// `http://10.0.0.5:50061,http://10.0.0.6:50061`). When set, the
+    /// shard fetches a one-shot `KZHKMaskingPackage` from one of these
+    /// servers before every value-side opening (lookup, freshness
+    /// attestation, history re-mask), produced via
+    /// `P::open_zk_with_package` / `P::remask_with_package`. Multiple
+    /// endpoints are dispatched round-robin via
+    /// `MaskingClientPool` — useful when a single masking server is
+    /// CPU-bound and only this one shard is driving load (e.g. the
+    /// small/medium regimes where N_SHARDS ≤ 2). Leave unset for
+    /// tests; value-side openings then fall back to generating a
+    /// fresh masking package inline. May be repeated, or pass a
+    /// single comma-separated string.
+    #[arg(long = "masking-addr", value_delimiter = ',')]
+    masking_addr: Vec<String>,
 
     /// Bind address for the distributed-SRS-bootstrap gRPC service
     /// (separate port from the main shard service). When set, the
@@ -359,19 +364,37 @@ async fn main() -> ExitCode {
     }
 
     // Cluster path: if --masking-addr is set, swap out Aegon's
-    // default in-process MaskingPool for a remote MaskingClient.
-    // Aegon always has *some* masking source in hiding mode (built
-    // by `Aegon::init_with_arc`); the local pool is only kept when
-    // no remote endpoint is configured (e.g. single-shard dev).
-    if let Some(addr) = &args.masking_addr {
-        eprintln!("connecting to masking server at {addr}");
-        match akd::aegon::masking::MaskingClient::<Bn254, Pcs>::connect(addr.clone()) {
-            Ok(client) => aegon.set_masking_source(std::sync::Arc::new(client)),
-            Err(e) => {
-                eprintln!("error connecting to masking server '{addr}': {e}");
-                return ExitCode::from(1);
-            },
-        }
+    // default in-process MaskingPool for a remote MaskingClient (one
+    // endpoint) or MaskingClientPool (multiple endpoints, dispatched
+    // round-robin). Aegon always has *some* masking source in hiding
+    // mode (built by `Aegon::init_with_arc`); the local pool is only
+    // kept when no remote endpoint is configured (e.g. single-shard
+    // dev).
+    match args.masking_addr.len() {
+        0 => {},
+        1 => {
+            let addr = &args.masking_addr[0];
+            eprintln!("connecting to masking server at {addr}");
+            match akd::aegon::masking::MaskingClient::<Bn254, Pcs>::connect(addr.clone()) {
+                Ok(client) => aegon.set_masking_source(std::sync::Arc::new(client)),
+                Err(e) => {
+                    eprintln!("error connecting to masking server '{addr}': {e}");
+                    return ExitCode::from(1);
+                },
+            }
+        },
+        n => {
+            eprintln!("connecting to {n} masking servers (round-robin): {:?}", args.masking_addr);
+            match akd::aegon::masking::MaskingClientPool::<Bn254, Pcs>::connect_all(
+                &args.masking_addr,
+            ) {
+                Ok(pool) => aegon.set_masking_source(std::sync::Arc::new(pool)),
+                Err(e) => {
+                    eprintln!("error connecting to masking pool {:?}: {e}", args.masking_addr);
+                    return ExitCode::from(1);
+                },
+            }
+        },
     }
 
     // Benchmark-only prefill. Runs after setup but before binding the

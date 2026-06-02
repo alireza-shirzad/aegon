@@ -34,7 +34,7 @@
 #   SETUP_SEED          deterministic SRS gen seed    (42)
 #   PREFILL_SEED        deterministic prefill seed    (1)
 #   SHARD_MACHINE_TYPE  GCE machine type for shards   (n2-standard-16 — 64 GB RAM)
-#   COORD_MACHINE_TYPE  GCE machine type coordinator  (n2-standard-4)
+#   COORD_MACHINE_TYPE  GCE machine type coordinator  (defaults to SHARD_MACHINE_TYPE = n2-standard-16)
 #
 # At the defaults above (N_SHARDS=128, SHARD_LOG_CAPACITY=27, KZH_K=9,
 # PUBLISH_TRUE_LOG_CAP=32):
@@ -93,11 +93,27 @@ SHARD_MACHINE_TYPE="${SHARD_MACHINE_TYPE:-n2-standard-16}"
 COORD_MACHINE_TYPE="${COORD_MACHINE_TYPE:-$SHARD_MACHINE_TYPE}"
 # Coordinator boot disk is shared with the RocksDB store at
 # $COORD_DB_PATH. Must fit the AKD history for the deepest fill we
-# drive. Defaults sized for 90% medium (60M entries, ~200KB/entry
-# pre-compaction): 4TB pd-ssd. For large (1.2B entries at 30%),
-# override to something proportionally bigger.
-COORD_BOOT_DISK_SIZE="${COORD_BOOT_DISK_SIZE:-4TB}"
+# drive. Empirical: ~24KB/entry on disk (LSM overhead included).
+# Sized for large at 10% fill (430M entries ≈ 10TB), with headroom
+# for compaction churn: 12TB pd-ssd. For medium (60M @ 90%) the
+# extra capacity is wasted but cheap relative to a re-run.
+COORD_BOOT_DISK_SIZE="${COORD_BOOT_DISK_SIZE:-12TB}"
 COORD_BOOT_DISK_TYPE="${COORD_BOOT_DISK_TYPE:-pd-ssd}"
+# bench-client RocksDB lives on its own disk; the bench's in-process
+# coord state climbs through fill levels via real publish, so this is
+# the disk that actually fills up during lookup-bench. Sized larger
+# than the coord disk to absorb RocksDB compaction spikes at the
+# highest fills (~10% of 2^32 = ~10 TB steady state, +headroom).
+BENCH_CLIENT_BOOT_DISK_SIZE="${BENCH_CLIENT_BOOT_DISK_SIZE:-20TB}"
+BENCH_CLIENT_BOOT_DISK_TYPE="${BENCH_CLIENT_BOOT_DISK_TYPE:-pd-ssd}"
+# Bench-client machine type. Distinct from $COORD_MACHINE_TYPE because
+# the bench-client holds an in-process coord state that scales with
+# fill level (baseline ~26 GB for the 2^32 open-addressing index + ~165
+# bytes per filled entry), and the n2-standard-16 (64 GB) coord type
+# OOM-killed the large run at ~5% fill. Override per-regime in
+# run-*-cluster.sh; defaults to $COORD_MACHINE_TYPE so small/medium
+# (which never approach the RAM ceiling) stay on the cheap node.
+BENCH_CLIENT_MACHINE_TYPE="${BENCH_CLIENT_MACHINE_TYPE:-$COORD_MACHINE_TYPE}"
 
 NETWORK="aegon-bench-vpc"
 FIREWALL_GRPC="aegon-bench-grpc"
@@ -106,12 +122,32 @@ FIREWALL_SSH="aegon-bench-ssh"
 SHARD_TAG="aegon-bench-shard"
 COORD_TAG="aegon-bench-coord"
 MASKING_TAG="aegon-bench-masking"
+# Bench-client VM: runs aegon_lookup_bench. Separate from the coord so
+# the bench's request-driving CPU doesn't contend with the coord's
+# tonic worker pool, and lookup RPCs hit the coord's gRPC stack over
+# the real intra-VPC network instead of localhost loopback. Latency
+# is read from the response's `server_processing_micros` field so we
+# never count the RTT we just inserted.
+BENCH_CLIENT_TAG="aegon-bench-client"
+FIREWALL_BENCH_CLIENT_GRPC="aegon-bench-client-grpc"
 SHARD_PORT=50051
-# Masking server: one VM per cluster. Holds a queue of pre-built
-# `KZHKMaskingPackage`s, background producers refill the queue
-# continuously. Each shard's value-side opening fetches a package
-# from this server instead of generating one inline — turns the
-# per-lookup MSM into a sub-ms gRPC fetch.
+# Masking server(s): N_MASKING_SERVERS VMs per cluster. Each holds a
+# queue of pre-built `KZHKMaskingPackage`s; background producers
+# refill the queue continuously. Each shard's value-side opening
+# fetches a package from a masking server instead of generating one
+# inline — turns the per-lookup MSM into a sub-ms gRPC fetch.
+#
+# The shard server's `--masking-addr` takes a *list* (comma-separated
+# or repeated) and dispatches package fetches across all of them
+# round-robin via `MaskingClientPool`. Every shard gets the SAME
+# endpoint list, so per-shard masking throughput becomes N × single-
+# server rate regardless of shard count. This matters at small/medium
+# (N_SHARDS ≤ 2) where the old per-shard pinning pinned all load to
+# the first 1–2 masking servers and left the rest idle.
+# Standalone masking throughput is ~120 pkg/sec for nv=27/k=9 and
+# ~185 pkg/sec for nv=22/k=7. For 3 k QPS at large (nv=27/k=9), N≈25
+# barely makes it; we run 35 for headroom. Small/medium use 4.
+N_MASKING_SERVERS="${N_MASKING_SERVERS:-1}"
 MASKING_PORT="${MASKING_PORT:-50061}"
 MASKING_MACHINE_TYPE="${MASKING_MACHINE_TYPE:-n2-standard-16}"
 MASKING_QUEUE_SIZE="${MASKING_QUEUE_SIZE:-512}"
@@ -262,7 +298,17 @@ scp_from() {
 
 shard_name() { echo "${SHARD_TAG}-$1"; }
 coord_name() { echo "${COORD_TAG}"; }
-masking_name() { echo "${MASKING_TAG}"; }
+# Indexed masking VM name. Each masking VM gets a sequence number 0..N-1
+# (e.g. aegon-bench-masking-0, aegon-bench-masking-1, ...). The shared
+# MASKING_TAG is still used for firewall source-tag matching, so every
+# masking VM gets that tag at create time.
+masking_name() { echo "${MASKING_TAG}-$1"; }
+bench_client_name() { echo "${BENCH_CLIENT_TAG}"; }
+
+coord_internal_ip() {
+  gcloud compute instances describe "$(coord_name)" --zone="$ZONE" \
+    --format='value(networkInterfaces[0].networkIP)'
+}
 
 shard_internal_ip() {
   gcloud compute instances describe "$(shard_name "$1")" --zone="$ZONE" \
@@ -326,6 +372,22 @@ cmd_up() {
       --network="$NETWORK" \
       --allow="tcp:$SHARD_PORT" \
       --source-tags="$COORD_TAG" \
+      --target-tags="$SHARD_TAG" >/dev/null
+  fi
+
+  # ---- firewall: bench-client -> shards on gRPC port ----
+  # The bench-client VM runs aegon_lookup_bench, which brings up an
+  # in-process coord state that fans out to the shards directly over
+  # the VPC. So bench-client needs the same shard reachability the
+  # coord has.
+  if gcloud compute firewall-rules describe "$FIREWALL_BENCH_CLIENT_GRPC" >/dev/null 2>&1; then
+    log "firewall $FIREWALL_BENCH_CLIENT_GRPC exists"
+  else
+    log "creating firewall $FIREWALL_BENCH_CLIENT_GRPC (bench-client -> shards:$SHARD_PORT)"
+    gcloud compute firewall-rules create "$FIREWALL_BENCH_CLIENT_GRPC" \
+      --network="$NETWORK" \
+      --allow="tcp:$SHARD_PORT" \
+      --source-tags="$BENCH_CLIENT_TAG" \
       --target-tags="$SHARD_TAG" >/dev/null
   fi
 
@@ -408,22 +470,57 @@ cmd_up() {
   # its own disk. Cuts a VM, a firewall rule, and Redis's MULTI/EXEC
   # transaction-size ceiling out of the deployment.
 
-  # ---- masking server (optional, one VM per cluster) ----
+  # ---- masking servers (optional, N_MASKING_SERVERS VMs per cluster) ----
+  # Spun up in parallel — each is independent (no inter-server coord).
   if [[ "$ENABLE_MASKING_SERVER" == "1" ]]; then
-    local mname; mname="$(masking_name)"
-    if gcloud compute instances describe "$mname" --zone="$ZONE" >/dev/null 2>&1; then
-      log "$mname exists, skipping"
-    else
+    local -a masking_create_pids=()
+    for ((mi = 0; mi < N_MASKING_SERVERS; mi++)); do
+      local mname; mname="$(masking_name "$mi")"
+      if gcloud compute instances describe "$mname" --zone="$ZONE" >/dev/null 2>&1; then
+        log "$mname exists, skipping"
+        continue
+      fi
       log "creating $mname ($MASKING_MACHINE_TYPE)"
-      gcloud compute instances create "$mname" \
-        --zone="$ZONE" \
-        --machine-type="$MASKING_MACHINE_TYPE" \
-        --network="$NETWORK" \
-        --no-address \
-        --tags="$MASKING_TAG" \
-        --image-family="ubuntu-2604-lts-amd64" --image-project="ubuntu-os-cloud" \
-        --boot-disk-size=100GB >/dev/null
+      (
+        gcloud compute instances create "$mname" \
+          --zone="$ZONE" \
+          --machine-type="$MASKING_MACHINE_TYPE" \
+          --network="$NETWORK" \
+          --no-address \
+          --tags="$MASKING_TAG" \
+          --image-family="ubuntu-2604-lts-amd64" --image-project="ubuntu-os-cloud" \
+          --boot-disk-size=100GB >/dev/null
+      ) &
+      masking_create_pids+=("$!")
+    done
+    if (( ${#masking_create_pids[@]} > 0 )); then
+      log "waiting on ${#masking_create_pids[@]} masking VM create(s)..."
+      for pid in "${masking_create_pids[@]}"; do
+        wait "$pid" || log "WARN: a masking VM create failed (check above)"
+      done
     fi
+  fi
+
+  # ---- bench-client (one VM per cluster, drives lookup-bench) ----
+  # Separate VM for aegon_lookup_bench so the bench's request-driving
+  # CPU and the coord's tonic worker pool don't share cores. Same
+  # machine type + disk as the coord because the bench brings up its
+  # own in-process coord state (writes RocksDB at $COORD_DB_PATH and
+  # climbs through fill levels via real publish calls).
+  local bname; bname="$(bench_client_name)"
+  if gcloud compute instances describe "$bname" --zone="$ZONE" >/dev/null 2>&1; then
+    log "$bname exists, skipping"
+  else
+    log "creating $bname ($BENCH_CLIENT_MACHINE_TYPE, boot=${BENCH_CLIENT_BOOT_DISK_SIZE} ${BENCH_CLIENT_BOOT_DISK_TYPE})"
+    gcloud compute instances create "$bname" \
+      --zone="$ZONE" \
+      --machine-type="$BENCH_CLIENT_MACHINE_TYPE" \
+      --network="$NETWORK" \
+      --no-address \
+      --tags="$BENCH_CLIENT_TAG" \
+      --image-family="ubuntu-2604-lts-amd64" --image-project="ubuntu-os-cloud" \
+      --boot-disk-size="$BENCH_CLIENT_BOOT_DISK_SIZE" \
+      --boot-disk-type="$BENCH_CLIENT_BOOT_DISK_TYPE" >/dev/null
   fi
 
   log "instances up. waiting 30s for SSH to settle..."
@@ -447,6 +544,15 @@ cmd_up() {
 start_shard() {
   local name="$1"
   local i="$2"
+  # Optional 3rd arg: pre-resolved masking endpoint(s) as a single
+  # comma-separated string. Passed in by cmd_start_shards so we don't
+  # fire one `gcloud describe` per shard at fan-out time (that was
+  # tripping IAP throttling on 128-shard clusters). Empty string is
+  # treated as "no masking". The shard's `--masking-addr` clap arg
+  # has `value_delimiter=','` so the comma-joined string splits into
+  # a Vec<String> on the shard, and the shard's `MaskingClientPool`
+  # round-robins fetches across every endpoint in the list.
+  local prefetched_masking_ep="${3:-}"
   log "[$name] starting shard server (shard_id=$i, --prefill-count 0)"
   # Each shard is launched exactly once per benchmark, with
   # --prefill-count 0. Per-fill_percent prefill is driven from the
@@ -466,16 +572,14 @@ start_shard() {
   # any plausible IAP teardown lag:
   #   (1) spawn — fire-and-forget kill + nohup
   #   (2) wait_for_shard_ready — short-lived gcloud probes
-  # Optional --masking-addr: if the cluster has a masking server, point
-  # each shard at it so value-side openings fetch pre-built packages
-  # from the shared queue instead of generating one inline per open.
+  # Optional --masking-addr: caller passes the pre-resolved endpoint
+  # to avoid one `gcloud describe` per shard at large scale (the
+  # parallel fan-out was tripping IAP throttling). Empty string =
+  # no masking endpoint (shards fall back to inline package
+  # generation).
   local masking_flag=""
-  if [[ "$ENABLE_MASKING_SERVER" == "1" ]]; then
-    local masking_ep
-    masking_ep="$(masking_endpoint)" || die "could not resolve masking server endpoint"
-    if [[ -n "$masking_ep" ]]; then
-      masking_flag="--masking-addr $masking_ep"
-    fi
+  if [[ "$ENABLE_MASKING_SERVER" == "1" && -n "$prefetched_masking_ep" ]]; then
+    masking_flag="--masking-addr $prefetched_masking_ep"
   fi
   local spawn_cmd="if [ -f /tmp/aegon-shard.pid ]; then \
       kill \$(cat /tmp/aegon-shard.pid) 2>/dev/null || true; \
@@ -702,20 +806,46 @@ cmd_deploy() {
   log "[$cname] enabling logind linger so the bench unit survives 15h+"
   remote "$cname" "sudo loginctl enable-linger \$(whoami) && loginctl show-user \$(whoami) --property=Linger --value"
 
-  # ---- push to masking server (optional) ----
+  # ---- push to masking servers (optional, parallel) ----
   if [[ "$ENABLE_MASKING_SERVER" == "1" ]]; then
-    local mname; mname="$(masking_name)"
-    wait_for_ssh "$mname"
-    log "[$mname] uploading aegon_masking_server + aegon_srs_gen"
-    scp_to "$mname" "$remote_bin_dir/aegon_masking_server"
-    scp_to "$mname" "$remote_bin_dir/aegon_srs_gen"
-    remote "$mname" "sudo mkdir -p $REMOTE_BIN_DIR && \
-      sudo mv /tmp/aegon_masking_server /tmp/aegon_srs_gen $REMOTE_BIN_DIR/ && \
-      sudo chmod +x $REMOTE_BIN_DIR/aegon_masking_server $REMOTE_BIN_DIR/aegon_srs_gen && \
-      sudo mkdir -p $REMOTE_SRS_DIR && \
-      sudo chown \$(whoami) $REMOTE_SRS_DIR"
-    log "[$mname] deploy done (binaries in place; SRS will be generated by start-masking)"
+    local -a masking_deploy_pids=()
+    for ((mi = 0; mi < N_MASKING_SERVERS; mi++)); do
+      local mname; mname="$(masking_name "$mi")"
+      (
+        wait_for_ssh "$mname"
+        log "[$mname] uploading aegon_masking_server + aegon_srs_gen"
+        scp_to "$mname" "$remote_bin_dir/aegon_masking_server"
+        scp_to "$mname" "$remote_bin_dir/aegon_srs_gen"
+        remote "$mname" "sudo mkdir -p $REMOTE_BIN_DIR && \
+          sudo mv /tmp/aegon_masking_server /tmp/aegon_srs_gen $REMOTE_BIN_DIR/ && \
+          sudo chmod +x $REMOTE_BIN_DIR/aegon_masking_server $REMOTE_BIN_DIR/aegon_srs_gen && \
+          sudo mkdir -p $REMOTE_SRS_DIR && \
+          sudo chown \$(whoami) $REMOTE_SRS_DIR"
+        log "[$mname] deploy done (binaries in place; SRS will be generated by start-masking)"
+      ) &
+      masking_deploy_pids+=("$!")
+    done
+    log "waiting on ${#masking_deploy_pids[@]} masking VM deploy(s)..."
+    local m_failed=0
+    for pid in "${masking_deploy_pids[@]}"; do
+      wait "$pid" || m_failed=$((m_failed + 1))
+    done
+    if (( m_failed > 0 )); then
+      die "$m_failed masking VM deploy(s) failed"
+    fi
   fi
+
+  # ---- prep the bench-client VM ----
+  # aegon_lookup_bench is pushed here (the coord no longer runs it).
+  # Same RocksDB directory layout as the coord — the bench's in-process
+  # coord state writes its index + state checkpoints to $COORD_DB_PATH
+  # on the bench-client's local disk.
+  local bname; bname="$(bench_client_name)"
+  wait_for_ssh "$bname"
+  log "[$bname] preparing RocksDB directory $COORD_DB_PATH"
+  remote "$bname" "sudo mkdir -p $COORD_DB_PATH && sudo chown \$(whoami) $COORD_DB_PATH"
+  log "[$bname] enabling logind linger so the bench unit survives 15h+"
+  remote "$bname" "sudo loginctl enable-linger \$(whoami) && loginctl show-user \$(whoami) --property=Linger --value"
 
   log "deploy done. SRS generation happens in setup-bench."
   log "next: ./scripts/bench-cluster.sh setup-bench"
@@ -742,11 +872,41 @@ cmd_start_shards() {
   log "[$cname] wiping $COORD_DB_PATH (clean RocksDB for the run)"
   remote "$cname" "sudo rm -rf $COORD_DB_PATH && sudo mkdir -p $COORD_DB_PATH && sudo chown \$(whoami) $COORD_DB_PATH"
 
+  # Pre-resolve every masking server's endpoint ONCE before the per-
+  # shard fan-out. Without this each of N_SHARDS background subshells
+  # does its own `gcloud describe`, and at large scale (128 shards)
+  # the resulting gcloud-API + IAP-tunnel pressure causes spawn_ssh
+  # calls to time out with rc=255. Resolving here serializes a small
+  # number of cheap calls (one per masking server, not one per shard).
+  local -a MASKING_ENDPOINTS=()
+  if [[ "$ENABLE_MASKING_SERVER" == "1" ]]; then
+    log "pre-resolving $N_MASKING_SERVERS masking server endpoint(s)..."
+    for ((mi = 0; mi < N_MASKING_SERVERS; mi++)); do
+      local ep
+      ep="$(masking_endpoint "$mi")" || die "could not resolve masking server $mi endpoint"
+      MASKING_ENDPOINTS+=("$ep")
+    done
+    log "masking endpoints: ${MASKING_ENDPOINTS[*]}"
+  fi
+
+  # Comma-joined endpoint list for the shard's --masking-addr. The
+  # shard server now accepts a list and dispatches package fetches
+  # round-robin via `MaskingClientPool`, so EVERY shard gets EVERY
+  # endpoint — not the old shard_id-mod-N per-shard pinning. This
+  # matters at small/medium scale where N_SHARDS ≤ 2 and the per-shard
+  # pinning left N-1 of the masking VMs idle; now every shard can drive
+  # all N masking servers, so the masking ceiling scales with N
+  # regardless of shard count.
+  local masking_eps_joined=""
+  if (( ${#MASKING_ENDPOINTS[@]} > 0 )); then
+    masking_eps_joined="$(IFS=,; echo "${MASKING_ENDPOINTS[*]}")"
+  fi
+
   local -a pids=()
   for ((i = 0; i < N_SHARDS; i++)); do
     local name; name="$(shard_name "$i")"
     (
-      start_shard "$name" "$i"
+      start_shard "$name" "$i" "$masking_eps_joined"
       log "[$name] start done"
     ) &
     pids+=("$!")
@@ -770,17 +930,9 @@ cmd_start_shards() {
 #
 # Idempotent — kills any existing aegon_masking_server first.
 # Skips entirely when ENABLE_MASKING_SERVER=0.
-cmd_start_masking() {
-  if [[ "$ENABLE_MASKING_SERVER" != "1" ]]; then
-    log "ENABLE_MASKING_SERVER=0, skipping start-masking"
-    return 0
-  fi
-  require_project
-  require_power_of_two "$N_SHARDS"
-  local log_n_shards
-  log_n_shards="$(python3 -c "import math; print(int(math.log2($N_SHARDS)))")"
-
-  local mname; mname="$(masking_name)"
+start_one_masking() {
+  local mname="$1"
+  local log_n_shards="$2"
   wait_for_ssh "$mname"
 
   # SRS: generate on-demand if not already present. Same seed +
@@ -803,16 +955,7 @@ cmd_start_masking() {
     fi
   "
 
-  # Stop any existing masking server, then launch under nohup. We
-  # don't use systemd-run because the masking server is restartable
-  # without state — if the VM reboots, a fresh queue rebuilds in
-  # seconds.
   log "[$mname] launching aegon_masking_server :$MASKING_PORT (queue=$MASKING_QUEUE_SIZE producers=$MASKING_PRODUCERS)"
-  # fire-and-forget: setsid + nohup detach the server from the SSH
-  # session, but IAP-tunnel teardown still hangs for many minutes
-  # because some fd remains attached. We use `remote ... fire-and-forget`
-  # which kills the SSH client after a short grace window. The server
-  # itself keeps running — we verify by polling the port below.
   remote "$mname" "
     if [ -f /tmp/aegon-masking.pid ]; then
       kill \$(cat /tmp/aegon-masking.pid) 2>/dev/null || true
@@ -834,8 +977,6 @@ cmd_start_masking() {
     echo SPAWNED
   " fire-and-forget
 
-  # Poll until the port is listening (gives the server time to load
-  # SRS + start producers).
   log "[$mname] waiting for masking server to bind :$MASKING_PORT"
   local ready=0
   for _ in $(seq 1 60); do
@@ -846,18 +987,52 @@ cmd_start_masking() {
     sleep 2
   done
   if (( ready == 0 )); then
-    die "[$mname] masking server did not bind within 120s — check /tmp/aegon-masking.log"
+    log "[$mname] masking server did not bind within 120s — check /tmp/aegon-masking.log"
+    return 1
   fi
   log "[$mname] masking server ready on :$MASKING_PORT"
 }
 
-# Resolve the masking server's internal IP for the shards' --masking-addr.
+cmd_start_masking() {
+  if [[ "$ENABLE_MASKING_SERVER" != "1" ]]; then
+    log "ENABLE_MASKING_SERVER=0, skipping start-masking"
+    return 0
+  fi
+  require_project
+  require_power_of_two "$N_SHARDS"
+  local log_n_shards
+  log_n_shards="$(python3 -c "import math; print(int(math.log2($N_SHARDS)))")"
+
+  # Launch every masking server in parallel — each is independent
+  # (different VM, different gRPC endpoint, no coordination needed).
+  log "starting $N_MASKING_SERVERS masking server(s) in parallel"
+  local -a start_pids=()
+  for ((mi = 0; mi < N_MASKING_SERVERS; mi++)); do
+    local mname; mname="$(masking_name "$mi")"
+    ( start_one_masking "$mname" "$log_n_shards" ) &
+    start_pids+=("$!")
+  done
+  local failed=0
+  for pid in "${start_pids[@]}"; do
+    wait "$pid" || failed=$((failed + 1))
+  done
+  if (( failed > 0 )); then
+    die "$failed masking server start(s) failed"
+  fi
+  log "all $N_MASKING_SERVERS masking server(s) listening on :$MASKING_PORT"
+}
+
+# Resolve the i-th masking server's internal IP and return its gRPC
+# endpoint. With one argument, returns that index's endpoint; with no
+# argument, returns the 0th (kept for compat with single-masking
+# callers).
 masking_endpoint() {
   if [[ "$ENABLE_MASKING_SERVER" != "1" ]]; then
     echo ""
     return 0
   fi
-  local mname; mname="$(masking_name)"
+  local mi="${1:-0}"
+  local mname; mname="$(masking_name "$mi")"
   local ip
   ip="$(gcloud compute instances describe "$mname" --zone="$ZONE" \
     --format='value(networkInterfaces[0].networkIP)' 2>/dev/null)"
@@ -1220,6 +1395,9 @@ cmd_publish_bench() {
       --uid=$me --gid=$me \
       --working-directory=/home/$me/aegon-run \
       --setenv=HOME=/home/$me \
+      --setenv=AEGON_ROCKSDB_STATS_DUMP_SEC=${AEGON_ROCKSDB_STATS_DUMP_SEC:-60} \
+      --setenv=AEGON_ROCKSDB_BLOCK_CACHE_GB=${AEGON_ROCKSDB_BLOCK_CACHE_GB:-16} \
+      --setenv=AEGON_ROCKSDB_PARALLELISM=${AEGON_ROCKSDB_PARALLELISM:-16} \
       --property=LimitNOFILE=1048576 \
       bash -c '
         cd /home/$me/aegon-run
@@ -1379,6 +1557,14 @@ LOOKUP_TRUE_LOG_CAP="${LOOKUP_TRUE_LOG_CAP:-${PUBLISH_TRUE_LOG_CAP}}"
 # would balloon medium's 20M-entry warmup to ~19k epochs).
 LOOKUP_PUBLISH_BATCH_SIZE="${LOOKUP_PUBLISH_BATCH_SIZE:-${PUBLISH_WARMUP_BATCH_SIZE:-16384}}"
 LOOKUP_AUDIT_SAMPLES="${LOOKUP_AUDIT_SAMPLES:-5}"
+# Throughput sweep: comma-separated concurrency levels for the
+# per-stage QPS-vs-N measurement. Empty = skip (preserves the old
+# behavior). The sweep runs after lookup samples + audit, before
+# publish_bench, so per-fill cluster state is exactly what audit saw.
+LOOKUP_THROUGHPUT_CONCURRENCIES="${LOOKUP_THROUGHPUT_CONCURRENCIES:-}"
+LOOKUP_THROUGHPUT_WINDOW_SECS="${LOOKUP_THROUGHPUT_WINDOW_SECS:-20}"
+LOOKUP_THROUGHPUT_WARMUP_SECS="${LOOKUP_THROUGHPUT_WARMUP_SECS:-3}"
+LOOKUP_THROUGHPUT_LOOKUP_KIND="${LOOKUP_THROUGHPUT_LOOKUP_KIND:-value}"
 LOCAL_LOOKUP_BENCH_DIR="${LOCAL_LOOKUP_BENCH_DIR:-/tmp/aegon-lookup-bench}"
 cmd_lookup_bench() {
   require_project
@@ -1417,7 +1603,13 @@ cmd_lookup_bench() {
   fi
   [[ -x "$remote_bin_dir/aegon_lookup_bench" ]] || die "aegon_lookup_bench missing"
 
-  local cname; cname="$(coord_name)"
+  # Bench now runs on a dedicated bench-client VM (not the coord) so
+  # the bench's request-driving CPU doesn't contend with the coord's
+  # tonic worker pool, and lookup RPCs hit the shard cluster over the
+  # real VPC network. Per-request latency is read out of the
+  # `server_processing_micros` field on each response, so RTT between
+  # the bench-client and the in-process coord is excluded.
+  local cname; cname="$(bench_client_name)"
   local shard_csv; shard_csv="$(shard_endpoints_csv)"
   log "[$cname] uploading aegon_lookup_bench"
   scp_to "$cname" "$remote_bin_dir/aegon_lookup_bench"
@@ -1462,6 +1654,9 @@ cmd_lookup_bench() {
       --uid=$me --gid=$me \
       --working-directory=/home/$me/aegon-run \
       --setenv=HOME=/home/$me \
+      --setenv=AEGON_ROCKSDB_STATS_DUMP_SEC=${AEGON_ROCKSDB_STATS_DUMP_SEC:-60} \
+      --setenv=AEGON_ROCKSDB_BLOCK_CACHE_GB=${AEGON_ROCKSDB_BLOCK_CACHE_GB:-16} \
+      --setenv=AEGON_ROCKSDB_PARALLELISM=${AEGON_ROCKSDB_PARALLELISM:-16} \
       --property=LimitNOFILE=1048576 \
       bash -c '
         cd /home/$me/aegon-run
@@ -1480,6 +1675,10 @@ cmd_lookup_bench() {
           --publish-batch-sizes $LOOKUP_PUBLISH_BATCH_SIZES \
           --publish-samples-per-batch $LOOKUP_PUBLISH_SAMPLES_PER_BATCH \
           --audit-samples $LOOKUP_AUDIT_SAMPLES \
+          ${LOOKUP_THROUGHPUT_CONCURRENCIES:+--throughput-concurrencies $LOOKUP_THROUGHPUT_CONCURRENCIES} \
+          --throughput-window-secs $LOOKUP_THROUGHPUT_WINDOW_SECS \
+          --throughput-warmup-secs $LOOKUP_THROUGHPUT_WARMUP_SECS \
+          --throughput-lookup-kind $LOOKUP_THROUGHPUT_LOOKUP_KIND \
           --private \
           --output $remote_out > $remote_log 2>&1
       '
@@ -1723,7 +1922,7 @@ cmd_down() {
     log "no aegon-bench-* instances to delete"
   fi
 
-  for fw in "$FIREWALL_GRPC" "$FIREWALL_SRS" "$FIREWALL_SSH" "aegon-bench-masking"; do
+  for fw in "$FIREWALL_GRPC" "$FIREWALL_BENCH_CLIENT_GRPC" "$FIREWALL_SRS" "$FIREWALL_SSH" "aegon-bench-masking"; do
     if gcloud compute firewall-rules describe "$fw" >/dev/null 2>&1; then
       log "deleting firewall $fw"
       gcloud compute firewall-rules delete "$fw" --quiet >/dev/null

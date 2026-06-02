@@ -18,6 +18,7 @@
 //! deserialization on the client side reuses the existing helpers.
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use ark_ec::pairing::Pairing;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
@@ -231,6 +232,7 @@ where
         &self,
         req: Request<LookupLabelRequest>,
     ) -> Result<Response<LookupLabelResponse>, Status> {
+        let start = Instant::now();
         let label = req.into_inner().label;
         // `ShardedAegon::lookup_label` is sync but with a `Remote`
         // shard transport it walks the probe trail sequentially and
@@ -253,6 +255,7 @@ where
         Ok(Response::new(LookupLabelResponse {
             slot: encode(&slot).map_err(err_to_status)?,
             proof: encode(&proof).map_err(err_to_status)?,
+            server_processing_micros: start.elapsed().as_micros() as u64,
         }))
     }
 
@@ -260,6 +263,7 @@ where
         &self,
         req: Request<LookupValueRequest>,
     ) -> Result<Response<LookupValueResponse>, Status> {
+        let start = Instant::now();
         let slot_bytes = req.into_inner().slot;
         let slot: LabelSlot = decode(&slot_bytes).map_err(err_to_status)?;
         // Same `spawn_blocking` rationale as `lookup_label` above —
@@ -289,6 +293,7 @@ where
         Ok(Response::new(LookupValueResponse {
             proof: encode(&proof).map_err(err_to_status)?,
             value: Vec::new(),
+            server_processing_micros: start.elapsed().as_micros() as u64,
         }))
     }
 
@@ -296,6 +301,7 @@ where
         &self,
         req: Request<LookupHistoryRequest>,
     ) -> Result<Response<LookupHistoryResponse>, Status> {
+        let start = Instant::now();
         let label = req.into_inner().label;
         // `ShardedAegon::lookup_history` is a pure DB read — no
         // shard RPCs — so it doesn't strictly need `spawn_blocking`.
@@ -315,6 +321,7 @@ where
         let history = history_result.map_err(err_to_status)?;
         Ok(Response::new(LookupHistoryResponse {
             history: encode(&history).map_err(err_to_status)?,
+            server_processing_micros: start.elapsed().as_micros() as u64,
         }))
     }
 
@@ -322,6 +329,7 @@ where
         &self,
         req: Request<LookupLabelHistoryRequest>,
     ) -> Result<Response<LookupLabelHistoryResponse>, Status> {
+        let start = Instant::now();
         let label = req.into_inner().label;
         // Unlike value-history, this RPC does a shard gRPC call
         // (open_rand_index_at_slot_current) under the hood — so the
@@ -338,6 +346,7 @@ where
         let history = history_result.map_err(err_to_status)?;
         Ok(Response::new(LookupLabelHistoryResponse {
             history: encode(&history).map_err(err_to_status)?,
+            server_processing_micros: start.elapsed().as_micros() as u64,
         }))
     }
 
@@ -345,11 +354,13 @@ where
         &self,
         _req: Request<Empty>,
     ) -> Result<Response<CommitmentResponse>, Status> {
+        let start = Instant::now();
         let state = self.state.read().await;
         let commit = state.current_commitment();
         drop(state);
         Ok(Response::new(CommitmentResponse {
             commitment: encode(&commit).map_err(err_to_status)?,
+            server_processing_micros: start.elapsed().as_micros() as u64,
         }))
     }
 }

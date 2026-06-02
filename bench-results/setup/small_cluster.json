@@ -1,21 +1,20 @@
 {
   "regime": "per-shard-local",
-  "n_shards": 2,
-  "shard_log_capacity": 27,
-  "kzh_k": 9,
-  "log_n_shards": 1,
+  "n_shards": 1,
+  "shard_log_capacity": 22,
+  "kzh_k": 7,
+  "log_n_shards": 0,
   "setup_seed": 42,
   "gen_host_machine_type": "n2-standard-16",
   "gen_host_note": "Per-shard parallel SRS generation; every shard runs aegon_srs_gen with the same seed, writing to local disk at /opt/aegon/srs/cluster.srs. No NFS, no central gen, no broadcast.",
-  "gen_seconds": 254.31,
-  "gen_seconds_max": 254.31,
-  "gen_seconds_min": 244.096,
-  "gen_seconds_median": 249.203,
-  "gen_seconds_mean": 249.203,
+  "gen_seconds": 8.42,
+  "gen_seconds_max": 8.42,
+  "gen_seconds_min": 8.42,
+  "gen_seconds_median": 8.42,
+  "gen_seconds_mean": 8.42,
   "gen_seconds_per_shard": [
-    254.31,
-    244.096
+    8.42
   ],
   "broadcast_seconds": 0,
-  "srs_bytes": 9819476306
+  "srs_bytes": 289749986
 }
