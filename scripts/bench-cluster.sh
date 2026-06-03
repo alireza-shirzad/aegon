@@ -130,6 +130,13 @@ MASKING_TAG="aegon-bench-masking"
 # never count the RTT we just inserted.
 BENCH_CLIENT_TAG="aegon-bench-client"
 FIREWALL_BENCH_CLIENT_GRPC="aegon-bench-client-grpc"
+# Tag + label applied to every VM the script creates, signalling
+# to the university SOC scanner that these are short-lived research
+# benchmark workers. Apply BOTH a network tag (some scanners look at
+# instance tags) and a label (most security policies filter on labels).
+# Per the SOC ask: use exactly "temporary-worker-vm" as the marker.
+SCANNER_TAG="temporary-worker-vm"
+SCANNER_LABEL="temporary-worker-vm=true"
 SHARD_PORT=50051
 # Masking server(s): N_MASKING_SERVERS VMs per cluster. Each holds a
 # queue of pre-built `KZHKMaskingPackage`s; background producers
@@ -437,7 +444,8 @@ cmd_up() {
       --machine-type="$SHARD_MACHINE_TYPE" \
       --network="$NETWORK" \
       --no-address \
-      --tags="$SHARD_TAG" \
+      --tags="$SHARD_TAG,$SCANNER_TAG" \
+      --labels="$SCANNER_LABEL" \
       --image-family="ubuntu-2604-lts-amd64" --image-project="ubuntu-os-cloud" \
       --boot-disk-size=100GB >/dev/null
   done
@@ -459,7 +467,8 @@ cmd_up() {
       --machine-type="$COORD_MACHINE_TYPE" \
       --network="$NETWORK" \
       --no-address \
-      --tags="$COORD_TAG" \
+      --tags="$COORD_TAG,$SCANNER_TAG" \
+      --labels="$SCANNER_LABEL" \
       --image-family="ubuntu-2604-lts-amd64" --image-project="ubuntu-os-cloud" \
       --boot-disk-size="$COORD_BOOT_DISK_SIZE" \
       --boot-disk-type="$COORD_BOOT_DISK_TYPE" >/dev/null
@@ -487,7 +496,8 @@ cmd_up() {
           --machine-type="$MASKING_MACHINE_TYPE" \
           --network="$NETWORK" \
           --no-address \
-          --tags="$MASKING_TAG" \
+          --tags="$MASKING_TAG,$SCANNER_TAG" \
+          --labels="$SCANNER_LABEL" \
           --image-family="ubuntu-2604-lts-amd64" --image-project="ubuntu-os-cloud" \
           --boot-disk-size=100GB >/dev/null
       ) &
@@ -517,7 +527,8 @@ cmd_up() {
       --machine-type="$BENCH_CLIENT_MACHINE_TYPE" \
       --network="$NETWORK" \
       --no-address \
-      --tags="$BENCH_CLIENT_TAG" \
+      --tags="$BENCH_CLIENT_TAG,$SCANNER_TAG" \
+      --labels="$SCANNER_LABEL" \
       --image-family="ubuntu-2604-lts-amd64" --image-project="ubuntu-os-cloud" \
       --boot-disk-size="$BENCH_CLIENT_BOOT_DISK_SIZE" \
       --boot-disk-type="$BENCH_CLIENT_BOOT_DISK_TYPE" >/dev/null
