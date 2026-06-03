@@ -20,7 +20,7 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
-from matplotlib.ticker import ScalarFormatter
+from matplotlib.ticker import LogLocator, ScalarFormatter
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 LOOKUP_DIR = REPO_ROOT / "bench-results" / "lookup"
@@ -52,10 +52,161 @@ PROOF_FIELDS = {
 }
 
 REGIME_STYLES = {
-    "small": {"color": "#1f77b4", "marker": "o", "label": "small (1 shard, log_cap=22)"},
-    "medium": {"color": "#d62728", "marker": "s", "label": "medium (2 shards, log_cap=27)"},
-    "large": {"color": "#2ca02c", "marker": "^", "label": "large (128 shards, log_cap=27)"},
+    "small": {"color": "#1f77b4", "marker": "o", "label": "small (1 shard, log capacity = 22)"},
+    "medium": {"color": "#d62728", "marker": "s", "label": "medium (2 shards, log capacity = 27)"},
+    "large": {"color": "#2ca02c", "marker": "^", "label": "large (128 shards, log capacity = 27)"},
 }
+
+
+def _label_axis_endpoints(ax: plt.Axes, formatter=None) -> None:
+    """Ensure both endpoints of each axis show a numeric label.
+
+    matplotlib's auto-tick placement chooses round multiples (e.g. 10⁻³, 10⁻²
+    on log scales) and stops *inside* the data range, so the visible upper
+    and lower bounds are often unlabeled — the reader has to estimate where
+    the curve actually peaks.
+
+    Strategy: for each axis, check whether both endpoints are *already*
+    within 2% of an existing major tick. If so, leave the tick set alone
+    (the plot author chose a careful set and the endpoints are covered).
+    Otherwise, add the missing endpoint(s) explicitly, dropping any existing
+    tick that would crowd into the new endpoint label (~18% of the log span,
+    or ~5% on linear scales). Pass `formatter` to override the default
+    decimal renderer (e.g. mathtext scientific for plots whose endpoints
+    fall in the sub-millisecond or sub-percent range).
+    """
+    import math
+    if formatter is None:
+        formatter = _format_axis_value
+    for axis in (ax.xaxis, ax.yaxis):
+        scale = axis.get_scale()
+        lo, hi = axis.get_view_interval()
+        if lo > hi:
+            lo, hi = hi, lo
+        if not (np.isfinite(lo) and np.isfinite(hi)) or lo == hi:
+            continue
+        existing = sorted(t for t in axis.get_majorticklocs() if lo <= t <= hi)
+        is_log = scale == "log" and lo > 0 and hi > 0
+        if is_log:
+            span = math.log10(hi) - math.log10(lo)
+            def dist(a: float, b: float) -> float:
+                return abs(math.log10(a) - math.log10(b))
+        else:
+            span = hi - lo
+            def dist(a: float, b: float) -> float:
+                return abs(a - b)
+        # If an endpoint is essentially AT an existing tick (within ~6% of
+        # the axis span), treat it as already labelled. This covers
+        # matplotlib's default 5% auto-margin: a plot with set_xticks([1, 90])
+        # has view interval (-3.45, 94.5), but ticks 1 and 90 are the
+        # *intended* endpoints — we should keep them, not add -3.45/94.5.
+        endpoint_tol = 0.06 * span
+        # Crowding tolerance for dropping existing ticks that sit too close
+        # to a new endpoint label.
+        crowd_tol = 0.18 * span if is_log else 0.05 * span
+        endpoints_to_add: list[float] = []
+        for e in (lo, hi):
+            if is_log and e <= 0:
+                continue
+            if not any(dist(t, e) < endpoint_tol for t in existing):
+                endpoints_to_add.append(e)
+        if not endpoints_to_add:
+            # Both endpoints already covered — leave the existing tick set
+            # untouched (avoids clobbering audit_vs_fill's carefully-chosen
+            # [0.1, 0.2, ..., 50] tick list with our endpoint-only override).
+            continue
+        kept_existing = [
+            t for t in existing
+            if all(dist(t, e) > crowd_tol for e in endpoints_to_add)
+        ]
+        new_ticks = sorted(set(kept_existing + endpoints_to_add))
+        if not new_ticks:
+            continue
+        axis.set_ticks(new_ticks)
+        axis.set_major_formatter(plt.FuncFormatter(formatter))
+        # Hide minor tick labels — matplotlib auto-labels minor ticks
+        # (e.g. "8.2×10³", "4×10⁰") when a log axis spans less than one
+        # full decade, which then overlaps visually with our new endpoint
+        # labels and clutters the panel. The major endpoint labels carry
+        # the bounds information the reader needs.
+        axis.set_minor_formatter(plt.NullFormatter())
+
+
+def _format_axis_value(v: float, _pos: int = 0) -> str:
+    """Format a tick value as a compact decimal for the paper-readable range.
+
+    %g (which we used initially) silently switches to scientific notation
+    once a number reaches 1e+05 or drops below 1e-04. For our plots this
+    showed up as "5.43e+03 QPS" and "9.87×10³ bytes", both of which read
+    worse than the literal "5430" / "9870". This formatter forces decimal
+    rendering for the typical paper range and falls back to %g only at
+    truly extreme magnitudes.
+    """
+    import math
+    if v == 0:
+        return "0"
+    av = abs(v)
+    if av >= 1e6 or av < 1e-4:
+        return f"{v:.3g}"
+    # 3 significant figures, decimal form, no trailing zeros.
+    mag = math.floor(math.log10(av))
+    digits = max(0, 2 - mag)
+    s = f"{v:.{digits}f}"
+    if "." in s:
+        s = s.rstrip("0").rstrip(".")
+    return s or "0"
+
+
+def _format_log_tick(v: float, _pos: int = 0) -> str:
+    """Compact log-axis tick formatter.
+
+    Decimal in [0.01, 100) so 0.05 / 0.5 / 2 / 50 render naturally;
+    mathtext sci outside that band so very small or very large values
+    (e.g. 5×10⁻⁵, 10⁻³) stay narrow and uniform. Used by the publish
+    plot together with `LogLocator(subs=(1, 2, 5))` to give three
+    labelled ticks per decade.
+    """
+    import math
+    if v == 0:
+        return "0"
+    av = abs(v)
+    if av < 0.01 or av >= 100:
+        mag = math.floor(math.log10(av))
+        mantissa = round(v / (10 ** mag))
+        if mantissa == 1:
+            return rf"$10^{{{mag}}}$"
+        if mantissa == -1:
+            return rf"$-10^{{{mag}}}$"
+        return rf"${mantissa}\times 10^{{{mag}}}$"
+    if abs(v - round(v)) < 1e-9:
+        return f"{int(round(v))}"
+    return f"{v:g}"
+
+
+def _format_axis_value_sci(v: float, _pos: int = 0) -> str:
+    """Compact mathtext scientific notation for log-axis endpoints.
+
+    The decimal formatter renders 0.00363 as "0.00363" — five characters
+    wider than "3.6×10⁻³" once you account for matplotlib's tick padding.
+    On the publish plot that extra width pushes the small/medium panels
+    around between renders. This formatter falls back to plain decimal in
+    the [0.01, 1000) range where it isn't any wider, and switches to
+    mathtext sci form outside that band.
+    """
+    import math
+    if v == 0:
+        return "0"
+    av = abs(v)
+    if 0.01 <= av < 1000:
+        return _format_axis_value(v)
+    mag = math.floor(math.log10(av))
+    mantissa = v / (10 ** mag)
+    s = f"{mantissa:.1f}".rstrip("0").rstrip(".")
+    if s == "1":
+        return rf"$10^{{{mag}}}$"
+    if s == "-1":
+        return rf"$-10^{{{mag}}}$"
+    return rf"${s}\times 10^{{{mag}}}$"
 
 
 @dataclass
@@ -298,7 +449,7 @@ def percentile(vs: list[float], q: float) -> float:
     return float(np.percentile(vs, q))
 
 
-def plot_server_lookup_vs_fill(small: list[LevelStats], medium: list[LevelStats], large: list[LevelStats]) -> Path:
+def plot_server_lookup_vs_fill(small: list[LevelStats], medium: list[LevelStats], large: list[LevelStats]) -> list[Path]:
     """One panel per lookup kind; small + medium + large.
 
     Solid lines are measured (median, 10th–90th percentile band).
@@ -307,11 +458,34 @@ def plot_server_lookup_vs_fill(small: list[LevelStats], medium: list[LevelStats]
     anchored at large's measured 1% — same approach as the proof-size
     plot, since medium and large share identical per-probe structure.
     """
-    fig, axes = plt.subplots(2, 2, figsize=(10, 7), sharex=True)
-    axes = axes.flatten()
+    basic_kinds = [k for k in LOOKUP_KINDS if k[0] in {"label", "value"}]
+    history_kinds = [k for k in LOOKUP_KINDS if k[0] in {"label_history", "history"}]
+    return [
+        _plot_server_lookup_panels(small, medium, large, basic_kinds,
+                                   "server_lookup_vs_fill.pdf"),
+        _plot_server_lookup_panels(small, medium, large, history_kinds,
+                                   "server_lookup_history_vs_fill.pdf"),
+    ]
 
+
+def _plot_server_lookup_panels(
+    small: list[LevelStats],
+    medium: list[LevelStats],
+    large: list[LevelStats],
+    kinds: list[tuple[str, str, str]],
+    out_filename: str,
+) -> Path:
+    """Render a single server-lookup figure with one panel per kind.
+
+    Used to split the four lookup operations across two figures (basic
+    label/value, and history-flavoured operations) while keeping the
+    plot logic in one place.
+    """
+    fig, axes = plt.subplots(1, len(kinds), figsize=(3.2 * len(kinds), 3), sharex=True)
+    if len(kinds) == 1:
+        axes = [axes]
     large_style = REGIME_STYLES["large"]
-    for ax, (key, _short, title) in zip(axes, LOOKUP_KINDS):
+    for ax, (key, _short, title) in zip(axes, kinds):
         for regime_name, regime_levels in [("small", small), ("medium", medium), ("large", large)]:
             if not regime_levels:
                 continue
@@ -320,8 +494,6 @@ def plot_server_lookup_vs_fill(small: list[LevelStats], medium: list[LevelStats]
             p50 = np.array([percentile(lvl.server_ms[key], 50) for lvl in regime_levels])
             p10 = np.array([percentile(lvl.server_ms[key], 10) for lvl in regime_levels])
             p90 = np.array([percentile(lvl.server_ms[key], 90) for lvl in regime_levels])
-            # Floor at a tiny positive value so log scale doesn't choke on
-            # the small bench's sub-microsecond history latencies.
             eps = 1e-4
             p50 = np.maximum(p50, eps)
             p10 = np.maximum(p10, eps)
@@ -337,12 +509,12 @@ def plot_server_lookup_vs_fill(small: list[LevelStats], medium: list[LevelStats]
                 label=style["label"],
             )
 
-        ext = _large_metric_extrapolation(
-            large, medium, lambda lvl, k=key: lvl.server_ms.get(k, [])
+        ext = _large_metric_theoretical_extrapolation(
+            large, lambda lvl, k=key: lvl.server_ms.get(k, [])
         )
         if ext is not None:
             xs_ext, ys_ext = ext
-            measured_large = [l for l in large if l.fill_percent <= 4.0]
+            measured_large = [l for l in large if l.fill_percent <= 10.5]
             if measured_large:
                 last = measured_large[-1]
                 last_med = float(np.median(last.server_ms[key]))
@@ -361,30 +533,35 @@ def plot_server_lookup_vs_fill(small: list[LevelStats], medium: list[LevelStats]
                 linewidth=1.4,
                 markersize=6,
                 alpha=0.85,
-                label="large (extrap.)",
+                label="large (extrapolated)",
             )
 
-        ax.set_yscale("log")
-        ax.set_title(title)
         ax.set_xlabel("preload fill (% of true capacity)")
-        ax.set_ylabel("server lookup latency (ms, log)")
+        ax.set_ylabel(f"median {title}\nlatency (ms)")
         ax.grid(True, which="both", alpha=0.3)
         ax.set_xticks([1, 30, 60, 90])
 
-    # Single legend at the bottom — same labels appear in every panel.
     handles, labels = axes[0].get_legend_handles_labels()
-    fig.legend(
-        handles,
-        labels,
-        loc="lower center",
-        ncol=len(labels),
-        bbox_to_anchor=(0.5, -0.02),
-        frameon=False,
-    )
-    fig.suptitle("Server-side lookup latency vs. preload (median, shaded = 10th–90th percentile; dashed = extrapolation)")
-    fig.tight_layout(rect=(0, 0.03, 1, 0.96))
+    pairs = list(zip(handles, labels))
+    row1 = [(h, l) for h, l in pairs if not l.startswith("large")]
+    row2 = [(h, l) for h, l in pairs if l.startswith("large")]
+    for ax in fig.axes:
+        _label_axis_endpoints(ax)
+    fig.tight_layout(rect=(0, 0.14, 1, 1))
+    if row1:
+        fig.legend(
+            [h for h, _ in row1], [l for _, l in row1],
+            loc="lower center", ncol=len(row1),
+            bbox_to_anchor=(0.5, 0.08), frameon=False,
+        )
+    if row2:
+        fig.legend(
+            [h for h, _ in row2], [l for _, l in row2],
+            loc="lower center", ncol=len(row2),
+            bbox_to_anchor=(0.5, 0.0), frameon=False,
+        )
 
-    out_path = PLOTS_DIR / "server_lookup_vs_fill.pdf"
+    out_path = PLOTS_DIR / out_filename
     fig.savefig(out_path, format="pdf", bbox_inches="tight")
     plt.close(fig)
     return out_path
@@ -402,7 +579,7 @@ def plot_audit_vs_fill(small: list[LevelStats], medium: list[LevelStats], large:
     ~37 KB of cross-shard merkle data vs medium's 640 B and small's
     344 B.
     """
-    fig, (ax_time, ax_size) = plt.subplots(1, 2, figsize=(12, 5))
+    fig, (ax_time, ax_size) = plt.subplots(1, 2, figsize=(6.4, 3))
 
     large_style = REGIME_STYLES["large"]
 
@@ -426,7 +603,7 @@ def plot_audit_vs_fill(small: list[LevelStats], medium: list[LevelStats], large:
     ext = _large_metric_extrapolation(large, medium, lambda lvl: lvl.audit_ms)
     if ext is not None:
         xs_ext, ys_ext = ext
-        measured_large = [l for l in large if l.fill_percent <= 4.0 and l.audit_ms]
+        measured_large = [l for l in large if l.fill_percent <= 10.5 and l.audit_ms]
         if measured_large:
             last = measured_large[-1]
             last_med = float(np.median(last.audit_ms))
@@ -438,19 +615,13 @@ def plot_audit_vs_fill(small: list[LevelStats], medium: list[LevelStats], large:
             xs_full, ys_full,
             color=large_style["color"], marker=large_style["marker"],
             markerfacecolor="none", linestyle="--", linewidth=1.4,
-            markersize=6, alpha=0.85, label="large (extrap.)",
+            markersize=6, alpha=0.85, label="large (extrapolated)",
         )
 
-    ax_time.set_yscale("log")
     ax_time.set_xlabel("preload fill (% of true capacity)")
-    ax_time.set_ylabel("auditor verify latency (ms, log)")
-    ax_time.set_title("Verify latency")
+    ax_time.set_ylabel("median auditor verify\nlatency (ms)")
     ax_time.grid(True, which="both", alpha=0.3)
     ax_time.set_xticks([1, 30, 60, 90])
-    ax_time.set_ylim(0.1, 50)
-    ax_time.set_yticks([0.1, 0.2, 0.3, 0.5, 1, 2, 3, 5, 10, 20, 30, 50])
-    ax_time.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:g}"))
-    ax_time.yaxis.set_minor_formatter(plt.NullFormatter())
 
     # ---- RIGHT: proof size in KB ----
     for regime_name, regime_levels in [("small", small), ("medium", medium), ("large", large)]:
@@ -478,7 +649,7 @@ def plot_audit_vs_fill(small: list[LevelStats], medium: list[LevelStats], large:
     ext = _large_metric_extrapolation(large, medium, lambda lvl: lvl.audit_bytes)
     if ext is not None:
         xs_ext, ys_ext = ext
-        measured_large = [l for l in large if l.fill_percent <= 4.0 and l.audit_bytes]
+        measured_large = [l for l in large if l.fill_percent <= 10.5 and l.audit_bytes]
         if measured_large:
             last = measured_large[-1]
             last_med = float(np.median(last.audit_bytes))
@@ -490,41 +661,67 @@ def plot_audit_vs_fill(small: list[LevelStats], medium: list[LevelStats], large:
             xs_full, ys_full / 1024.0,
             color=large_style["color"], marker=large_style["marker"],
             markerfacecolor="none", linestyle="--", linewidth=1.4,
-            markersize=6, alpha=0.85, label="large (extrap.)",
+            markersize=6, alpha=0.85, label="large (extrapolated)",
         )
 
-    ax_size.set_yscale("log")
     ax_size.set_xlabel("preload fill (% of true capacity)")
-    ax_size.set_ylabel("audit proof size (KB, log)")
-    ax_size.set_title("Proof size")
+    ax_size.set_ylabel("median audit proof\nsize (KB)")
     ax_size.grid(True, which="both", alpha=0.3)
     ax_size.set_xticks([1, 30, 60, 90])
-    # Dense ticks covering 0.1 KB .. 100 KB so small (~0.34 KB),
-    # medium (~0.63 KB), and large (~37 KB) are all readable.
-    ax_size.set_ylim(0.1, 100)
-    ax_size.set_yticks([0.1, 0.2, 0.3, 0.5, 1, 2, 3, 5, 10, 20, 30, 50, 100])
-    ax_size.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:g}"))
-    ax_size.yaxis.set_minor_formatter(plt.NullFormatter())
 
-    # Single shared legend under both panels — handles/labels are
-    # identical between the two axes (same 3 regimes + same large
-    # extrapolation), so we pull from ax_time and place it at figure
-    # bottom-center.
+    # Two-row shared legend (matches the server / client / proof-size
+    # layout): small + medium on top, large + large-extrapolated below.
     handles, labels = ax_time.get_legend_handles_labels()
-    fig.legend(
-        handles, labels,
-        loc="lower center",
-        ncol=len(labels),
-        bbox_to_anchor=(0.5, -0.02),
-        frameon=False,
-    )
-    fig.suptitle("Auditor verify cost vs. preload (median, shaded = 10th–90th percentile; dashed = extrapolation)")
-    fig.tight_layout(rect=(0, 0.03, 1, 0.96))
+    pairs = list(zip(handles, labels))
+    row1 = [(h, l) for h, l in pairs if not l.startswith("large")]
+    row2 = [(h, l) for h, l in pairs if l.startswith("large")]
+    for ax in fig.axes:
+        _label_axis_endpoints(ax)
+    fig.tight_layout(rect=(0, 0.14, 1, 1))
+    if row1:
+        fig.legend(
+            [h for h, _ in row1], [l for _, l in row1],
+            loc="lower center", ncol=len(row1),
+            bbox_to_anchor=(0.5, 0.08), frameon=False,
+        )
+    if row2:
+        fig.legend(
+            [h for h, _ in row2], [l for _, l in row2],
+            loc="lower center", ncol=len(row2),
+            bbox_to_anchor=(0.5, 0.0), frameon=False,
+        )
 
     out_path = PLOTS_DIR / "audit_vs_fill.pdf"
     fig.savefig(out_path, format="pdf", bbox_inches="tight")
     plt.close(fig)
     return out_path
+
+
+def _publish_log_ticks(axes_with_regimes) -> None:
+    """Configure publish-plot log axes per regime.
+
+    Drops endpoint labels (their varying width was making the three
+    panels render at different sizes). x-axis uses decade-only ticks
+    (wide mathtext sci labels overlap on the narrow small panel).
+    y-axis uses an explicit per-regime tick set so the bottom-most
+    subdecade tick is dropped — it sits right at the bottom of each
+    panel's data range and reads as visual noise.
+    """
+    y_ticks_per_regime = {
+        "small":  [0.01, 0.02, 0.05],
+        "medium": [0.1, 0.2, 0.5, 1.0],
+    }
+    for ax, regime_name in axes_with_regimes:
+        ax.xaxis.set_major_locator(LogLocator(base=10, subs=(1.0,), numticks=20))
+        ax.xaxis.set_major_formatter(plt.FuncFormatter(_format_log_tick))
+        ax.xaxis.set_minor_formatter(plt.NullFormatter())
+        explicit = y_ticks_per_regime.get(regime_name)
+        if explicit is not None:
+            ax.set_yticks(explicit)
+        else:
+            ax.yaxis.set_major_locator(LogLocator(base=10, subs=(1.0, 2.0, 5.0), numticks=20))
+        ax.yaxis.set_major_formatter(plt.FuncFormatter(_format_log_tick))
+        ax.yaxis.set_minor_formatter(plt.NullFormatter())
 
 
 def plot_publish_vs_batch(small: list[LevelStats], medium: list[LevelStats], large: list[LevelStats]) -> Path:
@@ -541,7 +738,7 @@ def plot_publish_vs_batch(small: list[LevelStats], medium: list[LevelStats], lar
     regimes = [("small", small), ("medium", medium), ("large", large)]
     populated = [(n, lvls) for n, lvls in regimes if lvls]
     if not populated:
-        fig, _ = plt.subplots(figsize=(7, 5))
+        fig, _ = plt.subplots(figsize=(4, 2.8))
         out_path = PLOTS_DIR / "publish_vs_batch.pdf"
         fig.savefig(out_path, format="pdf", bbox_inches="tight")
         plt.close(fig)
@@ -549,7 +746,7 @@ def plot_publish_vs_batch(small: list[LevelStats], medium: list[LevelStats], lar
 
     # Per-panel y-axis (sharey=False) so the large panel can show its
     # extrapolated values without squishing small/medium.
-    fig, axes = plt.subplots(1, len(populated), figsize=(5 * len(populated), 5), sharey=False)
+    fig, axes = plt.subplots(1, len(populated), figsize=(3.2 * len(populated), 3), sharey=False)
     if len(populated) == 1:
         axes = [axes]
     cmap = plt.get_cmap("viridis")
@@ -581,25 +778,35 @@ def plot_publish_vs_batch(small: list[LevelStats], medium: list[LevelStats], lar
         slope, intercept = np.polyfit(xs, ys, 1)
         return float(np.exp(intercept + slope * np.log(target_fill)))
 
+    # Global fill→color map shared across all three panels so that
+    # "1%" is the same color in small, medium, and large (and same for
+    # 30/60/90% etc.). Built from the UNION of every fill that any
+    # panel will draw (measured + the large-only extrapolated trio).
+    # Sample [0.15, 0.85] of viridis so neighbors stay distinguishable
+    # but nothing prints in the dark/light extremes.
+    all_fills_global: set[float] = set()
+    for _name, _lvls in populated:
+        for _lvl in _lvls:
+            if _lvl.publish_ms:
+                all_fills_global.add(_lvl.fill_percent)
+        if _name == "large":
+            all_fills_global.update(EXTRAP_FILLS_PUBLISH)
+    global_fills_sorted = sorted(all_fills_global)
+    if len(global_fills_sorted) == 1:
+        fill_to_color = {global_fills_sorted[0]: 0.5}
+    else:
+        positions = np.linspace(0.15, 0.85, len(global_fills_sorted))
+        fill_to_color = dict(zip(global_fills_sorted, positions))
+
     for ax, (regime_name, regime_levels) in zip(axes, populated):
         true_cap = 1 << regime_levels[0].true_log_capacity
         levels_sorted = sorted(regime_levels, key=lambda l: l.fill_percent)
         measured_fills = [lvl.fill_percent for lvl in levels_sorted if lvl.publish_ms]
         if not measured_fills:
-            ax.set_title(f"{regime_name} (no data)")
             continue
         # Add extrapolated fills only for large (open-addressing
         # theory scaling, projected to 30/60/90 %).
         extra_fills = list(EXTRAP_FILLS_PUBLISH) if regime_name == "large" else []
-        all_fills_sorted = sorted(set(measured_fills) | set(extra_fills))
-        # Sample the colormap in [0.15, 0.85] across the union, so
-        # extrapolated high-fill curves get the bright end and stay
-        # visually consistent with the measured low-fill curves.
-        if len(all_fills_sorted) == 1:
-            fill_to_color = {all_fills_sorted[0]: 0.5}
-        else:
-            positions = np.linspace(0.15, 0.85, len(all_fills_sorted))
-            fill_to_color = dict(zip(all_fills_sorted, positions))
 
         for lvl in [l for l in levels_sorted if l.publish_ms]:
             color = cmap(fill_to_color[lvl.fill_percent])
@@ -619,80 +826,128 @@ def plot_publish_vs_batch(small: list[LevelStats], medium: list[LevelStats], lar
                 label=f"{lvl.fill_percent:g}%",
             )
 
-        # Extrapolation overlay for large: empirical log-log power-law
-        # fit on the measured 1-4% data, ONE fit per batch size. For
-        # each target fill (30/60/90%), compute the projected median
-        # latency by fitting log(time) = a + b·log(fill_pct) across
-        # large's measured anchor points and plugging in the target
-        # fill. Drawn as dashed curves with hollow markers so they
-        # don't look like measured data.
+        # Theoretical open-addressing extrapolation for large.
+        # The measured 1–10% curves are well-fit by linear models
+        # `latency = m·batch_pct + c` (R² ≥ 0.998). The slope m is
+        # proportional to per-element insertion cost, which under
+        # open-addressing scales as 1/(1−α), where α is the
+        # polynomial-side load factor — `fill_pct / (100·OVER_PROV)`
+        # with the paper's OVER_PROV = 4. We strip the 1/(1−α) factor
+        # from each measured slope and average across the 10 measured
+        # fills to get a robust per-element cost `slope_0`. Each
+        # extrapolated curve is then a line through the origin:
+        # `y = slope_0 / (1 − α_target) · x`.
         if regime_name == "large" and extra_fills:
-            # Use ALL measured large fills as fit anchors (not just 1%).
-            # With 4 points (1, 2, 3, 4%) the log-log slope captures the
-            # RocksDB compaction transient honestly.
-            anchors = sorted(
+            OVER_PROV = 4.0
+            measured = sorted(
                 [l for l in levels_sorted if l.publish_ms and l.fill_percent > 0.0],
                 key=lambda l: l.fill_percent,
             )
-            if len(anchors) >= 2:
-                # Use union of all anchors' batch sizes, intersect-style:
-                # only batches that appear in EVERY anchor are fittable.
-                batch_sets = [set(a.publish_ms.keys()) for a in anchors]
-                common_batches = sorted(set.intersection(*batch_sets))
-                if common_batches:
-                    xs = 100.0 * np.array(common_batches) / true_cap
-                    for f in extra_fills:
-                        ys = []
-                        for b in common_batches:
-                            anchor_pts = [
-                                (a.fill_percent, percentile(a.publish_ms[b], 50))
-                                for a in anchors
-                            ]
-                            fit_ms = _empirical_publish_fit(anchor_pts, f)
-                            if fit_ms is None:
-                                ys.append(np.nan)
-                            else:
-                                ys.append(fit_ms / 1000.0)  # ms → s
-                        color = cmap(fill_to_color[f])
-                        ax.plot(
-                            xs,
-                            ys,
-                            color=color,
-                            marker="o",
-                            markerfacecolor="none",
-                            linewidth=1.4,
-                            markersize=5,
-                            linestyle="--",
-                            alpha=0.9,
-                            label=f"{f:g}% (extrap.)",
-                        )
+            if measured:
+                # Anchor at the HIGHEST measured fill (10%) — closest to
+                # the extrapolation targets so the theoretical line stays
+                # monotonically above all measured curves, which a global
+                # average doesn't guarantee in the presence of 1–10%
+                # slope noise. We carry the anchor's intercept across to
+                # the extrapolated lines because the constant overhead
+                # (gRPC, serialisation, fixed compaction work) doesn't
+                # scale with α; only the per-element probe count does.
+                anchor = measured[-1]
+                bs_anchor = sorted(anchor.publish_ms.keys())
+                xs_anchor = 100.0 * np.array(bs_anchor) / true_cap
+                ys_anchor = np.array([
+                    percentile(anchor.publish_ms[b], 50) / 1000.0
+                    for b in bs_anchor
+                ])
+                m_anchor, c_anchor = np.polyfit(xs_anchor, ys_anchor, 1)
+                alpha_anchor = anchor.fill_percent / (100.0 * OVER_PROV)
+                slope_zero = m_anchor * (1.0 - alpha_anchor)
 
-        ax.set_xscale("log")
-        ax.set_yscale("log")
-        ax.set_xlabel("publish batch size (% of true capacity, log)")
-        ax.set_title(REGIME_STYLES[regime_name]["label"])
-        ax.grid(True, which="both", alpha=0.3)
-        if regime_name == "large":
-            for marker_batch, marker_label in ((50_000, "50k"), (80_000, "80k")):
-                xv = 100.0 * marker_batch / true_cap
-                ax.axvline(xv, color="gray", linestyle=":", linewidth=1.0, alpha=0.7)
-                ax.text(
-                    xv,
-                    0.02,
-                    marker_label,
-                    transform=ax.get_xaxis_transform(),
-                    ha="center",
-                    va="bottom",
-                    fontsize=9,
-                    color="gray",
-                    bbox=dict(facecolor="white", edgecolor="none", alpha=0.85, pad=1),
+                union_batches = sorted(
+                    set().union(*(set(l.publish_ms.keys()) for l in measured))
                 )
-        ax.legend(title="fill", loc="best", frameon=False, fontsize=9)
+                xs = 100.0 * np.array(union_batches) / true_cap
+                for f in extra_fills:
+                    alpha = f / (100.0 * OVER_PROV)
+                    slope_f = slope_zero / (1.0 - alpha)
+                    ys = slope_f * xs + c_anchor
+                    color = cmap(fill_to_color[f])
+                    ax.plot(
+                        xs,
+                        ys,
+                        color=color,
+                        marker="o",
+                        markerfacecolor="none",
+                        linewidth=1.4,
+                        markersize=5,
+                        linestyle="--",
+                        alpha=0.9,
+                        label=f"{f:g}% (extrapolated)",
+                    )
+
+        ax.set_xlabel("publish batch size (% of true capacity)")
+        ax.grid(True, which="both", alpha=0.3)
+        # No per-panel legend — handles roll up into one shared legend
+        # below all panels (see fig.legend after the loop).
 
     for ax in axes:
-        ax.set_ylabel("publish latency (s, log)")
-    fig.suptitle("Publish latency vs. batch fraction of capacity (median, shaded = 10th–90th percentile; dashed = extrapolation)")
-    fig.tight_layout()
+        ax.set_ylabel("median publish latency (s)")
+
+    # One shared legend below the row of panels. Collect handles from
+    # every axis, then dedupe by label so a fill that appears in two
+    # regimes (e.g. 1%, 30%, 60%, 90% in both small and medium) is
+    # only shown once. Order by ascending fill so the legend reads
+    # in the same direction as the colormap.
+    seen: dict[str, "matplotlib.artist.Artist"] = {}
+    for ax in axes:
+        for handle, label in zip(*ax.get_legend_handles_labels()):
+            seen.setdefault(label, handle)
+    def _label_sort_key(lbl: str) -> tuple[float, int]:
+        # "30% (extrap.)" sorts after measured 30%; uses the numeric
+        # prefix and a tiebreaker bit so measured comes before extrap.
+        try:
+            num = float(lbl.split("%")[0])
+        except ValueError:
+            num = float("inf")
+        return (num, 1 if "extrap" in lbl else 0)
+    ordered = sorted(seen.items(), key=lambda kv: _label_sort_key(kv[0]))
+    if ordered:
+        # Group entries onto three rows: single-digit measured (1–9%),
+        # double-digit measured (10/30/60/90%), and extrapolated. Each
+        # row gets its own fig.legend so we can centre them at slightly
+        # different vertical positions; the panel-area rect leaves
+        # enough room at the bottom for all three.
+        def _row_index(lbl: str) -> int:
+            if "extrap" in lbl:
+                return 1
+            try:
+                num = float(lbl.split("%")[0])
+            except ValueError:
+                return -1
+            return 2 if num < 10 else 0
+        rows: list[list[tuple[str, object]]] = [[], [], []]
+        for label, handle in ordered:
+            idx = _row_index(label)
+            if idx >= 0:
+                rows[idx].append((label, handle))
+        # 0.26 reserves space for three legend rows at fontsize 9.
+        fig.tight_layout(rect=(0, 0.26, 1, 1))
+        row_y = [0.18, 0.10, 0.02]  # top row → bottom row, figure-relative
+        for row_idx, row in enumerate(rows):
+            if not row:
+                continue
+            row_labels, row_handles = zip(*row)
+            fig.legend(
+                row_handles,
+                row_labels,
+                loc="lower center",
+                bbox_to_anchor=(0.5, row_y[row_idx]),
+                ncol=len(row_labels),
+                frameon=False,
+                fontsize=9,
+            )
+    else:
+        fig.tight_layout()
 
     out_path = PLOTS_DIR / "publish_vs_batch.pdf"
     fig.savefig(out_path, format="pdf", bbox_inches="tight")
@@ -700,18 +955,36 @@ def plot_publish_vs_batch(small: list[LevelStats], medium: list[LevelStats], lar
     return out_path
 
 
-def plot_client_lookup_vs_fill(small: list[LevelStats], medium: list[LevelStats], large: list[LevelStats]) -> Path:
-    """One panel per lookup kind; small + medium overlaid.
+def plot_client_lookup_vs_fill(small: list[LevelStats], medium: list[LevelStats], large: list[LevelStats]) -> list[Path]:
+    basic_kinds = [k for k in LOOKUP_KINDS if k[0] in {"label", "value"}]
+    history_kinds = [k for k in LOOKUP_KINDS if k[0] in {"label_history", "history"}]
+    return [
+        _plot_client_lookup_panels(small, medium, large, basic_kinds,
+                                   "client_lookup_vs_fill.pdf"),
+        _plot_client_lookup_panels(small, medium, large, history_kinds,
+                                   "client_lookup_history_vs_fill.pdf"),
+    ]
 
-    Each curve is the median client-side verify time; a shaded band shows
-    10th-90th percentile. Client time is what the verifier pays per lookup (proof
-    deserialization + pairing-based verification).
+
+def _plot_client_lookup_panels(
+    small: list[LevelStats],
+    medium: list[LevelStats],
+    large: list[LevelStats],
+    kinds: list[tuple[str, str, str]],
+    out_filename: str,
+) -> Path:
+    """Render a single client-lookup figure with one panel per kind.
+
+    Used to split the four lookup operations across two figures (basic
+    label/value, and history-flavoured operations) while keeping the
+    plot logic in one place. Each curve is the median client-side
+    verify time; the shaded band spans the 10th–90th percentile.
     """
-    fig, axes = plt.subplots(2, 2, figsize=(10, 7), sharex=True)
-    axes = axes.flatten()
-
+    fig, axes = plt.subplots(1, len(kinds), figsize=(3.2 * len(kinds), 3), sharex=True)
+    if len(kinds) == 1:
+        axes = [axes]
     large_style = REGIME_STYLES["large"]
-    for ax, (key, _short, title) in zip(axes, LOOKUP_KINDS):
+    for ax, (key, _short, title) in zip(axes, kinds):
         for regime_name, regime_levels in [("small", small), ("medium", medium), ("large", large)]:
             if not regime_levels:
                 continue
@@ -720,8 +993,6 @@ def plot_client_lookup_vs_fill(small: list[LevelStats], medium: list[LevelStats]
             p50 = np.array([percentile(lvl.client_ms[key], 50) for lvl in regime_levels])
             p10 = np.array([percentile(lvl.client_ms[key], 10) for lvl in regime_levels])
             p90 = np.array([percentile(lvl.client_ms[key], 90) for lvl in regime_levels])
-            # Same eps floor as the server-latency plot: empty-history
-            # verifications can be sub-microsecond and break log scale.
             eps = 1e-4
             p50 = np.maximum(p50, eps)
             p10 = np.maximum(p10, eps)
@@ -737,12 +1008,12 @@ def plot_client_lookup_vs_fill(small: list[LevelStats], medium: list[LevelStats]
                 label=style["label"],
             )
 
-        ext = _large_metric_extrapolation(
-            large, medium, lambda lvl, k=key: lvl.client_ms.get(k, [])
+        ext = _large_metric_theoretical_extrapolation(
+            large, lambda lvl, k=key: lvl.client_ms.get(k, [])
         )
         if ext is not None:
             xs_ext, ys_ext = ext
-            measured_large = [l for l in large if l.fill_percent <= 4.0]
+            measured_large = [l for l in large if l.fill_percent <= 10.5]
             if measured_large:
                 last = measured_large[-1]
                 last_med = float(np.median(last.client_ms[key]))
@@ -761,29 +1032,35 @@ def plot_client_lookup_vs_fill(small: list[LevelStats], medium: list[LevelStats]
                 linewidth=1.4,
                 markersize=6,
                 alpha=0.85,
-                label="large (extrap.)",
+                label="large (extrapolated)",
             )
 
-        ax.set_yscale("log")
-        ax.set_title(title)
         ax.set_xlabel("preload fill (% of true capacity)")
-        ax.set_ylabel("client verify latency (ms, log)")
+        ax.set_ylabel(f"median {title}\nclient verify latency (ms)")
         ax.grid(True, which="both", alpha=0.3)
         ax.set_xticks([1, 30, 60, 90])
 
     handles, labels = axes[0].get_legend_handles_labels()
-    fig.legend(
-        handles,
-        labels,
-        loc="lower center",
-        ncol=len(labels),
-        bbox_to_anchor=(0.5, -0.02),
-        frameon=False,
-    )
-    fig.suptitle("Client-side lookup verify latency vs. preload (median, shaded = 10th–90th percentile; dashed = extrapolation)")
-    fig.tight_layout(rect=(0, 0.03, 1, 0.96))
+    pairs = list(zip(handles, labels))
+    row1 = [(h, l) for h, l in pairs if not l.startswith("large")]
+    row2 = [(h, l) for h, l in pairs if l.startswith("large")]
+    for ax in fig.axes:
+        _label_axis_endpoints(ax)
+    fig.tight_layout(rect=(0, 0.14, 1, 1))
+    if row1:
+        fig.legend(
+            [h for h, _ in row1], [l for _, l in row1],
+            loc="lower center", ncol=len(row1),
+            bbox_to_anchor=(0.5, 0.08), frameon=False,
+        )
+    if row2:
+        fig.legend(
+            [h for h, _ in row2], [l for _, l in row2],
+            loc="lower center", ncol=len(row2),
+            bbox_to_anchor=(0.5, 0.0), frameon=False,
+        )
 
-    out_path = PLOTS_DIR / "client_lookup_vs_fill.pdf"
+    out_path = PLOTS_DIR / out_filename
     fig.savefig(out_path, format="pdf", bbox_inches="tight")
     plt.close(fig)
     return out_path
@@ -822,7 +1099,7 @@ def _project_via_medium_ratio(
         return None
     xs, ys = [], []
     for lvl in medium:
-        if lvl.fill_percent <= 4.0:
+        if lvl.fill_percent <= 10.5:
             continue
         vals = getter(lvl)
         if not vals:
@@ -846,7 +1123,7 @@ def _project_via_large_fit(
     None when fewer than 2 valid anchor points are available or when
     any value is non-positive (log undefined).
     """
-    measured = [l for l in large if l.fill_percent <= 4.5]
+    measured = [l for l in large if l.fill_percent <= 10.5]
     valid: list[tuple[float, float]] = []
     for lvl in measured:
         vals = getter(lvl)
@@ -900,6 +1177,46 @@ def _large_metric_extrapolation(
     return xs_target, np.sqrt(ys_medium * ys_large)
 
 
+def _large_metric_theoretical_extrapolation(
+    large: list[LevelStats],
+    getter,
+    target_fills: tuple[float, ...] = (30.0, 60.0, 90.0),
+    over_prov: float = 4.0,
+) -> tuple[np.ndarray, np.ndarray] | None:
+    """Open-addressing theoretical extrapolation for lookup metrics.
+
+    Assumes cost(fill) = C / (1 − ρ), where ρ = fill / (100·over_prov)
+    is the polynomial-side load factor (paper's over-provisioning
+    factor is 4 → ρ = fill/400). Anchors at the highest measured fill
+    (10%) so any constant overhead is absorbed into C, then scales by
+    (1 − ρ_anchor) / (1 − ρ_target). Same model and same anchor
+    discipline as the publish extrapolation — guarantees the
+    extrapolated 30/60/90% are monotonically above the measured 10%.
+    """
+    measured = sorted(
+        [l for l in large if l.fill_percent <= 10.5],
+        key=lambda l: l.fill_percent,
+    )
+    anchor_fill: float | None = None
+    anchor_val: float | None = None
+    for lvl in reversed(measured):
+        vals = getter(lvl)
+        if not vals:
+            continue
+        med = float(np.median(vals))
+        if med <= 0:
+            continue
+        anchor_fill, anchor_val = lvl.fill_percent, med
+        break
+    if anchor_fill is None or anchor_val is None:
+        return None
+    rho_anchor = anchor_fill / (100.0 * over_prov)
+    cost_per_probe = anchor_val * (1.0 - rho_anchor)
+    xs = np.array(target_fills, dtype=float)
+    ys = cost_per_probe / (1.0 - xs / (100.0 * over_prov))
+    return xs, ys
+
+
 def _large_proof_extrapolation(
     large: list[LevelStats], medium: list[LevelStats], key: str
 ) -> tuple[np.ndarray, np.ndarray] | None:
@@ -908,7 +1225,7 @@ def _large_proof_extrapolation(
     )
 
 
-def plot_proof_size_vs_fill(small: list[LevelStats], medium: list[LevelStats], large: list[LevelStats]) -> Path:
+def plot_proof_size_vs_fill(small: list[LevelStats], medium: list[LevelStats], large: list[LevelStats]) -> list[Path]:
     """One panel per lookup kind; proof bytes for small + medium + large.
 
     Solid lines are measured. For the large regime we also draw a
@@ -917,16 +1234,36 @@ def plot_proof_size_vs_fill(small: list[LevelStats], medium: list[LevelStats], l
     only the Merkle-path depth differs, captured in large's 1% anchor).
     Each measured curve is the median; the shaded band is 10th-90th percentile.
     """
-    fig, axes = plt.subplots(2, 2, figsize=(10, 7), sharex=True)
-    axes = axes.flatten()
+    basic_kinds = [k for k in LOOKUP_KINDS if k[0] in {"label", "value"}]
+    history_kinds = [k for k in LOOKUP_KINDS if k[0] in {"label_history", "history"}]
+    return [
+        _plot_proof_size_panels(small, medium, large, basic_kinds,
+                                "proof_size_vs_fill.pdf"),
+        _plot_proof_size_panels(small, medium, large, history_kinds,
+                                "proof_size_history_vs_fill.pdf"),
+    ]
 
+
+def _plot_proof_size_panels(
+    small: list[LevelStats],
+    medium: list[LevelStats],
+    large: list[LevelStats],
+    kinds: list[tuple[str, str, str]],
+    out_filename: str,
+) -> Path:
+    """Render a single proof-size figure with one panel per kind.
+
+    Used to split the four lookup kinds across two figures (basic vs.
+    history) while keeping the plot logic in one place. Label/value
+    proofs render in KB; history proofs render in bytes so the
+    small-regime empty-history floor stays visible.
+    """
+    fig, axes = plt.subplots(1, len(kinds), figsize=(3.2 * len(kinds), 3), sharex=True)
+    if len(kinds) == 1:
+        axes = [axes]
     large_style = REGIME_STYLES["large"]
-    # Render label / value panels in KB, history panels in bytes
-    # (history proofs are already in the 10–20 KB range so KB doesn't
-    # change much, but bytes keep the small-regime empty-history floor
-    # visible).
     KB_KINDS = {"label", "value"}
-    for ax, (key, _short, title) in zip(axes, LOOKUP_KINDS):
+    for ax, (key, _short, title) in zip(axes, kinds):
         scale = 1.0 / 1024.0 if key in KB_KINDS else 1.0
         unit = "KB" if key in KB_KINDS else "bytes"
         for regime_name, regime_levels in [("small", small), ("medium", medium), ("large", large)]:
@@ -952,7 +1289,7 @@ def plot_proof_size_vs_fill(small: list[LevelStats], medium: list[LevelStats], l
         if ext is not None:
             xs_ext, ys_ext = ext
             ys_ext = ys_ext * scale
-            measured_large = [l for l in large if l.fill_percent <= 4.0]
+            measured_large = [l for l in large if l.fill_percent <= 10.5]
             if measured_large:
                 last = measured_large[-1]
                 last_med = float(np.median(last.proof_bytes[key])) * scale
@@ -970,140 +1307,307 @@ def plot_proof_size_vs_fill(small: list[LevelStats], medium: list[LevelStats], l
                 linewidth=1.4,
                 markersize=6,
                 alpha=0.85,
-                label="large (extrap.)",
+                label="large (extrapolated)",
             )
 
-        ax.set_yscale("log")
-        ax.set_title(title)
         ax.set_xlabel("preload fill (% of true capacity)")
-        ax.set_ylabel(f"proof size ({unit}, log)")
+        ax.set_ylabel(f"median {title}\nproof size ({unit})")
         ax.grid(True, which="both", alpha=0.3)
         ax.set_xticks([1, 30, 60, 90])
-        if key in KB_KINDS:
-            # KB values land in the 4–9 range, where the default log
-            # formatter renders "4 × 10⁰" etc. Plain numbers read better.
-            fmt = ScalarFormatter()
-            fmt.set_scientific(False)
-            ax.yaxis.set_major_formatter(fmt)
-            ax.yaxis.set_minor_formatter(fmt)
 
     handles, labels = axes[0].get_legend_handles_labels()
-    fig.legend(
-        handles,
-        labels,
-        loc="lower center",
-        ncol=len(labels),
-        bbox_to_anchor=(0.5, -0.02),
-        frameon=False,
-    )
-    fig.suptitle("Lookup proof size vs. preload (median, shaded = 10th–90th percentile; dashed = extrapolation)")
-    fig.tight_layout(rect=(0, 0.03, 1, 0.96))
+    pairs = list(zip(handles, labels))
+    row1 = [(h, l) for h, l in pairs if not l.startswith("large")]
+    row2 = [(h, l) for h, l in pairs if l.startswith("large")]
+    for ax in fig.axes:
+        _label_axis_endpoints(ax)
+    fig.tight_layout(rect=(0, 0.14, 1, 1))
+    if row1:
+        fig.legend(
+            [h for h, _ in row1], [l for _, l in row1],
+            loc="lower center", ncol=len(row1),
+            bbox_to_anchor=(0.5, 0.08), frameon=False,
+        )
+    if row2:
+        fig.legend(
+            [h for h, _ in row2], [l for _, l in row2],
+            loc="lower center", ncol=len(row2),
+            bbox_to_anchor=(0.5, 0.0), frameon=False,
+        )
 
-    out_path = PLOTS_DIR / "proof_size_vs_fill.pdf"
+    out_path = PLOTS_DIR / out_filename
     fig.savefig(out_path, format="pdf", bbox_inches="tight")
     plt.close(fig)
     return out_path
 
 
-def plot_latency_knee_per_regime(
+def plot_lookup_per_operation(
     small: list[LevelStats], medium: list[LevelStats], large: list[LevelStats]
 ) -> list[Path]:
-    """Latency-knee figure, one PDF per regime.
+    """One figure per lookup kind, with server-time, client-time, and
+    proof-size panels side by side (same audit-style layout: all
+    metrics for the SAME operation, rather than the same metric for
+    different operations).
 
-    Each PDF shows p99 latency vs achieved QPS, with one curve per fill
-    level. The "knee" is where latency starts to blow up as offered load
-    approaches the system's QPS ceiling — that's the planner-relevant
-    operating point.
-
-    Skips a regime entirely when none of its levels carry concurrency-
-    sweep data (older bench outputs don't have it).
+    Produces four PDFs: `lookup_label.pdf`, `lookup_value.pdf`,
+    `lookup_label_history.pdf`, `lookup_value_history.pdf`.
     """
-    out_paths: list[Path] = []
-    for regime_name, lvls in [("small", small), ("medium", medium), ("large", large)]:
-        with_sweep = [l for l in lvls if l.concurrency_sweep]
-        if not with_sweep:
+    paths: list[Path] = []
+    for key, _short, title in LOOKUP_KINDS:
+        paths.append(_plot_one_lookup_op(small, medium, large, key, title))
+    return paths
+
+
+def _plot_one_lookup_op(
+    small: list[LevelStats],
+    medium: list[LevelStats],
+    large: list[LevelStats],
+    key: str,
+    title: str,
+) -> Path:
+    """Render a 3-panel figure (server time | client time | proof size)
+    for a single lookup operation. Mirrors the audit_vs_fill layout but
+    extended with a third panel for the client-side latency."""
+    fig, (ax_srv, ax_cli, ax_size) = plt.subplots(1, 3, figsize=(9.6, 3), sharex=True)
+    large_style = REGIME_STYLES["large"]
+    HISTORY_KINDS = {"label_history", "history"}
+    proof_scale = 1.0 if key in HISTORY_KINDS else (1.0 / 1024.0)
+    proof_unit = "bytes" if key in HISTORY_KINDS else "KB"
+
+    # ---- Server-time panel ----
+    for regime_name, regime_levels in [("small", small), ("medium", medium), ("large", large)]:
+        if not regime_levels:
             continue
+        style = REGIME_STYLES[regime_name]
+        xs = np.array([lvl.fill_percent for lvl in regime_levels])
+        p50 = np.array([percentile(lvl.server_ms[key], 50) for lvl in regime_levels])
+        p10 = np.array([percentile(lvl.server_ms[key], 10) for lvl in regime_levels])
+        p90 = np.array([percentile(lvl.server_ms[key], 90) for lvl in regime_levels])
+        eps = 1e-4
+        p50, p10, p90 = np.maximum(p50, eps), np.maximum(p10, eps), np.maximum(p90, eps)
+        ax_srv.fill_between(xs, p10, p90, color=style["color"], alpha=0.18, linewidth=0)
+        ax_srv.plot(xs, p50, color=style["color"], marker=style["marker"],
+                    linewidth=1.8, markersize=6, label=style["label"])
+    ext = _large_metric_theoretical_extrapolation(large, lambda lvl, k=key: lvl.server_ms.get(k, []))
+    if ext is not None:
+        xs_ext, ys_ext = ext
+        measured_large = [l for l in large if l.fill_percent <= 10.5]
+        if measured_large:
+            last = measured_large[-1]
+            last_med = float(np.median(last.server_ms[key]))
+            xs_full = np.concatenate(([last.fill_percent], xs_ext))
+            ys_full = np.concatenate(([last_med], ys_ext))
+        else:
+            xs_full, ys_full = xs_ext, ys_ext
+        ax_srv.plot(xs_full, np.maximum(ys_full, 1e-4),
+                    color=large_style["color"], marker=large_style["marker"],
+                    markerfacecolor="none", linestyle="--", linewidth=1.4,
+                    markersize=6, alpha=0.85, label="large (extrapolated)")
+    ax_srv.set_xlabel("preload fill (% of true capacity)")
+    ax_srv.set_ylabel(f"median {title}\nserver latency (ms)")
+    ax_srv.grid(True, which="both", alpha=0.3)
+    ax_srv.set_xticks([1, 30, 60, 90])
 
-        fig, ax = plt.subplots(figsize=(7, 5))
-        cmap = plt.get_cmap("viridis")
-        fills = sorted({l.fill_percent for l in with_sweep})
-        positions = (
-            [0.5] if len(fills) == 1 else np.linspace(0.15, 0.85, len(fills))
-        )
-        fill_to_color = dict(zip(fills, positions))
+    # ---- Client-time panel ----
+    for regime_name, regime_levels in [("small", small), ("medium", medium), ("large", large)]:
+        if not regime_levels:
+            continue
+        style = REGIME_STYLES[regime_name]
+        xs = np.array([lvl.fill_percent for lvl in regime_levels])
+        p50 = np.array([percentile(lvl.client_ms[key], 50) for lvl in regime_levels])
+        p10 = np.array([percentile(lvl.client_ms[key], 10) for lvl in regime_levels])
+        p90 = np.array([percentile(lvl.client_ms[key], 90) for lvl in regime_levels])
+        eps = 1e-4
+        p50, p10, p90 = np.maximum(p50, eps), np.maximum(p10, eps), np.maximum(p90, eps)
+        ax_cli.fill_between(xs, p10, p90, color=style["color"], alpha=0.18, linewidth=0)
+        ax_cli.plot(xs, p50, color=style["color"], marker=style["marker"],
+                    linewidth=1.8, markersize=6, label=style["label"])
+    ext = _large_metric_theoretical_extrapolation(large, lambda lvl, k=key: lvl.client_ms.get(k, []))
+    if ext is not None:
+        xs_ext, ys_ext = ext
+        measured_large = [l for l in large if l.fill_percent <= 10.5]
+        if measured_large:
+            last = measured_large[-1]
+            last_med = float(np.median(last.client_ms[key]))
+            xs_full = np.concatenate(([last.fill_percent], xs_ext))
+            ys_full = np.concatenate(([last_med], ys_ext))
+        else:
+            xs_full, ys_full = xs_ext, ys_ext
+        ax_cli.plot(xs_full, np.maximum(ys_full, 1e-4),
+                    color=large_style["color"], marker=large_style["marker"],
+                    markerfacecolor="none", linestyle="--", linewidth=1.4,
+                    markersize=6, alpha=0.85, label="large (extrapolated)")
+    ax_cli.set_xlabel("preload fill (% of true capacity)")
+    ax_cli.set_ylabel(f"median {title}\nclient verify latency (ms)")
+    ax_cli.grid(True, which="both", alpha=0.3)
+    ax_cli.set_xticks([1, 30, 60, 90])
 
-        sweep_kind = ""
-        # Two "ceiling" notions worth tracking:
-        #   * peak_qps: the highest QPS observed at ANY concurrency.
-        #     For small/medium this is usually conc=1 (single-thread
-        #     1/latency burst) which isn't sustainable under real load.
-        #   * sustained_qps: the QPS at the HIGHEST measured concurrency.
-        #     This is what the system actually delivers when stressed
-        #     — the "break point" you'd plan capacity around.
-        # For small/medium they differ (peak~200 vs sustained~184). For
-        # large the climbing phase is visible, peak and sustained both
-        # land around the same masking-pool ceiling.
-        peak_qps_overall = 0.0
-        sustained_qps_overall = 0.0
-        for lvl in sorted(with_sweep, key=lambda l: l.fill_percent):
-            if sweep_kind == "" and lvl.concurrency_sweep_kind:
-                sweep_kind = lvl.concurrency_sweep_kind
-            samples = sorted(lvl.concurrency_sweep, key=lambda s: s["concurrency"])
-            conc = np.array([s["concurrency"] for s in samples])
-            qps = np.array([s["qps"] for s in samples])
-            p99 = np.array([s["latency_ms_p99"] for s in samples])
-            color = cmap(fill_to_color[lvl.fill_percent])
-            ax.plot(
-                qps, p99,
-                color=color, marker="o", linewidth=1.8,
-                markersize=6, label=f"{lvl.fill_percent:g}% fill",
-            )
-            # Label each point with its concurrency so the (possibly
-            # tangled) curve shape is self-explanatory. Small jitter
-            # to keep labels off the marker itself.
-            for q, l99, c in zip(qps, p99, conc):
-                ax.annotate(
-                    f"N={c}",
-                    xy=(q, l99),
-                    xytext=(6, 4), textcoords="offset points",
-                    fontsize=7, color=color, alpha=0.85,
-                )
-            peak_qps_overall = max(peak_qps_overall, float(qps.max()))
-            sustained_qps_overall = max(sustained_qps_overall, float(qps[-1]))
+    # ---- Proof-size panel ----
+    for regime_name, regime_levels in [("small", small), ("medium", medium), ("large", large)]:
+        if not regime_levels:
+            continue
+        style = REGIME_STYLES[regime_name]
+        xs = np.array([lvl.fill_percent for lvl in regime_levels])
+        p50 = np.array([percentile(lvl.proof_bytes[key], 50) for lvl in regime_levels]) * proof_scale
+        p10 = np.array([percentile(lvl.proof_bytes[key], 10) for lvl in regime_levels]) * proof_scale
+        p90 = np.array([percentile(lvl.proof_bytes[key], 90) for lvl in regime_levels]) * proof_scale
+        ax_size.fill_between(xs, p10, p90, color=style["color"], alpha=0.18, linewidth=0)
+        ax_size.plot(xs, p50, color=style["color"], marker=style["marker"],
+                     linewidth=1.8, markersize=6, label=style["label"])
+    ext = _large_proof_extrapolation(large, medium, key)
+    if ext is not None:
+        xs_ext, ys_ext = ext
+        ys_ext = ys_ext * proof_scale
+        measured_large = [l for l in large if l.fill_percent <= 10.5]
+        if measured_large:
+            last = measured_large[-1]
+            last_med = float(np.median(last.proof_bytes[key])) * proof_scale
+            xs_full = np.concatenate(([last.fill_percent], xs_ext))
+            ys_full = np.concatenate(([last_med], ys_ext))
+        else:
+            xs_full, ys_full = xs_ext, ys_ext
+        ax_size.plot(xs_full, ys_full,
+                     color=large_style["color"], marker=large_style["marker"],
+                     markerfacecolor="none", linestyle="--", linewidth=1.4,
+                     markersize=6, alpha=0.85, label="large (extrapolated)")
+    ax_size.set_xlabel("preload fill (% of true capacity)")
+    ax_size.set_ylabel(f"median {title}\nproof size ({proof_unit})")
+    ax_size.grid(True, which="both", alpha=0.3)
+    ax_size.set_xticks([1, 30, 60, 90])
 
-        # Vertical dashed line at the SUSTAINED ceiling — this is the
-        # QPS the system actually holds under high concurrency, not the
-        # transient single-thread peak.
-        if sustained_qps_overall > 0:
-            ax.axvline(sustained_qps_overall, color="red", linestyle="--",
-                       linewidth=1.2, alpha=0.7, zorder=1)
-            _, ymax = ax.get_ylim()
-            ax.annotate(
-                f"sustained QPS ≈ {sustained_qps_overall:,.0f}",
-                xy=(sustained_qps_overall, ymax),
-                xytext=(6, -10), textcoords="offset points",
-                color="red", fontsize=10, fontweight="bold",
-                ha="left", va="top",
-            )
+    # Two-row shared legend (small/medium on top, large/extrapolated below).
+    handles, labels = ax_srv.get_legend_handles_labels()
+    pairs = list(zip(handles, labels))
+    row1 = [(h, l) for h, l in pairs if not l.startswith("large")]
+    row2 = [(h, l) for h, l in pairs if l.startswith("large")]
+    for ax in fig.axes:
+        _label_axis_endpoints(ax)
+    fig.tight_layout(rect=(0, 0.14, 1, 1))
+    if row1:
+        fig.legend([h for h, _ in row1], [l for _, l in row1],
+                   loc="lower center", ncol=len(row1),
+                   bbox_to_anchor=(0.5, 0.08), frameon=False)
+    if row2:
+        fig.legend([h for h, _ in row2], [l for _, l in row2],
+                   loc="lower center", ncol=len(row2),
+                   bbox_to_anchor=(0.5, 0.0), frameon=False)
 
-        ax.set_xscale("log")
-        ax.set_yscale("log")
-        ax.set_xlabel("achieved QPS (log)")
-        ax.set_ylabel("p99 latency (ms, log)")
-        ax.set_title(
-            f"Latency knee — {regime_name} regime\n"
-            f"(p99 vs. QPS, {sweep_kind or 'lookup'} RPC; one curve per fill level)"
-        )
-        ax.grid(True, which="both", alpha=0.3)
-        ax.legend(loc="best", frameon=False, fontsize=9)
-        fig.tight_layout()
+    out_path = PLOTS_DIR / f"lookup_{key}.pdf"
+    fig.savefig(out_path, format="pdf", bbox_inches="tight")
+    plt.close(fig)
+    return out_path
 
-        out_path = PLOTS_DIR / f"latency_knee_{regime_name}.pdf"
+
+def plot_latency_knee(
+    small: list[LevelStats], medium: list[LevelStats], large: list[LevelStats]
+) -> Path:
+    """Latency-knee figure — three regimes side by side.
+
+    Same layout as `plot_publish_vs_batch`: three panels arranged
+    horizontally with linear axes and one shared legend below, grouped
+    by fill magnitude. Each panel shows p99 latency vs achieved QPS,
+    one curve per fill level. The vertical red dashed line in each
+    panel marks the sustained QPS ceiling — the QPS at the highest
+    measured concurrency, i.e. the rate the system actually holds
+    under load rather than the transient single-thread peak.
+    """
+    regimes = [("small", small), ("medium", medium), ("large", large)]
+    populated = [(n, [l for l in lvls if l.concurrency_sweep]) for n, lvls in regimes]
+    populated = [(n, lvls) for n, lvls in populated if lvls]
+    if not populated:
+        fig, _ = plt.subplots(figsize=(4, 2.8))
+        out_path = PLOTS_DIR / "latency_knee.pdf"
         fig.savefig(out_path, format="pdf", bbox_inches="tight")
         plt.close(fig)
-        out_paths.append(out_path)
+        return out_path
 
-    return out_paths
+    fig, axes = plt.subplots(1, len(populated), figsize=(3.2 * len(populated), 3), sharey=False)
+    if len(populated) == 1:
+        axes = [axes]
+    cmap = plt.get_cmap("viridis")
+
+    # Global fill→colour map shared across all panels so a given fill
+    # uses the same colour in small/medium/large.
+    all_fills_global: set[float] = set()
+    for _name, lvls in populated:
+        for lvl in lvls:
+            all_fills_global.add(lvl.fill_percent)
+    global_fills_sorted = sorted(all_fills_global)
+    if len(global_fills_sorted) == 1:
+        fill_to_color = {global_fills_sorted[0]: 0.5}
+    else:
+        positions = np.linspace(0.15, 0.85, len(global_fills_sorted))
+        fill_to_color = dict(zip(global_fills_sorted, positions))
+
+    for ax, (regime_name, lvls) in zip(axes, populated):
+        for lvl in sorted(lvls, key=lambda l: l.fill_percent):
+            samples = sorted(lvl.concurrency_sweep, key=lambda s: s["concurrency"])
+            qps = np.array([s["qps"] for s in samples])
+            p50 = np.array([s["latency_ms_p50"] for s in samples])
+            color = cmap(fill_to_color[lvl.fill_percent])
+            ax.plot(
+                qps, p50,
+                color=color, marker="o", linewidth=1.8,
+                markersize=5, label=f"{lvl.fill_percent:g}%",
+            )
+
+        ax.set_xlabel("achieved QPS")
+        ax.grid(True, which="both", alpha=0.3)
+
+    for ax in axes:
+        ax.set_ylabel("median latency (ms)")  # knee plot already uses median
+
+    # Shared legend with the same 3-row grouping as publish (top:
+    # 10/30/60/90, middle: extrapolated, bottom: 1–9). Knee has no
+    # extrapolated entries, so the middle row is dropped and the
+    # remaining rows get compacted.
+    seen: dict[str, object] = {}
+    for ax in axes:
+        for handle, label in zip(*ax.get_legend_handles_labels()):
+            seen.setdefault(label, handle)
+
+    def _label_sort_key(lbl: str) -> tuple[float, int]:
+        try:
+            num = float(lbl.split("%")[0])
+        except ValueError:
+            num = float("inf")
+        return (num, 0)
+    ordered = sorted(seen.items(), key=lambda kv: _label_sort_key(kv[0]))
+    if ordered:
+        def _row_index(lbl: str) -> int:
+            if "extrap" in lbl:
+                return 1
+            try:
+                num = float(lbl.split("%")[0])
+            except ValueError:
+                return -1
+            return 2 if num < 10 else 0
+        rows: list[list[tuple[str, object]]] = [[], [], []]
+        for label, handle in ordered:
+            idx = _row_index(label)
+            if idx >= 0:
+                rows[idx].append((label, handle))
+        non_empty = [row for row in rows if row]
+        n_rows = len(non_empty)
+        rect_map = {1: 0.10, 2: 0.18, 3: 0.26}
+        fig.tight_layout(rect=(0, rect_map.get(n_rows, 0.10), 1, 1))
+        y_per_row = 0.08
+        y_start = 0.02 + y_per_row * (n_rows - 1)
+        for i, row in enumerate(non_empty):
+            row_labels, row_handles = zip(*row)
+            fig.legend(
+                row_handles, row_labels,
+                loc="lower center",
+                bbox_to_anchor=(0.5, y_start - i * y_per_row),
+                ncol=len(row_labels), frameon=False, fontsize=9,
+            )
+    else:
+        fig.tight_layout()
+
+    out_path = PLOTS_DIR / "latency_knee.pdf"
+    fig.savefig(out_path, format="pdf", bbox_inches="tight")
+    plt.close(fig)
+    return out_path
 
 
 def main() -> None:
@@ -1115,12 +1619,10 @@ def main() -> None:
         raise SystemExit(f"no lookup JSONs found under {LOOKUP_DIR}")
 
     written: list[Path] = []
-    written.append(plot_server_lookup_vs_fill(small, medium, large))
-    written.append(plot_client_lookup_vs_fill(small, medium, large))
-    written.append(plot_proof_size_vs_fill(small, medium, large))
+    written.extend(plot_lookup_per_operation(small, medium, large))
     written.append(plot_publish_vs_batch(small, medium, large))
     written.append(plot_audit_vs_fill(small, medium, large))
-    written.extend(plot_latency_knee_per_regime(small, medium, large))
+    written.append(plot_latency_knee(small, medium, large))
 
     for p in written:
         size = p.stat().st_size
