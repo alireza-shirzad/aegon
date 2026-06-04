@@ -17,7 +17,7 @@ use crate::tree_node::TreeNodeWithPreviousValue;
 use crate::{
     auditor::audit_verify,
     client::{key_history_verify, lookup_verify},
-    directory::{Directory, PublishCorruption, ReadOnlyDirectory},
+    directory::{Directory, ReadOnlyDirectory},
     ecvrf::{HardCodedAkdVRF, VRFKeyStorage},
     errors::{AkdError, DirectoryError, StorageError},
     storage::{
@@ -336,72 +336,132 @@ async fn test_publish_duplicate_entries<TC: Configuration>() -> Result<(), AkdEr
     Ok(())
 }
 
-// This tests that key history does fail on a small tree, when malicious updates are made.
-// Other that it is just a simple check to see that a valid key history proof passes.
+// Verifies that the Aegon verifier rejects two flavors of a malicious
+// server. Preserves the intent of the original Merkle/SEEMless
+// `test_malicious_key_history` (server lies about history → client
+// catches it) on the path that the current backend actually serves:
+//
+//   1. A lookup served with forged value bytes against an otherwise
+//      honest commitment must fail value-side verification (analogous
+//      to "UnmarkedStaleVersion" — server publishes a new value but
+//      tries to convince the client an old value still holds).
+//   2. An auditor walking the epoch chain must reject when one
+//      epoch's `value_commitment` is tampered (analogous to
+//      "MarkVersionStale one epoch late" — server lies about what the
+//      transition contained, the chain homomorphism breaks).
 test_config!(test_malicious_key_history);
 async fn test_malicious_key_history<TC: Configuration>() -> Result<(), AkdError> {
-    // This test has an akd with a single label: "hello", followed by an
-    // insertion of a new label "hello2". Meanwhile, the server has a one epoch
-    // delay in marking the first version for "hello" as stale, which should
-    // be caught by key history verifications for "hello".
     let db = AsyncInMemoryDatabase::new();
     let storage = StorageManager::new_no_cache(db);
     let vrf = HardCodedAkdVRF {};
     let akd = Directory::<TC, _, _>::new(storage, vrf, AzksParallelismConfig::default()).await?;
-    // Publish the first value for the label "hello"
-    // Epoch here will be 1
-    akd.publish(vec![(AkdLabel::from("hello"), AkdValue::from("world"))])
-        .await?;
-    // Publish the second value for the label "hello" without marking the first value as stale
-    // Epoch here will be 2
-    let corruption_2 = PublishCorruption::UnmarkedStaleVersion(AkdLabel::from("hello"));
-    akd.publish_malicious_update(
-        vec![(AkdLabel::from("hello"), AkdValue::from("world2"))],
-        corruption_2,
-    )
-    .await?;
 
-    // Get the key_history_proof for the label "hello"
-    let (key_history_proof, root_hash) = akd
-        .key_history(&AkdLabel::from("hello"), HistoryParams::default())
-        .await?;
-    // Get the VRF public key
-    let vrf_pk = akd.get_public_key().await?;
-    // Verify the key history proof: This should fail since the server did not mark the version 1 for
-    // this username as stale, upon adding version 2.
-    key_history_verify::<TC>(
-        vrf_pk.as_bytes(),
-        root_hash.hash(),
-        root_hash.epoch(),
-        AkdLabel::from("hello"),
-        key_history_proof,
-        HistoryVerificationParams::default(),
-    ).expect_err("The key history proof should fail here since the previous value was not marked stale at all");
+    // Honest baseline. We need every shard to be exercised in both
+    // publishes so that scenario (3) below is a real tamper: with 4
+    // default shards, publishing a single label leaves 3 shards' poly
+    // commitments at the SRS identity, and swapping idle shards is a
+    // no-op the auditor can't detect. Publishing a batch with enough
+    // distinct labels in both epochs makes every per-shard
+    // value_commitment distinct.
+    let epoch1_batch: Vec<(AkdLabel, AkdValue)> = (0..16)
+        .map(|i| (AkdLabel::from(format!("u{i}").as_str()), AkdValue::from(format!("v{i}-1").as_str())))
+        .collect();
+    let epoch2_batch: Vec<(AkdLabel, AkdValue)> = (0..16)
+        .map(|i| (AkdLabel::from(format!("u{i}").as_str()), AkdValue::from(format!("v{i}-2").as_str())))
+        .collect();
+    akd.publish(epoch1_batch).await?;
+    akd.publish(epoch2_batch).await?;
 
-    // Mark the first value for the label "hello" as stale
-    // Epoch here will be 3
-    let corruption_3 = PublishCorruption::MarkVersionStale(AkdLabel::from("hello"), 1);
-    akd.publish_malicious_update(
-        vec![(AkdLabel::from("hello2"), AkdValue::from("world"))],
-        corruption_3,
-    )
-    .await?;
+    let ctx = akd.verifier_context().await;
 
-    // Get the key_history_proof for the label "hello"
-    let (key_history_proof, root_hash) = akd
-        .key_history(&AkdLabel::from("hello"), HistoryParams::default())
-        .await?;
-    // Get the VRF public key
-    let vrf_pk = akd.get_public_key().await?;
-    // Verify the key history proof: This should still fail, since the server added the version number too late.
-    key_history_verify::<TC>(
-        vrf_pk.as_bytes(),
-        root_hash.hash(),
-        root_hash.epoch(),
-        AkdLabel::from("hello"),
-        key_history_proof,
-        HistoryVerificationParams::default(),
-    ).expect_err("The key history proof should fail here since the previous value was marked stale one epoch too late.");
+    // (1) Honest lookup verifies (positive sanity check).
+    let target_label = AkdLabel::from("u0");
+    let (honest_proof, _eh) = akd.lookup(target_label.clone()).await?;
+    assert_eq!(AkdValue::from("v0-2"), honest_proof.value);
+    assert!(
+        crate::aegon_facade::verify_lookup(&ctx, &target_label, &honest_proof)?,
+        "honest lookup must verify",
+    );
+
+    // (2) Malicious server scenario A — forged value: same commitment
+    // and aegon proof bytes, but the wire claims a different value
+    // than what was published. The verifier must reject — either by
+    // returning Ok(false) or by surfacing an Err from the value-side
+    // opening check (`H_F(value) != evaluation`). Both shapes mean
+    // "client caught the lie."
+    {
+        let mut tampered = honest_proof.clone();
+        tampered.value = AkdValue::from("FORGED");
+        let verdict = crate::aegon_facade::verify_lookup(&ctx, &target_label, &tampered);
+        assert!(
+            matches!(verdict, Ok(false) | Err(_)),
+            "verifier must reject a lookup whose claimed value disagrees with the proof, got {verdict:?}",
+        );
+    }
+
+    // (3) Malicious server scenario B — tampered epoch-2 commitment:
+    // overwrite the published value_commitment on shard 0 with one
+    // that didn't come from an honest publish. The audit-invariance
+    // check walks `value_commitment` across the chain via the
+    // commitment-homomorphism path; the tampered commitment must
+    // trip that check.
+    //
+    // The auditor's chain Fiat-Shamir scalar `r_value` is threaded
+    // across transitions, so the audit_state for the 1->2 step must
+    // be obtained by first auditing 0->1. Starting from
+    // `AuditState::default()` directly at epoch 1 would use the wrong
+    // r_value and even the honest transition would reject.
+    {
+        let epoch0 = akd.epoch_commitment(0).await.expect("epoch 0 commitment retained");
+        let epoch1 = akd.epoch_commitment(1).await.expect("epoch 1 commitment retained");
+        let honest_epoch2 = akd.epoch_commitment(2).await.expect("epoch 2 commitment retained");
+
+        // Walk 0 -> 1 honestly to advance the audit state. Sanity-check
+        // that the honest 1 -> 2 transition is accepted from that state.
+        let mut audit_state = crate::aegon_facade::AuditState::default();
+        assert!(
+            crate::aegon_facade::verify_invariance(&ctx, &mut audit_state, &epoch0, &epoch1)?,
+            "honest epoch 0 -> 1 transition must pass",
+        );
+        let baseline_state = audit_state.clone();
+        let mut honest_check_state = baseline_state.clone();
+        assert!(
+            crate::aegon_facade::verify_invariance(
+                &ctx,
+                &mut honest_check_state,
+                &epoch1,
+                &honest_epoch2,
+            )?,
+            "honest epoch 1 -> 2 transition must pass",
+        );
+
+        // Construct a tampered epoch-2 commitment by overwriting shard 0's
+        // `value_commitment` with one that didn't come from honest publish.
+        let mut tampered_shards = honest_epoch2.per_shard.clone();
+        if tampered_shards.len() >= 2 {
+            tampered_shards[0].value_commitment = tampered_shards[1].value_commitment.clone();
+        } else {
+            // Single-shard case: replay the previous epoch's value_commitment,
+            // pretending epoch 2's publish was a no-op on the value chain.
+            tampered_shards[0].value_commitment = epoch1.per_shard[0].value_commitment.clone();
+        }
+        let tampered_epoch2 = crate::aegon::ShardedEpochCommitment::with_per_shard(
+            honest_epoch2.epoch,
+            tampered_shards,
+        );
+
+        let mut tampered_check_state = baseline_state.clone();
+        let verdict = crate::aegon_facade::verify_invariance(
+            &ctx,
+            &mut tampered_check_state,
+            &epoch1,
+            &tampered_epoch2,
+        );
+        assert!(
+            matches!(verdict, Ok(false) | Err(_)),
+            "auditor must reject a transition whose value_commitment was tampered, got {verdict:?}",
+        );
+    }
 
     Ok(())
 }
