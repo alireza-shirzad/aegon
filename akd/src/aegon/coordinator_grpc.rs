@@ -134,6 +134,7 @@ where
         + Sync
         + 'static
         + std::ops::Add<Output = P::Commitment>
+        + std::ops::Sub<Output = P::Commitment>
         + std::ops::Mul<E::ScalarField, Output = P::Commitment>,
     P::Proof: CanonicalSerialize + Clone + Send + Sync + 'static,
     P::State: Send + Sync + 'static,
@@ -219,6 +220,7 @@ where
         + Sync
         + 'static
         + std::ops::Add<Output = P::Commitment>
+        + std::ops::Sub<Output = P::Commitment>
         + std::ops::Mul<E::ScalarField, Output = P::Commitment>,
     P::Proof: CanonicalSerialize + Clone + Send + Sync + 'static,
     P::State: Send + Sync + 'static,

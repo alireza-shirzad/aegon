@@ -33,12 +33,14 @@ use ark_ec::pairing::Pairing;
 use super::config::VerifierContext;
 use super::error::AegonError;
 use super::fs::derive_chain_scalar;
+use super::sigma::{verify as verify_blinding_eq, BlindingEqProof};
 use super::types::{AegonPcs, AuditState, EpochCommitment};
+use akd_core::aegon_crypto::pcs::PCSGlobalParam;
 
 /// Verify the invariance relation for a single epoch transition.
 /// Updates `audit_state` with the new chain scalars on success.
 pub fn verify_invariance<E, P>(
-    _ctx: &VerifierContext<E, P>,
+    ctx: &VerifierContext<E, P>,
     audit_state: &mut AuditState<E::ScalarField>,
     prev: &EpochCommitment<E, P>,
     next: &EpochCommitment<E, P>,
@@ -46,6 +48,7 @@ pub fn verify_invariance<E, P>(
 where
     E: Pairing,
     P: AegonPcs<E>,
+    P::VerifierParam: PCSGlobalParam,
     P::Commitment: Clone
         + PartialEq
         + Add<Output = P::Commitment>
@@ -63,12 +66,17 @@ where
         audit_state.r_index,
         &next.index_commitment,
     );
+    // Index polynomials are always committed non-zk in Aegon (no
+    // tau·h term, see `commit_with_aux_non_zk` in server.rs), so the
+    // chain equation holds exactly in the group with no sigma proof.
     let index_ok = verify_chain::<E, P>(
         new_r_index,
         &prev.index_commitment,
         &next.index_commitment,
         &prev.rand_index_commitment,
         &next.rand_index_commitment,
+        None,
+        &ctx.verifier_param,
     );
     if !index_ok {
         return Ok(false);
@@ -79,12 +87,32 @@ where
         audit_state.r_value,
         &next.value_commitment,
     );
+    // Value polynomials carry a `tau·h` hiding term under a zk SRS;
+    // the published rand_value commitment was re-randomised with a
+    // fresh tau, so the bare chain equation has a non-zero `c·h`
+    // residue. `next.audit_value_blinding_proof` certifies that the
+    // residue is in fact a known multiple of `h` (paper §7).
+    //
+    // Policy: under a zk SRS the proof MUST be present. A malicious
+    // server skipping re-randomisation could otherwise ship a
+    // deterministic chained tau, the bare equation would pass, and
+    // observers of value-side openings across epochs could mount the
+    // joint-leakage attack the privacy proof (App. D) rules out.
+    // Enforce it here so the index chain (always non-hiding) stays
+    // decoupled from this check.
+    if PCSGlobalParam::is_zk(&ctx.verifier_param)
+        && next.audit_value_blinding_proof.is_none()
+    {
+        return Ok(false);
+    }
     let value_ok = verify_chain::<E, P>(
         new_r_value,
         &prev.value_commitment,
         &next.value_commitment,
         &prev.rand_value_commitment,
         &next.rand_value_commitment,
+        next.audit_value_blinding_proof.as_ref(),
+        &ctx.verifier_param,
     );
     if !value_ok {
         return Ok(false);
@@ -101,24 +129,69 @@ where
 ///   C(rand_{n+1}) ?= C(rand_n) + r_n · ( C(poly_{n+1}) − C(poly_n) )
 /// ```
 ///
-/// Three group operations and one equality, no openings.
+/// In non-hiding mode (`blinding_proof = None`, non-zk SRS) this is a
+/// bare group equality — three operations and one comparison.
+///
+/// In hiding mode the published rand commitment carries a fresh
+/// blinding shift `c · h`, so the equation holds only modulo `h`.
+/// The `blinding_proof` is a Schnorr proof that the residue
+/// `next_rand − (prev_rand + r · (next_poly − prev_poly))` equals
+/// `c · h` for some `c` the prover knows. The audit accepts iff that
+/// Schnorr proof verifies. See [`super::sigma`] for the protocol.
+///
+/// Policy: under a zk SRS the proof MUST be `Some`. A `None` here in
+/// zk mode would let a malicious server defeat the check by counting
+/// on the bare group equation to fail (which it will) and the
+/// caller to interpret that as a soft rejection — instead we reject
+/// hard with `false`.
 pub(super) fn verify_chain<E, P>(
     r_n: E::ScalarField,
     prev_poly_com: &P::Commitment,
     next_poly_com: &P::Commitment,
     prev_rand_com: &P::Commitment,
     next_rand_com: &P::Commitment,
+    blinding_proof: Option<&BlindingEqProof<E, P>>,
+    verifier_param: &P::VerifierParam,
 ) -> bool
 where
     E: Pairing,
     P: AegonPcs<E>,
+    P::VerifierParam: PCSGlobalParam,
     P::Commitment: Clone
         + PartialEq
         + Add<Output = P::Commitment>
         + Sub<Output = P::Commitment>
         + Mul<E::ScalarField, Output = P::Commitment>,
 {
-    let delta_poly: P::Commitment = next_poly_com.clone() - prev_poly_com.clone();
-    let expected: P::Commitment = prev_rand_com.clone() + delta_poly * r_n;
-    &expected == next_rand_com
+    match blinding_proof {
+        Some(proof) => {
+            // Verifying the Schnorr equation requires `h` from the
+            // SRS — non-hiding SRSs don't expose one, so reject a
+            // proof that arrived against the wrong SRS rather than
+            // silently succeeding via `scaled_mask_generator_vk`
+            // returning `None`.
+            if !PCSGlobalParam::is_zk(verifier_param) {
+                return false;
+            }
+            verify_blinding_eq::<E, P>(
+                verifier_param,
+                prev_poly_com,
+                next_poly_com,
+                prev_rand_com,
+                next_rand_com,
+                r_n,
+                proof,
+            )
+        },
+        None => {
+            // Bare equality is correct whenever neither side carries
+            // a `tau·h` term. Index chain hits this branch always;
+            // value chain hits it under a non-hiding SRS. (Value
+            // chain under hiding SRS is gated at the
+            // `verify_invariance` policy check above.)
+            let delta_poly: P::Commitment = next_poly_com.clone() - prev_poly_com.clone();
+            let expected: P::Commitment = prev_rand_com.clone() + delta_poly * r_n;
+            &expected == next_rand_com
+        },
+    }
 }

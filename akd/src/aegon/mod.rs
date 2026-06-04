@@ -27,6 +27,7 @@ pub mod presets;
 pub mod server;
 pub mod shard_grpc;
 pub mod sharded;
+pub mod sigma;
 #[cfg(feature = "tracing_instrument")]
 pub mod tracing_init;
 pub mod types;
@@ -46,6 +47,7 @@ pub use hash::{
 };
 pub use presets::optimal_kzh_k;
 pub use server::Aegon;
+pub use sigma::BlindingEqProof;
 pub use sharded::{
     build_merkle_path, build_merkle_root_and_paths, merkle_root, probe_at,
     rederive_sharded_fs_scalars, verify_lookup_history, verify_lookup_label,

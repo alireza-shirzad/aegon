@@ -202,6 +202,7 @@ where
         + Send
         + Sync
         + std::ops::Add<Output = P::Commitment>
+        + std::ops::Sub<Output = P::Commitment>
         + std::ops::Mul<E::ScalarField, Output = P::Commitment>,
     P::Proof: Clone + Send + Sync,
     P::State: Send + Sync,
@@ -470,6 +471,7 @@ where
         + Sync
         + 'static
         + std::ops::Add<Output = P::Commitment>
+        + std::ops::Sub<Output = P::Commitment>
         + std::ops::Mul<E::ScalarField, Output = P::Commitment>,
     P::Proof: CanonicalSerialize + Send + Sync + 'static,
     P::State: Send + Sync + 'static,
@@ -566,6 +568,7 @@ where
         + Sync
         + 'static
         + std::ops::Add<Output = P::Commitment>
+        + std::ops::Sub<Output = P::Commitment>
         + std::ops::Mul<E::ScalarField, Output = P::Commitment>,
     P::Proof: CanonicalSerialize + Send + Sync + 'static,
     P::State: Send + Sync + 'static,
@@ -1072,6 +1075,7 @@ where
         + Send
         + Sync
         + std::ops::Add<Output = P::Commitment>
+        + std::ops::Sub<Output = P::Commitment>
         + std::ops::Mul<E::ScalarField, Output = P::Commitment>,
     P::Proof: CanonicalDeserialize + Clone + Send + Sync,
     P::State: Send + Sync,

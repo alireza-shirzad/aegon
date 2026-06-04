@@ -1120,6 +1120,7 @@ where
         + Sync
         + 'static
         + std::ops::Add<Output = P::Commitment>
+        + std::ops::Sub<Output = P::Commitment>
         + std::ops::Mul<E::ScalarField, Output = P::Commitment>,
     P::Proof: Clone + Send + Sync + 'static,
     P::State: Send + Sync + 'static,
@@ -3649,7 +3650,7 @@ where
 /// On success, `audit_state` is advanced to the new chain scalars,
 /// ready for the next transition.
 pub fn verify_sharded_invariance<E, P>(
-    _ctx: &ShardedVerifierContext<E, P>,
+    ctx: &ShardedVerifierContext<E, P>,
     audit_state: &mut AuditState<E::ScalarField>,
     prev: &ShardedEpochCommitment<E, P>,
     next: &ShardedEpochCommitment<E, P>,
@@ -3657,6 +3658,7 @@ pub fn verify_sharded_invariance<E, P>(
 where
     E: Pairing,
     P: AegonPcs<E>,
+    P::VerifierParam: akd_core::aegon_crypto::pcs::PCSGlobalParam,
     P::Commitment: Clone
         + PartialEq
         + std::ops::Add<Output = P::Commitment>
@@ -3689,6 +3691,14 @@ where
     // element the auditor needs is in `prev.per_shard[i]` /
     // `next.per_shard[i]`, and `verify_chain` does the homomorphism
     // check directly on commitments.
+    // Every shard runs against the same SRS by construction (one
+    // (prover_param, verifier_param) is cloned out to all shards in
+    // `ShardedAegon::setup`), so the audit-path sigma proof verifies
+    // against the single shared verifier_param exposed on
+    // `ctx.inner`. The index chain stays exact (non-zk per shard);
+    // the value chain consumes each shard's own Schnorr proof.
+    let vk = &ctx.inner.verifier_param;
+    let zk_srs = akd_core::aegon_crypto::pcs::PCSGlobalParam::is_zk(vk);
     for i in 0..next.per_shard.len() {
         let prev_i = &prev.per_shard[i];
         let next_i = &next.per_shard[i];
@@ -3699,8 +3709,18 @@ where
             &next_i.index_commitment,
             &prev_i.rand_index_commitment,
             &next_i.rand_index_commitment,
+            None,
+            vk,
         );
         if !index_ok {
+            return Ok(false);
+        }
+        // Paper §7 policy: under a hiding SRS every shard's value
+        // chain MUST carry its own Schnorr proof. A shard skipping
+        // re-randomisation would defeat the zk simulator argument
+        // even if all other shards play by the rules — the audit
+        // rejects globally on any shard's missing proof.
+        if zk_srs && next_i.audit_value_blinding_proof.is_none() {
             return Ok(false);
         }
         let value_ok = verify_chain::<E, P>(
@@ -3709,6 +3729,8 @@ where
             &next_i.value_commitment,
             &prev_i.rand_value_commitment,
             &next_i.rand_value_commitment,
+            next_i.audit_value_blinding_proof.as_ref(),
+            vk,
         );
         if !value_ok {
             return Ok(false);

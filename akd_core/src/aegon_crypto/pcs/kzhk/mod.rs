@@ -399,6 +399,43 @@ where
             .unwrap_or_else(<E::ScalarField as Zero>::zero)
     }
 
+    fn rerandomise_hiding_scalar<R>(
+        state: &mut Self::State,
+        rng: &mut R,
+    ) -> Option<E::ScalarField>
+    where
+        R: ark_std::rand::RngCore + ark_std::rand::CryptoRng,
+    {
+        let tau_old = *state.maybe_tau()?;
+        let tau_new = E::ScalarField::rand(rng);
+        state.set_tau(tau_new);
+        Some(tau_new - tau_old)
+    }
+
+    fn scaled_mask_generator_pp(
+        pp: &Self::ProverParam,
+        model: &Self::Commitment,
+        scalar: E::ScalarField,
+    ) -> Option<Self::Commitment> {
+        if !PCSGlobalParam::is_zk(pp) {
+            return None;
+        }
+        let h_scaled = (pp.get_h() * scalar).into_affine();
+        Some(KZHKCommitment::new(h_scaled, model.get_num_vars()))
+    }
+
+    fn scaled_mask_generator_vk(
+        vk: &Self::VerifierParam,
+        model: &Self::Commitment,
+        scalar: E::ScalarField,
+    ) -> Option<Self::Commitment> {
+        if !PCSGlobalParam::is_zk(vk) {
+            return None;
+        }
+        let h_scaled = (vk.get_h() * scalar).into_affine();
+        Some(KZHKCommitment::new(h_scaled, model.get_num_vars()))
+    }
+
     fn generate_masking_package(
         prover_param: impl Borrow<Self::ProverParam>,
         num_vars: usize,

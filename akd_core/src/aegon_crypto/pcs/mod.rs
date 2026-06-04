@@ -273,6 +273,62 @@ pub trait PolynomialCommitmentScheme<E: Pairing> {
         unimplemented!("PCS::open_zk_with_package has no default — implement on hiding PCSs that need the masking-server protocol")
     }
 
+    /// Construct a commitment-shaped wrapper around `scalar · h`, where
+    /// `h` is the hiding generator from the prover-side SRS. Returns
+    /// `None` when the SRS is non-hiding (no `h` exists). The `model`
+    /// commitment supplies any PCS-internal metadata (e.g. KZH-k's
+    /// `nv` sanity check field) so the returned commitment is
+    /// `Add`/`Sub`-compatible with `model` without further plumbing.
+    ///
+    /// Used by the audit-path sigma protocol (paper §7 "Checking
+    /// Homomorphic Relations Over zk-KZH") to lift `c·h` and Schnorr
+    /// blinding `k·h` into the commitment group without exposing the
+    /// PCS-specific group element type.
+    fn scaled_mask_generator_pp(
+        _pp: &Self::ProverParam,
+        _model: &Self::Commitment,
+        _scalar: E::ScalarField,
+    ) -> Option<Self::Commitment> {
+        None
+    }
+
+    /// Verifier-side analogue of [`Self::scaled_mask_generator_pp`].
+    /// Same semantics; reads `h` out of [`Self::VerifierParam`]
+    /// instead of the prover parameters so the audit verifier never
+    /// needs to materialise prover state.
+    fn scaled_mask_generator_vk(
+        _vk: &Self::VerifierParam,
+        _model: &Self::Commitment,
+        _scalar: E::ScalarField,
+    ) -> Option<Self::Commitment> {
+        None
+    }
+
+    /// Sample a fresh hiding scalar, install it on `state` in place of
+    /// the current one, and return the difference `tau_new − tau_old`
+    /// as a field element. The caller then shifts the matching
+    /// commitment by `delta · h` (via [`Self::scaled_mask_generator_pp`])
+    /// and ships a Schnorr proof of `delta`. Returns `None` when the
+    /// state has no hiding slot (non-zk SRS), in which case re-
+    /// randomisation does not apply.
+    ///
+    /// Keeping the delta on the `E::ScalarField` axis (rather than
+    /// the opaque [`Self::HidingScalar`]) lets the publish path drive
+    /// the audit-path sigma protocol without naming `HidingScalar` —
+    /// useful because the audit equation already lives in field
+    /// arithmetic and adding an associated-type-equality bound to
+    /// every call site would force every downstream impl to repeat
+    /// the bound.
+    fn rerandomise_hiding_scalar<R>(
+        _state: &mut Self::State,
+        _rng: &mut R,
+    ) -> Option<E::ScalarField>
+    where
+        R: ark_std::rand::RngCore + ark_std::rand::CryptoRng,
+    {
+        None
+    }
+
     /// Re-mask an already-computed non-ZK opening into a hiding one
     /// using a precomputed package and the polynomial's per-epoch
     /// hiding scalar `tau_f`. Used by the history-lookup path to

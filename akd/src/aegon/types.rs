@@ -6,6 +6,8 @@ use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use akd_core::aegon_crypto::pcs::PolynomialCommitmentScheme;
 use akd_core::aegon_crypto::poly::DenseOrSparseMLE;
 
+use super::sigma::BlindingEqProof;
+
 pub type Label = Vec<u8>;
 pub type Value = Vec<u8>;
 
@@ -54,6 +56,12 @@ pub struct EpochCommitment<E: Pairing, P: AegonPcs<E>> {
     pub value_commitment: P::Commitment,
     pub rand_index_commitment: P::Commitment,
     pub rand_value_commitment: P::Commitment,
+    /// Sigma proof tying the published `rand_value_commitment` back to
+    /// the chain rule. `Some` whenever the SRS is hiding (paper §7
+    /// "Checking Homomorphic Relations Over zk-KZH"); `None` under a
+    /// non-hiding SRS, in which case the audit checks the chain
+    /// equation exactly. See [`super::sigma`] for the protocol.
+    pub audit_value_blinding_proof: Option<BlindingEqProof<E, P>>,
     pub _e: PhantomData<E>,
 }
 
@@ -65,6 +73,7 @@ impl<E: Pairing, P: AegonPcs<E>> Clone for EpochCommitment<E, P> {
             value_commitment: self.value_commitment.clone(),
             rand_index_commitment: self.rand_index_commitment.clone(),
             rand_value_commitment: self.rand_value_commitment.clone(),
+            audit_value_blinding_proof: self.audit_value_blinding_proof.clone(),
             _e: PhantomData,
         }
     }

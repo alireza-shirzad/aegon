@@ -502,6 +502,23 @@ impl<E: Pairing> KZHKState<E> {
         self.d_bool = Some(d_bool);
     }
 
+    /// Replace the hiding scalar `tau` in place. The publish path uses
+    /// this after the homomorphic chain update on `rand_value` to swap
+    /// the chained tau (linear combination of all prior taus, which
+    /// destroys zk if used unmodified) for a fresh independent draw.
+    /// The matching commitment must be shifted by `(tau_new − tau_old) ·
+    /// h` so the (commitment, state.tau) pair stays consistent.
+    /// Panics on a non-hiding state — the caller must have committed
+    /// under a zk SRS for this to make sense.
+    pub fn set_tau(&mut self, tau: E::ScalarField) {
+        match self.tau.as_mut() {
+            Some(t) => *t = tau,
+            None => panic!(
+                "KZHKState::set_tau: state has no tau slot (non-zk commit); refusing to add one"
+            ),
+        }
+    }
+
     /// In-place sparse FMA on the prover state: `self += scalar · other`.
     ///
     /// Walks the support of `other`'s aux table and, when in zk mode,

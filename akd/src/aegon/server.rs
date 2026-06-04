@@ -83,6 +83,13 @@ struct EpochSnapshot<E: Pairing, P: AegonPcs<E>> {
     /// never read these.
     value_tau: Option<P::HidingScalar>,
     rand_value_tau: Option<P::HidingScalar>,
+
+    /// Sigma proof tying the new `rand_value_commitment` back to the
+    /// chain rule under the fresh-tau re-randomisation (paper §7).
+    /// `Some` whenever the SRS is hiding; `None` under a non-hiding
+    /// SRS, where the audit verifies the chain equation exactly. See
+    /// [`super::sigma`] for the protocol details.
+    audit_value_blinding_proof: Option<crate::aegon::sigma::BlindingEqProof<E, P>>,
 }
 
 pub struct Aegon<E, P, H = Sha256Hash>
@@ -253,9 +260,13 @@ where
     // Incremental publish needs the commitment-side homomorphism:
     // `prev + delta` for phase 1 data polys and `prev + r · delta` for
     // phase 2 rand polys. KZH-k's KZHKCommitment satisfies all three
-    // (impls live in akd_core's structs.rs).
+    // (impls live in akd_core's structs.rs). `Sub` is additionally
+    // needed by the audit-path re-randomisation (§7), which has to
+    // recover the prev-epoch value commitment from `self` and the
+    // delta after phase 1 has already overwritten `self`.
     P::Commitment: Clone
         + std::ops::Add<Output = P::Commitment>
+        + std::ops::Sub<Output = P::Commitment>
         + std::ops::Mul<E::ScalarField, Output = P::Commitment>,
     H: HashSuite<E::ScalarField>,
 {
@@ -386,6 +397,12 @@ where
                 rand_value_state: Some(rand_value_state.clone()),
                 value_tau: init_value_tau,
                 rand_value_tau: init_rand_value_tau,
+                // Epoch 0 is the empty initial state — there is no
+                // previous epoch to chain against, so no sigma proof
+                // exists. The audit path verifies transitions
+                // n → n+1 starting at n=0, so this slot is read only
+                // through `epoch_commitment(0)` to seed `prev`.
+                audit_value_blinding_proof: None,
             },
         );
 
@@ -569,6 +586,13 @@ where
                 rand_value_state: Some(ckpt.rand_value_state.clone()),
                 value_tau: rest_value_tau,
                 rand_value_tau: rest_rand_value_tau,
+                // Restored from a server checkpoint — the original
+                // sigma proof for the restored epoch's transition is
+                // not stored in the checkpoint (a non-load-bearing
+                // op: the auditor pinned it at the time it was
+                // produced). New transitions from this point on
+                // will produce fresh proofs.
+                audit_value_blinding_proof: None,
             },
         );
 
@@ -674,6 +698,9 @@ where
                 rand_value_state: Some(rand_value_state),
                 value_tau: reset_value_tau,
                 rand_value_tau: reset_rand_value_tau,
+                // Reset state — no chain transition exists yet for
+                // this epoch, so no sigma proof.
+                audit_value_blinding_proof: None,
             },
         );
         self.pending = None;
@@ -760,6 +787,8 @@ where
                 rand_value_state: Some(self.rand_value_state.clone()),
                 value_tau: prefill_value_tau,
                 rand_value_tau: prefill_rand_value_tau,
+                // Prefilled epoch-0 — no transition produced yet.
+                audit_value_blinding_proof: None,
             },
         );
         // DELIBERATELY no DB writes here. The architecture has
@@ -798,6 +827,10 @@ where
             value_commitment: self.value_commitment.clone(),
             rand_index_commitment: self.rand_index_commitment.clone(),
             rand_value_commitment: self.rand_value_commitment.clone(),
+            audit_value_blinding_proof: self
+                .epoch_history
+                .get(&self.epoch)
+                .and_then(|snap| snap.audit_value_blinding_proof.clone()),
             _e: PhantomData,
         }
     }
@@ -857,6 +890,7 @@ where
             value_commitment: snap.value_commitment.clone(),
             rand_index_commitment: snap.rand_index_commitment.clone(),
             rand_value_commitment: snap.rand_value_commitment.clone(),
+            audit_value_blinding_proof: snap.audit_value_blinding_proof.clone(),
             _e: PhantomData,
         })
     }
@@ -1366,6 +1400,13 @@ where
         #[cfg(feature = "tracing_instrument")]
         let _combine_rand_span =
             tracing::debug_span!("Aegon::Phase2::CombineRandHomomorphic").entered();
+        // Capture the PRE-update commitments before the homomorphic
+        // shift overwrites them — the sigma proof below has to bind to
+        // them in the Fiat-Shamir transcript exactly as the auditor
+        // will see them in `prev: EpochCommitment`.
+        let prev_value_com_for_audit = self.value_commitment.clone() - delta_value_com.clone();
+        let prev_rand_value_com_for_audit = self.rand_value_commitment.clone();
+
         let _rand_combine_t = std::time::Instant::now();
         let new_rand_index_com = self.rand_index_commitment.clone()
             + delta_index_com.clone() * new_r_index;
@@ -1386,6 +1427,65 @@ where
             rfi?;
             rfv?;
         }
+
+        // ---- Audit-path re-randomisation (zk only) -----------------
+        //
+        // After the homomorphic update above, `rand_value_commitment`
+        // carries `tau_chained = tau_rand_n + r · (tau_val_{n+1} −
+        // tau_val_n)`. Republishing that is unsafe: the joint
+        // distribution of taus across epochs lives in a strict
+        // subspace, and openings on `rand_value` across epochs become
+        // linearly correlated — the privacy proof's simulator
+        // (paper App. D Fig. 13) can no longer match the real
+        // distribution.
+        //
+        // Fix per paper §7: pick a fresh independent
+        // `tau_rand_value_{n+1}`, shift the commitment by
+        // `(tau_fresh − tau_chained) · h`, update the state's tau
+        // accordingly, and ship a Schnorr proof of knowledge of the
+        // residue `c = tau_fresh − tau_chained` to the auditor. The
+        // residue lives entirely on the `h`-axis, so the underlying
+        // polynomial still satisfies the chain rule — the auditor
+        // verifies that by checking the Schnorr proof instead of the
+        // bare group equality.
+        //
+        // Done BEFORE the post-update openings below so the cached
+        // non-zk openings later get re-masked against `tau_fresh`,
+        // matching what's now in the hiding commitment.
+        let audit_value_blinding_proof = if self.prover_param.is_zk() {
+            let mut audit_rng = audit_path_csprng();
+            let pp = self.prover_param.as_ref();
+            // Sample fresh tau, derive the shift, apply it to both the
+            // commitment and the state. The trait method does the
+            // tau swap on the State (KZH stores it inside) and hands
+            // back `delta_tau = tau_new - tau_old` as a field
+            // element — the rest of the audit path is pure field
+            // arithmetic and stays generic.
+            let delta_tau = P::rerandomise_hiding_scalar(&mut self.rand_value_state, &mut audit_rng)
+                .expect("zk SRS has a hiding state");
+            let bump = P::scaled_mask_generator_pp(pp, &self.rand_value_commitment, delta_tau)
+                .expect("zk SRS exposes h");
+            self.rand_value_commitment = self.rand_value_commitment.clone() + bump;
+            // Build the Schnorr proof over the public chain inputs.
+            // `next_rand_value` is the re-randomised commitment we
+            // just installed on self.
+            super::sigma::prove::<E, P, _>(
+                pp,
+                &self.rand_value_commitment,
+                &prev_value_com_for_audit,
+                &self.value_commitment,
+                &prev_rand_value_com_for_audit,
+                &self.rand_value_commitment,
+                new_r_value,
+                delta_tau,
+                &mut audit_rng,
+            )
+        } else {
+            // Non-hiding SRS — no blinding term anywhere, audit
+            // equation holds exactly with `residue == 0` and no proof
+            // is needed.
+            None
+        };
         #[cfg(feature = "tracing_instrument")]
         drop(_combine_rand_span);
         log_rss_ctx("phase2.post_rand_combine", &format!("epoch={}", _rss_epoch));
@@ -1652,6 +1752,7 @@ where
                 rand_value_state: snap_rand_value_state,
                 value_tau: publish_value_tau,
                 rand_value_tau: publish_rand_value_tau,
+                audit_value_blinding_proof,
             },
         );
         log_rss_ctx("phase2.exit", &format!("epoch={}", self.epoch));
@@ -2283,6 +2384,24 @@ where
     } else {
         (None, None)
     }
+}
+
+/// Build a fresh CSPRNG seeded from `/dev/urandom` for the publish-
+/// path audit randomness (fresh `tau_rand_value` + Schnorr `k`).
+/// Used once per publish in zk mode, where two field elements need
+/// to be sampled independently of the chain randomness already
+/// derived via Fiat-Shamir. Reading from `/dev/urandom` avoids
+/// pulling in the `rand` crate's `OsRng` (gated behind an optional
+/// feature here) while still giving us OS-provided entropy.
+fn audit_path_csprng() -> rand_chacha::ChaCha20Rng {
+    use ark_std::rand::SeedableRng;
+    use std::io::Read;
+    let mut seed = [0u8; 32];
+    std::fs::File::open("/dev/urandom")
+        .expect("/dev/urandom open")
+        .read_exact(&mut seed)
+        .expect("/dev/urandom read");
+    rand_chacha::ChaCha20Rng::from_seed(seed)
 }
 
 /// `rand += r · (next - prev)` on sparse evaluation tables. The support
