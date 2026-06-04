@@ -42,8 +42,8 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 use akd::aegon::{
-    optimal_kzh_k, AegonError, DbSource, Sha256Hash, ShardTransport, ShardedAegon,
-    ShardedAegonConfig, SrsSource,
+    optimal_kzh_k, AegonError, DbSource, EcVrfHash, ShardTransport, ShardedAegon,
+    ShardedAegonConfig, SrsSource, VrfProver,
 };
 use akd_core::aegon_crypto::pcs::kzhk::structs::KZHKConfig;
 use akd_core::aegon_crypto::pcs::kzhk::KZHK;
@@ -54,7 +54,7 @@ use clap::Parser;
 use rand_chacha::ChaCha20Rng;
 
 type Pcs = KZHK<Bn254>;
-type Sharded = ShardedAegon<Bn254, Pcs, Sha256Hash>;
+type Sharded = ShardedAegon<Bn254, Pcs, EcVrfHash>;
 
 /// Same per-label / per-value bytes the coordinator + lookup benches
 /// use, so the wire-size measurements line up across the three bench
@@ -269,6 +269,7 @@ fn main() -> ExitCode {
             return ExitCode::from(1);
         },
     };
+    server.set_vrf_prover(VrfProver::from_env());
 
     // ---- sweep ----
     // Stages are walked in sorted order. Between stages we run real

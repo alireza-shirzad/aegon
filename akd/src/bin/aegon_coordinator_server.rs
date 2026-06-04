@@ -32,8 +32,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use akd::aegon::{
-    coordinator_grpc::CoordinatorServer, DbSource, Sha256Hash, ShardTransport, ShardedAegon,
-    ShardedAegonConfig, SrsSource,
+    coordinator_grpc::CoordinatorServer, DbSource, EcVrfHash, ShardTransport, ShardedAegon,
+    ShardedAegonConfig, SrsSource, VrfProver,
 };
 use akd_core::aegon_crypto::pcs::kzhk::KZHK;
 use ark_bn254::Bn254;
@@ -43,7 +43,7 @@ use rand_chacha::ChaCha20Rng;
 use tokio::sync::RwLock as AsyncRwLock;
 
 type Pcs = KZHK<Bn254>;
-type Sharded = ShardedAegon<Bn254, Pcs, Sha256Hash>;
+type Sharded = ShardedAegon<Bn254, Pcs, EcVrfHash>;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -102,6 +102,50 @@ struct Args {
     /// out-of-band coordination.
     #[arg(long, default_value_t = 0)]
     seed_batch_size: usize,
+
+    /// Write the coordinator's ECVRF public key (hex, 64 chars + LF)
+    /// to this path after setup, before binding the listener. Useful
+    /// for out-of-band distribution to auditors / clients that don't
+    /// want to call `CurrentCommitment` just to learn the key. Write
+    /// is atomic via `write-then-rename` so a downstream watcher only
+    /// ever sees a complete file. Refuses to overwrite an existing
+    /// file (delete it first if you really mean to clobber).
+    #[arg(long)]
+    vrf_pubkey_out: Option<PathBuf>,
+}
+
+/// Atomic write: stage the bytes in a sibling `*.tmp` file in the same
+/// directory, then `rename(2)` into place. Refuses to clobber an
+/// existing target so a stale pubkey from a prior run is never
+/// silently overwritten — the operator has to delete it on purpose.
+fn write_pubkey_atomic(path: &std::path::Path, pk_hex: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    if path.exists() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            format!("{} already exists; remove it first", path.display()),
+        ));
+    }
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let file_name = path.file_name().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "--vrf-pubkey-out path has no file name",
+        )
+    })?;
+    let mut tmp = parent.to_path_buf();
+    tmp.push(format!("{}.tmp", file_name.to_string_lossy()));
+    {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(pk_hex.as_bytes())?;
+        f.write_all(b"\n")?;
+        f.sync_all()?;
+    }
+    std::fs::rename(&tmp, path)?;
+    Ok(())
 }
 
 fn main() -> ExitCode {
@@ -167,6 +211,34 @@ fn main() -> ExitCode {
         t_setup.elapsed().as_secs_f64() * 1000.0
     );
 
+    // Initialise the ECVRF prover from the configured key source:
+    //   AEGON_VRF_SEED      — hex-encoded 32-byte Ed25519 secret;
+    //   AEGON_VRF_KEY_PATH  — sealed-file path (auto-generated on
+    //                         first run from /dev/urandom, persisted
+    //                         at mode 0600);
+    //   otherwise           — the published benchmark seed, useful
+    //                         only for tests and CI.
+    // The matching public key is automatically advertised in every
+    // `CurrentCommitment` response so clients can build a
+    // `VrfVerifier` without an out-of-band fetch.
+    let prover = VrfProver::from_env();
+    let pk_hex = hex::encode(prover.public_key().as_bytes());
+    state.set_vrf_prover(prover);
+    eprintln!(
+        "coordinator: ECVRF prover attached (pubkey {pk_hex}); clients fetch via CurrentCommitment"
+    );
+
+    if let Some(path) = &args.vrf_pubkey_out {
+        if let Err(e) = write_pubkey_atomic(path, &pk_hex) {
+            eprintln!(
+                "error: failed to write VRF public key to {}: {e}",
+                path.display()
+            );
+            return ExitCode::from(1);
+        }
+        eprintln!("coordinator: ECVRF pubkey written to {}", path.display());
+    }
+
     // Optional seeding so a fresh server has something to look up.
     // Single publish at most — keeps the binary's responsibility
     // narrow (it's a server, not a benchmark).
@@ -204,7 +276,7 @@ fn main() -> ExitCode {
     // Wrap the (possibly already-seeded) `ShardedAegon` in the gRPC
     // adapter and serve. Drops into a tokio runtime here because the
     // setup phase is sync but the serve path is async.
-    let server = CoordinatorServer::<Bn254, Pcs, Sha256Hash>::from_shared(Arc::new(
+    let server = CoordinatorServer::<Bn254, Pcs, EcVrfHash>::from_shared(Arc::new(
         AsyncRwLock::new(state),
     ));
     let runtime = match tokio::runtime::Builder::new_multi_thread()
@@ -224,4 +296,57 @@ fn main() -> ExitCode {
     }
 
     ExitCode::SUCCESS
+}
+
+#[cfg(test)]
+mod tests {
+    use super::write_pubkey_atomic;
+    use std::path::PathBuf;
+
+    fn unique_path(name: &str) -> PathBuf {
+        let mut p = std::env::temp_dir();
+        let pid = std::process::id();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(0);
+        p.push(format!("aegon-vrf-pubkey-{name}-{pid}-{nanos}.hex"));
+        p
+    }
+
+    #[test]
+    fn writes_hex_plus_newline_and_no_tmp_left_behind() {
+        let path = unique_path("ok");
+        let hex = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+        write_pubkey_atomic(&path, hex).expect("write succeeds");
+        let bytes = std::fs::read(&path).expect("read back");
+        assert_eq!(bytes.len(), hex.len() + 1, "exactly hex + LF");
+        assert_eq!(&bytes[..hex.len()], hex.as_bytes());
+        assert_eq!(bytes[hex.len()], b'\n');
+        // Tmp sibling must not survive a successful rename.
+        let mut tmp = path.clone();
+        let fname = format!(
+            "{}.tmp",
+            path.file_name().unwrap().to_string_lossy()
+        );
+        tmp.set_file_name(fname);
+        assert!(
+            !tmp.exists(),
+            "tmp file {tmp:?} should be gone after rename"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn refuses_to_clobber_existing_file() {
+        let path = unique_path("clobber");
+        std::fs::write(&path, b"stale").expect("seed existing file");
+        let err = write_pubkey_atomic(&path, "deadbeef")
+            .expect_err("must refuse existing file");
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+        // Existing content untouched.
+        let bytes = std::fs::read(&path).expect("read back");
+        assert_eq!(bytes, b"stale");
+        let _ = std::fs::remove_file(&path);
+    }
 }

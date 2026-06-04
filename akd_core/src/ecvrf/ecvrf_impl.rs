@@ -375,9 +375,7 @@ pub struct Output([u8; OUTPUT_LENGTH]);
 
 impl Output {
     /// Converts an Output into bytes
-    #[cfg(test)]
-    #[allow(dead_code)]
-    pub(crate) fn to_bytes(&self) -> [u8; OUTPUT_LENGTH] {
+    pub fn to_bytes(&self) -> [u8; OUTPUT_LENGTH] {
         self.0
     }
 

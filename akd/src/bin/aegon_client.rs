@@ -32,7 +32,7 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 use akd::aegon::{
-    coordinator_grpc::CoordinatorClient, Sha256Hash, ShardedVerifierContext, VerifierContext,
+    coordinator_grpc::CoordinatorClient, EcVrfHash, ShardedVerifierContext, VerifierContext,
 };
 use akd_core::aegon_crypto::pcs::kzhk::structs::KZHKConfig;
 use akd_core::aegon_crypto::pcs::kzhk::KZHK;
@@ -148,7 +148,7 @@ fn main() -> ExitCode {
     let verifier_ctx = ShardedVerifierContext::new(verifier_inner, args.log_n_shards);
 
     eprintln!("client: connecting to {} ...", args.coordinator);
-    let client = match CoordinatorClient::<Bn254, Pcs, Sha256Hash>::connect(
+    let client = match CoordinatorClient::<Bn254, Pcs, EcVrfHash>::connect(
         args.coordinator.clone(),
         verifier_ctx,
     ) {

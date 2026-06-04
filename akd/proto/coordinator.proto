@@ -94,6 +94,16 @@ message CommitmentResponse {
   // against. Includes the cross-shard merkle root.
   bytes commitment = 1;
   uint64 server_processing_micros = 2;
+  // Ed25519 VRF public key (32 bytes, compressed Edwards Y) when the
+  // deployment uses ECVRF-EDWARDS25519-SHA512-TAI for index
+  // assignment. Empty when the deployment runs with SHA-256 (in
+  // which case `vrf_proof` on every `ShardedProbe` is also empty).
+  //
+  // Clients should construct a `VrfVerifier` from this key on first
+  // CurrentCommitment call and reuse it for the life of the
+  // connection; the key is rotated only on a full deployment
+  // re-bootstrap, so caching is safe.
+  bytes vrf_pubkey = 3;
 }
 
 message LookupHistoryRequest {

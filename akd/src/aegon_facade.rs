@@ -24,7 +24,7 @@ use crate::errors::AkdError;
 use crate::{AkdLabel, LookupProof};
 
 use crate::aegon::AegonError;
-use crate::aegon::Sha256Hash;
+use crate::aegon::EcVrfHash;
 use crate::aegon::verify_sharded_consistency as aegon_verify_consistency;
 use crate::aegon::verify_sharded_invariance as aegon_verify_invariance;
 use crate::aegon::verify_sharded_lookup as aegon_verify_lookup;
@@ -75,7 +75,7 @@ pub fn verify_lookup_aegon(
     value: &crate::aegon::Value,
     proof: &crate::aegon::ShardedLookupProof<DirectoryE, DirectoryPcs>,
 ) -> Result<bool, AkdError> {
-    aegon_verify_lookup::<DirectoryE, DirectoryPcs, Sha256Hash>(
+    aegon_verify_lookup::<DirectoryE, DirectoryPcs, EcVrfHash>(
         ctx, commitment, label, value, proof,
     )
     .map_err(map_aegon_err)
@@ -111,7 +111,7 @@ pub fn verify_consistency(
     proof: &ConsistencyProof,
 ) -> Result<bool, AkdError> {
     let label_bytes: crate::aegon::Label = label.0.clone();
-    aegon_verify_consistency::<DirectoryE, DirectoryPcs, Sha256Hash>(
+    aegon_verify_consistency::<DirectoryE, DirectoryPcs, EcVrfHash>(
         ctx,
         s0,
         s1,

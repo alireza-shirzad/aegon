@@ -31,8 +31,8 @@ use crate::{
 };
 
 use crate::aegon::{
-    optimal_kzh_k, Sha256Hash, ShardedAegon, ShardedAegonConfig, ShardedConsistencyProof,
-    ShardedEpochCommitment, ShardedLookupProof, ShardedVerifierContext,
+    optimal_kzh_k, EcVrfHash, ShardedAegon, ShardedAegonConfig, ShardedConsistencyProof,
+    ShardedEpochCommitment, ShardedLookupProof, ShardedVerifierContext, VrfProver,
 };
 use akd_core::configuration::Configuration;
 use akd_core::verify::history::HistoryParams;
@@ -56,7 +56,7 @@ pub type DirectoryE = Bn254;
 /// PCS backend used by the Aegon engine. KZH-k with `k=2` (classical KZH).
 pub type DirectoryPcs = KZHK<DirectoryE>;
 /// Concrete sharded Aegon engine instantiated for this Directory.
-pub type DirectoryAegon = ShardedAegon<DirectoryE, DirectoryPcs, Sha256Hash>;
+pub type DirectoryAegon = ShardedAegon<DirectoryE, DirectoryPcs, EcVrfHash>;
 
 // Default Aegon parameters. Hardcoded for v1; later we may thread them
 // through `Directory::new` once we decide on the configuration story.
@@ -141,11 +141,16 @@ where
     ) -> Result<Self, AkdError> {
         info!("Initialising AKD directory backed by ShardedAegon");
         let mut rng = ChaCha20Rng::seed_from_u64(DEFAULT_SETUP_SEED);
-        let aegon = ShardedAegon::<DirectoryE, DirectoryPcs, Sha256Hash>::setup(
+        let mut aegon = ShardedAegon::<DirectoryE, DirectoryPcs, EcVrfHash>::setup(
             &mut rng,
             &default_aegon_config(),
         )
         .map_err(|e| AkdError::Directory(DirectoryError::Publish(format!("aegon setup: {e}"))))?;
+        // Attach an ECVRF prover so the AKD-on-Aegon backend emits
+        // VRF-bound lookup proofs. Key material is resolved from
+        // AEGON_VRF_SEED / AEGON_VRF_KEY_PATH, falling back to the
+        // bench seed for tests — see aegon::hash::vrf_key_source.
+        aegon.set_vrf_prover(VrfProver::from_env());
 
         let initial_commitment = aegon.current_commitment();
 

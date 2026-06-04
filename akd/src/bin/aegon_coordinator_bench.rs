@@ -39,7 +39,7 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 use akd::aegon::{
-    DbSource, Sha256Hash, ShardTransport, ShardedAegon, ShardedAegonConfig, SrsSource,
+    DbSource, EcVrfHash, ShardTransport, ShardedAegon, ShardedAegonConfig, SrsSource, VrfProver,
 };
 use akd_core::aegon_crypto::pcs::kzhk::KZHK;
 use ark_bn254::Bn254;
@@ -48,7 +48,7 @@ use clap::Parser;
 use rand_chacha::ChaCha20Rng;
 
 type Pcs = KZHK<Bn254>;
-type Sharded = ShardedAegon<Bn254, Pcs, Sha256Hash>;
+type Sharded = ShardedAegon<Bn254, Pcs, EcVrfHash>;
 
 /// Realistic application sizing: labels are 12-byte ASCII phone
 /// numbers (`+1` + 10 digits), values are 256-byte RSA-pubkey-sized
@@ -205,8 +205,9 @@ fn main() -> ExitCode {
             return ExitCode::from(1);
         },
     };
+    server.set_vrf_prover(VrfProver::from_env());
     let setup_ms = t_setup.elapsed().as_secs_f64() * 1000.0;
-    eprintln!("coordinator setup OK in {setup_ms:.1} ms");
+    eprintln!("coordinator setup OK in {setup_ms:.1} ms (ECVRF prover attached)");
 
     // Sweep. Each sample uses a disjoint label namespace
     // (`b{batch_size}-s{sample_idx}-u{i}`) so labels from earlier

@@ -677,6 +677,14 @@ where
 /// that `merkle_path` reconstructs the epoch root from `leaf`, and that
 /// the PCS `proof` verifies `evaluation` against `leaf.index_commitment`
 /// at the slot.
+///
+/// When the deployment uses a VRF for index assignment (`EcVrfHash`
+/// rather than `Sha256Hash`), `vrf_proof` carries the
+/// `VRF_PROOF_BYTES`-long Schnorr-style proof that this probe's
+/// `(ctr, label)` was honestly mapped — the verifier consumes it to
+/// recover `slot_bits` rather than computing them locally. For the
+/// SHA-256 path `vrf_proof` is the empty byte vector and the verifier
+/// falls back to `H::h_bits`.
 #[derive(Debug, CanonicalSerialize, CanonicalDeserialize)]
 pub struct ShardedProbe<E: Pairing, P: AegonPcs<E>> {
     pub shard_id: u32,
@@ -684,6 +692,10 @@ pub struct ShardedProbe<E: Pairing, P: AegonPcs<E>> {
     pub merkle_path: Vec<EpochDigest>,
     pub evaluation: E::ScalarField,
     pub proof: P::Proof,
+    /// RFC 9381 ECVRF proof for `(ctr, label)` at this probe, or empty
+    /// when the deployment uses the non-VRF SHA-256 hash suite. Length
+    /// is exactly `VRF_PROOF_BYTES` (80) when present.
+    pub vrf_proof: Vec<u8>,
 }
 
 // Manual `Clone` impl: `#[derive(Clone)]` would generate
@@ -699,6 +711,7 @@ impl<E: Pairing, P: AegonPcs<E>> Clone for ShardedProbe<E, P> {
             merkle_path: self.merkle_path.clone(),
             evaluation: self.evaluation,
             proof: self.proof.clone(),
+            vrf_proof: self.vrf_proof.clone(),
         }
     }
 }
@@ -980,12 +993,19 @@ pub struct ShardedConsistencyProof<E: Pairing, P: AegonPcs<E>> {
 }
 
 /// Verifier-side bundle, including the deployment's `log_n_shards`
-/// (clients need it to recompute the probe trail).
+/// (clients need it to recompute the probe trail) and, when the
+/// deployment uses a VRF for index assignment, the verifier
+/// configured with the server's published public key.
 #[derive(Clone)]
 pub struct ShardedVerifierContext<E: Pairing, P: AegonPcs<E>> {
     /// `inner.log_capacity` is the *per-shard* log_capacity.
     pub inner: VerifierContext<E, P>,
     pub log_n_shards: usize,
+    /// `Some(verifier)` when the deployment runs with `EcVrfHash`
+    /// (RFC 9381 ECVRF) and `verify_lookup_label` should consume
+    /// each probe's `vrf_proof`. `None` for the SHA-256 path, in
+    /// which case slot bits are re-derived locally via `H::h_bits`.
+    pub vrf_verifier: Option<super::hash::VrfVerifier>,
 }
 
 impl<E: Pairing, P: AegonPcs<E>> ShardedVerifierContext<E, P> {
@@ -993,7 +1013,17 @@ impl<E: Pairing, P: AegonPcs<E>> ShardedVerifierContext<E, P> {
         Self {
             inner,
             log_n_shards,
+            vrf_verifier: None,
         }
+    }
+
+    /// Attach a [`VrfVerifier`](super::hash::VrfVerifier) so subsequent
+    /// `verify_lookup_label` calls consume the `vrf_proof` field on
+    /// each probe instead of re-deriving bits via `H::h_bits`. Used
+    /// when the deployment runs with `EcVrfHash` on the server side.
+    pub fn with_vrf_verifier(mut self, verifier: super::hash::VrfVerifier) -> Self {
+        self.vrf_verifier = Some(verifier);
+        self
     }
 
     pub fn shard_log_capacity(&self) -> usize {
@@ -1070,6 +1100,13 @@ where
     // for `DbSource::None`: `lookup` then returns an empty value and
     // the caller is expected to know the value out-of-band.
     db: Option<Box<dyn Db>>,
+
+    /// Server-side VRF prover. `Some` when the deployment runs with
+    /// `EcVrfHash` — `lookup_label` then computes a VRF proof per
+    /// probe and attaches it to the `ShardedProbe.vrf_proof` field.
+    /// `None` for the SHA-256 path, in which case `vrf_proof` is left
+    /// empty and the verifier re-derives slot bits via `H::h_bits`.
+    vrf_prover: Option<super::hash::VrfProver>,
 }
 
 impl<E, P, H> ShardedAegon<E, P, H>
@@ -1269,6 +1306,7 @@ where
                 epoch_commits: rec.epoch_commits,
                 routing: rec.routing,
                 db,
+                vrf_prover: None,
             })
         } else {
             Ok(Self {
@@ -1283,8 +1321,30 @@ where
                 epoch_commits: vec![initial_commit],
                 routing: HashMap::new(),
                 db,
+                vrf_prover: None,
             })
         }
+    }
+
+    /// Attach a VRF prover to the coordinator. After this call,
+    /// `lookup_label` populates the `vrf_proof` field on each
+    /// `ShardedProbe` with a real RFC 9381 ECVRF proof, and
+    /// `sharded_verifier_context()` returns a context whose
+    /// `vrf_verifier` is set to the matching public key. The prover
+    /// stays in effect for the rest of the process's lifetime.
+    ///
+    /// Production deployments construct the prover once at startup
+    /// from `VrfProver::from_env()` (driven by the
+    /// `AEGON_VRF_SEED` / `AEGON_VRF_KEY_PATH` environment variables
+    /// — see `aegon::hash::vrf_key_source`). Tests and microbenches
+    /// can use `VrfProver::from_seed(&BENCH_VRF_SEED)`.
+    pub fn set_vrf_prover(&mut self, prover: super::hash::VrfProver) {
+        self.vrf_prover = Some(prover);
+    }
+
+    /// Current VRF prover, if one has been configured.
+    pub fn vrf_prover(&self) -> Option<&super::hash::VrfProver> {
+        self.vrf_prover.as_ref()
     }
 
     /// Read the coordinator's durable state from the DB if any was
@@ -1376,9 +1436,16 @@ where
         self.shard_verifier_context.clone()
     }
 
-    /// Convenience: full sharded verifier context.
+    /// Convenience: full sharded verifier context. When a VRF prover
+    /// has been attached (`set_vrf_prover`), the returned context
+    /// carries a matching `VrfVerifier` so `verify_lookup_label` will
+    /// consume the `vrf_proof` field on each probe.
     pub fn sharded_verifier_context(&self) -> ShardedVerifierContext<E, P> {
-        ShardedVerifierContext::new(self.verifier_context(), self.log_n_shards)
+        let mut ctx = ShardedVerifierContext::new(self.verifier_context(), self.log_n_shards);
+        if let Some(prover) = self.vrf_prover.as_ref() {
+            ctx = ctx.with_vrf_verifier(super::hash::VrfVerifier::new(prover.public_key().clone()));
+        }
+        ctx
     }
 
     pub fn current_commitment(&self) -> ShardedEpochCommitment<E, P> {
@@ -2427,17 +2494,32 @@ where
         let current = self.current_commitment();
 
         let mut probes: Vec<ShardedProbe<E, P>> = Vec::with_capacity(routing.trail.len());
-        for (shard_id, slot_bits) in &routing.trail {
+        let total_bits = self.log_n_shards + self.shard_log_capacity();
+        for (ctr_us, (shard_id, slot_bits)) in routing.trail.iter().enumerate() {
             let (evaluation, proof) =
                 self.shards[*shard_id as usize].open_index_at_slot(slot_bits)?;
             let leaf = current.per_shard[*shard_id as usize].clone();
             let merkle_path = current.merkle_path(*shard_id as usize).to_vec();
+            // When the deployment runs with a VRF prover (EcVrfHash),
+            // recompute the proof for this `(ctr, label)` pair so the
+            // client can verify the slot bits independently. Cost is
+            // ~150 µs per probe on modern x86; a typical α=4 trail of
+            // ~3 probes adds ~0.5 ms to `lookup_label`. For the SHA-
+            // 256 path the vector stays empty and the verifier falls
+            // back to `H::h_bits`.
+            let vrf_proof: Vec<u8> = if let Some(prover) = self.vrf_prover.as_ref() {
+                let (_bits, proof_bytes) = prover.prove_h_bits(ctr_us as u64, label, total_bits);
+                proof_bytes.to_vec()
+            } else {
+                Vec::new()
+            };
             probes.push(ShardedProbe {
                 shard_id: *shard_id,
                 leaf,
                 merkle_path,
                 evaluation,
                 proof,
+                vrf_proof,
             });
         }
 
@@ -2846,12 +2928,61 @@ where
     let h_label = H::h_f(label);
     let mut final_slot: Option<(u32, Vec<bool>)> = None;
 
+    let total_bits = ctx.log_n_shards + ctx.shard_log_capacity();
     for (ctr_us, probe) in proof.probes.iter().enumerate() {
         let ctr = ctr_us as u64;
-        // Re-derive (shard_id, slot_bits) from H(ctr, label) — the
-        // server can't lie about which slot any given ctr probes.
-        let (expected_shard, slot_bits) =
-            probe_at::<H, E::ScalarField>(ctr, label, ctx.log_n_shards, ctx.shard_log_capacity());
+        // Recover (shard_id, slot_bits) for this probe. Two paths:
+        //   * VRF deployment (`ctx.vrf_verifier == Some`): consume
+        //     `probe.vrf_proof`, run `VRF.verify`, slice the VRF
+        //     output into total_bits. This is the *only* way the
+        //     client can compute these bits — the VRF secret lives
+        //     on the server.
+        //   * SHA-256 deployment: call `H::h_bits` locally. The hash
+        //     is publicly computable, so no proof is needed.
+        let (expected_shard, slot_bits) = if let Some(verifier) = ctx.vrf_verifier.as_ref() {
+            if probe.vrf_proof.is_empty() {
+                return Err(AegonError::Verification(
+                    "verifier configured with VRF public key but probe.vrf_proof is empty",
+                ));
+            }
+            let bits = verifier
+                .verify_h_bits(ctr, label, &probe.vrf_proof, total_bits)
+                .map_err(|e| {
+                    // Pre-format the verification error so the
+                    // returned static-str variant carries enough
+                    // context for a debugger. Distinguishes "bytes
+                    // didn't parse" from "proof rejected by the key".
+                    match e {
+                        super::hash::VrfVerifyError::Malformed(_) => AegonError::Verification(
+                            "probe.vrf_proof failed to parse as an RFC 9381 ECVRF proof",
+                        ),
+                        super::hash::VrfVerifyError::InvalidProof(_) => AegonError::Verification(
+                            "probe.vrf_proof did not verify under the deployment's VRF public key",
+                        ),
+                    }
+                })?;
+            // Split bits into (shard_id, slot_bits) using the same
+            // little-endian convention as probe_at.
+            let mut shard_id: u32 = 0;
+            for (i, b) in bits[..ctx.log_n_shards].iter().enumerate() {
+                if *b {
+                    shard_id |= 1u32 << i;
+                }
+            }
+            let slot_bits = bits[ctx.log_n_shards..].to_vec();
+            (shard_id, slot_bits)
+        } else {
+            // Legacy SHA-256 path: re-derive (shard_id, slot_bits)
+            // from H(ctr, label) — the server can't lie about which
+            // slot any given ctr probes because anyone can hash.
+            probe_at::<H, E::ScalarField>(
+                ctr,
+                label,
+                ctx.log_n_shards,
+                ctx.shard_log_capacity(),
+            )
+        };
+        let _ = total_bits; // silence dead-let warning on the legacy branch.
         if expected_shard != probe.shard_id {
             return Err(AegonError::Verification(
                 "probe shard_id does not match H(ctr, label)",

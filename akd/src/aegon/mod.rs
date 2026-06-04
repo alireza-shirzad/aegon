@@ -40,7 +40,10 @@ pub use config::{
 pub use consistency::verify_consistency;
 pub use db::DbSource;
 pub use error::AegonError;
-pub use hash::{HashSuite, Sha256Hash};
+pub use hash::{
+    EcVrfHash, HashSuite, Sha256Hash, VrfProver, VrfVerifier, VrfVerifyError, BENCH_VRF_SEED,
+    VRF_PROOF_BYTES, VRF_PUBLIC_KEY_BYTES,
+};
 pub use presets::optimal_kzh_k;
 pub use server::Aegon;
 pub use sharded::{

@@ -26,7 +26,8 @@ mod ecvrf_impl;
 mod traits;
 // export the functionality we want visible
 pub use crate::ecvrf::ecvrf_impl::{
-    Output, Proof, VRFExpandedPrivateKey, VRFPrivateKey, VRFPublicKey,
+    Output, Proof, VRFExpandedPrivateKey, VRFPrivateKey, VRFPublicKey, OUTPUT_LENGTH,
+    PROOF_LENGTH,
 };
 pub use crate::ecvrf::traits::VRFKeyStorage;
 #[cfg(feature = "nostd")]

@@ -114,8 +114,8 @@ use akd::aegon::coordinator_grpc::{
     CoordinatorServer,
 };
 use akd::aegon::{
-    optimal_kzh_k, verify_sharded_invariance, AuditState, DbSource, Sha256Hash, ShardTransport,
-    ShardedAegon, ShardedAegonConfig, SrsSource,
+    optimal_kzh_k, verify_sharded_invariance, AuditState, DbSource, EcVrfHash, ShardTransport,
+    ShardedAegon, ShardedAegonConfig, SrsSource, VrfProver,
 };
 use ark_ec::pairing::Pairing;
 use akd_core::aegon_crypto::pcs::kzhk::KZHK;
@@ -128,7 +128,7 @@ use rand_chacha::ChaCha20Rng;
 use tokio::sync::RwLock as AsyncRwLock;
 
 type Pcs = KZHK<Bn254>;
-type Sharded = ShardedAegon<Bn254, Pcs, Sha256Hash>;
+type Sharded = ShardedAegon<Bn254, Pcs, EcVrfHash>;
 
 /// Realistic application sizing for this bench:
 /// labels are 12-byte ASCII phone numbers in E.164 form
@@ -545,8 +545,9 @@ fn main() -> ExitCode {
             return ExitCode::from(1);
         },
     };
+    state.set_vrf_prover(VrfProver::from_env());
     let setup_ms = t_setup.elapsed().as_secs_f64() * 1000.0;
-    eprintln!("bench: setup OK in {setup_ms:.1} ms");
+    eprintln!("bench: setup OK in {setup_ms:.1} ms (ECVRF prover attached)");
 
     // Initial bulk-prefill. Anonymous filler that pads the dict to
     // a realistic fill level without going through publish — keeps
@@ -621,7 +622,7 @@ fn main() -> ExitCode {
                 return;
             },
         };
-        let server = CoordinatorServer::<Bn254, Pcs, Sha256Hash>::from_shared(server_state);
+        let server = CoordinatorServer::<Bn254, Pcs, EcVrfHash>::from_shared(server_state);
         if let Err(e) = rt.block_on(server.serve(listen_addr)) {
             eprintln!("error: coordinator gRPC server exited: {e}");
         }

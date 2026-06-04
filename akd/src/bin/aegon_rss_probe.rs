@@ -19,7 +19,7 @@ use std::time::Instant;
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-use akd::aegon::{optimal_kzh_k, Sha256Hash};
+use akd::aegon::{optimal_kzh_k, EcVrfHash};
 use akd::aegon::config::AegonConfig;
 use akd::aegon::server::Aegon;
 use akd_core::aegon_crypto::pcs::kzhk::structs::KZHKConfig;
@@ -30,7 +30,7 @@ use rand_chacha::ChaCha20Rng;
 use std::marker::PhantomData;
 
 type Pcs = akd_core::aegon_crypto::pcs::kzhk::KZHK<Bn254>;
-type SingleShard = Aegon<Bn254, Pcs, Sha256Hash>;
+type SingleShard = Aegon<Bn254, Pcs, EcVrfHash>;
 
 #[derive(Parser, Debug)]
 #[command(

@@ -357,10 +357,19 @@ where
         let start = Instant::now();
         let state = self.state.read().await;
         let commit = state.current_commitment();
+        // When the deployment runs with a VRF prover attached
+        // (`EcVrfHash`), ship the matching public key on the wire so
+        // freshly-connected clients can build a `VrfVerifier`. Empty
+        // for the SHA-256 path.
+        let vrf_pubkey: Vec<u8> = state
+            .vrf_prover()
+            .map(|p| p.public_key().as_bytes().to_vec())
+            .unwrap_or_default();
         drop(state);
         Ok(Response::new(CommitmentResponse {
             commitment: encode(&commit).map_err(err_to_status)?,
             server_processing_micros: start.elapsed().as_micros() as u64,
+            vrf_pubkey,
         }))
     }
 }
@@ -468,13 +477,36 @@ where
             .map_err(|e| AegonError::Config(format!("connect '{}': {e}", cfg.endpoint)))?;
         // Same 1 GiB ceiling as the server side.
         const MAX_MSG_BYTES: usize = 8 * 1024 * 1024 * 1024;
-        let client = CoordinatorServiceClient::new(channel)
+        let mut client = CoordinatorServiceClient::new(channel)
             .max_decoding_message_size(MAX_MSG_BYTES)
             .max_encoding_message_size(MAX_MSG_BYTES);
+
+        // Handshake: fetch the current commitment so we can also
+        // discover the deployment's VRF public key (if any) and
+        // attach it to the verifier context. Without this step a
+        // client connecting to an EcVrfHash-instantiated coordinator
+        // would have a `vrf_verifier: None` ctx and reject every
+        // probe's `vrf_proof` as "VRF verifier missing".
+        let bootstrap_resp = runtime
+            .block_on(async { client.current_commitment(Empty {}).await })
+            .map_err(|s| AegonError::Config(format!("grpc bootstrap current_commitment: {s}")))?
+            .into_inner();
+        let mut verifier_ctx = cfg.verifier_ctx;
+        if !bootstrap_resp.vrf_pubkey.is_empty() {
+            let verifier =
+                super::hash::VrfVerifier::from_public_key_bytes(&bootstrap_resp.vrf_pubkey)
+                    .map_err(|e| {
+                        AegonError::Config(format!(
+                            "deployment advertised an unparseable VRF public key: {e}"
+                        ))
+                    })?;
+            verifier_ctx = verifier_ctx.with_vrf_verifier(verifier);
+        }
+
         Ok(Self {
             runtime: Arc::new(runtime),
             client: Arc::new(AsyncMutex::new(client)),
-            verifier_ctx: cfg.verifier_ctx,
+            verifier_ctx,
             _hash_suite: std::marker::PhantomData,
         })
     }

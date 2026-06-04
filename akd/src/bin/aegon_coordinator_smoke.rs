@@ -22,8 +22,8 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 use akd::aegon::{
-    verify_sharded_lookup, DbSource, Sha256Hash, ShardTransport, ShardedAegon,
-    ShardedAegonConfig, SrsSource,
+    verify_sharded_lookup, DbSource, EcVrfHash, ShardTransport, ShardedAegon,
+    ShardedAegonConfig, SrsSource, VrfProver,
 };
 use akd_core::aegon_crypto::pcs::kzhk::KZHK;
 use ark_bn254::Bn254;
@@ -32,7 +32,7 @@ use clap::Parser;
 use rand_chacha::ChaCha20Rng;
 
 type Pcs = KZHK<Bn254>;
-type Sharded = ShardedAegon<Bn254, Pcs, Sha256Hash>;
+type Sharded = ShardedAegon<Bn254, Pcs, EcVrfHash>;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -141,8 +141,9 @@ fn main() -> ExitCode {
             return ExitCode::from(1);
         },
     };
+    server.set_vrf_prover(VrfProver::from_env());
     let setup_ms = t0.elapsed().as_millis();
-    eprintln!("setup OK in {setup_ms} ms");
+    eprintln!("setup OK in {setup_ms} ms (ECVRF prover attached)");
 
     // Publish a batch.
     let updates: Vec<(Vec<u8>, Vec<u8>)> = (0..args.n_users)
@@ -188,7 +189,7 @@ fn main() -> ExitCode {
             continue;
         }
         let verify_value = if using_db { &db_value } else { value };
-        match verify_sharded_lookup::<Bn254, Pcs, Sha256Hash>(
+        match verify_sharded_lookup::<Bn254, Pcs, EcVrfHash>(
             &ctx, &commit, label, verify_value, &proof,
         ) {
             Ok(true) => {},

@@ -26,3 +26,8 @@ Cargo.lock
 # Generated SRS artifacts — derived from setup_seed + kzh_k, regeneratable,
 # and far too large for git (multi-GB binary files).
 bench-results/srs/
+
+# Divan-fork JSON output: every `cargo bench` run drops one of these in
+# the crate root, named after the bench binary. Regeneratable, noisy.
+akd/*.json
+akd_core/*.json

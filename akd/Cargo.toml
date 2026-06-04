@@ -149,5 +149,9 @@ required-features = ["bench"]
 name = "publish_sweep"
 harness = false
 
+[[bench]]
+name = "ecvrf_microbench"
+harness = false
+
 [build-dependencies]
 tonic-build = "0.12"
