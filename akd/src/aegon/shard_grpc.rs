@@ -188,6 +188,19 @@ where
                 .into(),
         ))
     }
+
+    /// Wipe this shard back to its post-setup empty state without
+    /// regenerating the SRS or dropping the transport. The in-process
+    /// impl calls [`Aegon::clear_dictionary`] (cheap; restores from a
+    /// stashed setup baseline). The default returns `Err` so the
+    /// remote-transport impl, which would need a `ClearDictionary`
+    /// RPC, fails loudly until that RPC is wired up.
+    fn clear_dictionary(&mut self) -> Result<(), AegonError> {
+        Err(AegonError::Config(
+            "clear_dictionary not supported via this transport — wire up the ClearDictionary RPC"
+                .into(),
+        ))
+    }
 }
 
 // ---------- in-process impl: Aegon directly is a ShardHandle -----------
@@ -401,6 +414,10 @@ where
         // legacy — the implementation ignores both (the comment on
         // server.rs:573 spells it out). Pass `DbSource::None` + `0`.
         Aegon::prefill_random(self, &mut rng, count, &super::DbSource::None, 0)
+    }
+
+    fn clear_dictionary(&mut self) -> Result<(), AegonError> {
+        Aegon::clear_dictionary(self)
     }
 
     fn log_capacity(&self) -> usize {
@@ -801,6 +818,20 @@ where
                 .map_err(err_to_status)?;
         }
         Ok(Response::new(ReconfigurePrefillResponse {}))
+    }
+
+    async fn clear_dictionary(
+        &self,
+        _req: Request<Empty>,
+    ) -> Result<Response<Empty>, Status> {
+        let mut aegon = self.aegon.write().await;
+        // Restores from the in-memory `setup_baseline` — see
+        // `Aegon::clear_dictionary` on the server side. Cheap relative
+        // to `reset_state` because the empty-poly commitments are
+        // already stashed rather than re-derived. Fails if a publish
+        // is in flight on this shard.
+        aegon.clear_dictionary().map_err(err_to_status)?;
+        Ok(Response::new(Empty {}))
     }
 }
 
@@ -1321,6 +1352,13 @@ where
         let _ = self.with_retry(move |client| {
             let req = req.clone();
             async move { client.lock().await.reconfigure_prefill(req).await }
+        })?;
+        Ok(())
+    }
+
+    fn clear_dictionary(&mut self) -> Result<(), AegonError> {
+        let _ = self.with_retry(|client| async move {
+            client.lock().await.clear_dictionary(Empty {}).await
         })?;
         Ok(())
     }

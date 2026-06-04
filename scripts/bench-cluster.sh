@@ -131,12 +131,16 @@ MASKING_TAG="aegon-bench-masking"
 BENCH_CLIENT_TAG="aegon-bench-client"
 FIREWALL_BENCH_CLIENT_GRPC="aegon-bench-client-grpc"
 # Tag + label applied to every VM the script creates, signalling
-# to the university SOC scanner that these are short-lived research
-# benchmark workers. Apply BOTH a network tag (some scanners look at
+# to the university SOC scanner which research group owns these
+# benchmark VMs. Apply BOTH a network tag (some scanners look at
 # instance tags) and a label (most security policies filter on labels).
-# Per the SOC ask: use exactly "temporary-worker-vm" as the marker.
-SCANNER_TAG="temporary-worker-vm"
-SCANNER_LABEL="temporary-worker-vm=true"
+#
+# Per the latest SOC ask: use "department:cims-jbonneau-mwalfish-9a0c"
+# as the marker. GCP labels are `key=value`, so the literal label is
+# `department=cims-jbonneau-mwalfish-9a0c`. GCP network tags don't
+# accept `=` or `:`, so the tag carries just the value part.
+SCANNER_TAG="cims-jbonneau-mwalfish-9a0c"
+SCANNER_LABEL="department=cims-jbonneau-mwalfish-9a0c"
 SHARD_PORT=50051
 # Masking server(s): N_MASKING_SERVERS VMs per cluster. Each holds a
 # queue of pre-built `KZHKMaskingPackage`s; background producers
@@ -1512,6 +1516,244 @@ cmd_publish_bench() {
   log "publish-bench complete: $local_out"
 }
 
+# ============================================================
+# migration-bench: K-sweep migration-time benchmark on the cluster.
+# Single coordinator process holds the ShardedAegon across the whole
+# K-sweep; between K's it issues a `ClearDictionary` RPC to every
+# shard (in parallel) so the cluster never restarts. Mirrors the
+# local-mode `scripts/migration-bench.sh` flow.
+#
+# Per-K output: ${LOCAL_MIGRATION_BENCH_DIR}/${MIGRATION_REGIME}_K{K}.json
+# Best-K hint: ${LOCAL_MIGRATION_BENCH_DIR}/${MIGRATION_REGIME}_best_k.txt
+#   — picked by minimum total elapsed_ms across the per-K JSONs.
+#     The publish/lookup benches read this as their warmup batch.
+# ============================================================
+MIGRATION_CHUNK_SIZES="${MIGRATION_CHUNK_SIZES:-16384,65536,262144,1048576}"
+MIGRATION_TARGET_FILL_PERCENT="${MIGRATION_TARGET_FILL_PERCENT:-90}"
+MIGRATION_MILESTONE_FILLS="${MIGRATION_MILESTONE_FILLS:-1,5,10,30,60,90}"
+MIGRATION_TRUE_LOG_CAP="${MIGRATION_TRUE_LOG_CAP:-$(derive_true_log_cap)}"
+# Regime tag — drives the output filename prefix so multiple
+# regimes' results land in the same dir without colliding. Default
+# falls back to "n${N_SHARDS}" so a missing env var still uniquely
+# identifies the run.
+MIGRATION_REGIME="${MIGRATION_REGIME:-n${N_SHARDS}}"
+LOCAL_MIGRATION_BENCH_DIR="${LOCAL_MIGRATION_BENCH_DIR:-/tmp/aegon-migration-bench}"
+
+cmd_migration_bench() {
+  require_project
+  require_power_of_two "$N_SHARDS"
+  mkdir -p "$LOCAL_MIGRATION_BENCH_DIR"
+  dump_bench_config
+  log "  MIGRATION_REGIME       = $MIGRATION_REGIME"
+  log "  MIGRATION_CHUNK_SIZES  = $MIGRATION_CHUNK_SIZES"
+  log "  MIGRATION_TARGET_FILL  = ${MIGRATION_TARGET_FILL_PERCENT}%"
+  log "  MIGRATION_TRUE_LOG_CAP = $MIGRATION_TRUE_LOG_CAP"
+
+  # Build + push the bench binary (mirrors cmd_publish_bench's
+  # Linux/Darwin split).
+  local cargo_features=""
+  if [[ "${TRACING:-0}" == "1" ]]; then
+    cargo_features="--features tracing_instrument"
+  fi
+  local local_bin_dir="$REPO_ROOT/target/release"
+  local remote_bin_dir="$local_bin_dir"
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    command -v docker >/dev/null || die "macOS host needs Docker"
+    docker info >/dev/null 2>&1  || die "Docker daemon unreachable"
+    log "macOS host: building aegon_migration_bench inside Docker"
+    docker run --rm --platform linux/amd64 \
+      -v "$REPO_ROOT:/workspace" -w /workspace \
+      rust:slim-bookworm \
+      bash -c "set -e; \
+        apt-get update >/dev/null && \
+        apt-get install -y --no-install-recommends protobuf-compiler ca-certificates >/dev/null && \
+        cargo build --release -p akd $cargo_features --target x86_64-unknown-linux-gnu \
+          --bin aegon_migration_bench"
+    remote_bin_dir="$REPO_ROOT/target/x86_64-unknown-linux-gnu/release"
+  else
+    log "building aegon_migration_bench (release)"
+    (cd "$REPO_ROOT" && cargo build --release -p akd $cargo_features --bin aegon_migration_bench) >/dev/null
+  fi
+  [[ -x "$remote_bin_dir/aegon_migration_bench" ]] || die "aegon_migration_bench missing"
+
+  local cname; cname="$(coord_name)"
+  log "[$cname] uploading aegon_migration_bench"
+  scp_to "$cname" "$remote_bin_dir/aegon_migration_bench"
+  remote "$cname" "sudo mkdir -p $REMOTE_BIN_DIR && \
+    sudo mv /tmp/aegon_migration_bench $REMOTE_BIN_DIR/ && \
+    sudo chmod +x $REMOTE_BIN_DIR/aegon_migration_bench"
+
+  local shard_csv; shard_csv="$(shard_endpoints_csv)"
+
+  # Wipe the coord DB before the climb so we start from an empty
+  # open-addressing keyspace. The per-K clear_dictionary RPC also
+  # delete_prefix's the coord DB between K's, but the first K still
+  # needs a clean slate.
+  log "[$cname] wiping $COORD_DB_PATH"
+  remote "$cname" "sudo rm -rf $COORD_DB_PATH && sudo mkdir -p $COORD_DB_PATH && sudo chown \$(whoami) $COORD_DB_PATH"
+
+  # Output goes to a per-K dir on the coord. Tar back at the end so
+  # one round-trip carries every JSON.
+  local remote_out_dir="/tmp/aegon-migration-bench"
+  local remote_log="/tmp/aegon-migration-bench.log"
+  local remote_tar="/tmp/aegon-migration-bench.tar"
+  local local_log="$LOCAL_MIGRATION_BENCH_DIR/${LOCAL_OUT_NAME_PREFIX:-}${MIGRATION_REGIME}.log"
+  local local_tar="$LOCAL_MIGRATION_BENCH_DIR/${LOCAL_OUT_NAME_PREFIX:-}${MIGRATION_REGIME}.tar"
+  : > "$local_log"
+
+  local unit="aegon-migration-bench"
+  local me; me="$(whoami)"
+  log "[$cname] starting aegon_migration_bench as systemd unit '$unit' (distributed, K=$MIGRATION_CHUNK_SIZES, target_fill=${MIGRATION_TARGET_FILL_PERCENT}%)"
+  remote "$cname" "
+    sudo systemctl reset-failed $unit 2>/dev/null || true
+    sudo systemctl stop $unit 2>/dev/null || true
+    rm -rf $remote_out_dir $remote_log $remote_tar
+    mkdir -p $remote_out_dir
+    mkdir -p /home/$me/aegon-run
+    sudo systemd-run \
+      --unit=$unit \
+      --description='Aegon migration-bench' \
+      --uid=$me --gid=$me \
+      --working-directory=/home/$me/aegon-run \
+      --setenv=HOME=/home/$me \
+      --setenv=AEGON_ROCKSDB_STATS_DUMP_SEC=${AEGON_ROCKSDB_STATS_DUMP_SEC:-60} \
+      --setenv=AEGON_ROCKSDB_BLOCK_CACHE_GB=${AEGON_ROCKSDB_BLOCK_CACHE_GB:-16} \
+      --setenv=AEGON_ROCKSDB_PARALLELISM=${AEGON_ROCKSDB_PARALLELISM:-16} \
+      --property=LimitNOFILE=1048576 \
+      bash -c '
+        cd /home/$me/aegon-run
+        $REMOTE_BIN_DIR/aegon_migration_bench \
+          --shard-log-capacity $SHARD_LOG_CAPACITY \
+          --true-log-capacity $MIGRATION_TRUE_LOG_CAP \
+          --kzh-k $KZH_K \
+          --n-shards $N_SHARDS \
+          --endpoints $shard_csv \
+          --target-fill-percent $MIGRATION_TARGET_FILL_PERCENT \
+          --chunk-sizes $MIGRATION_CHUNK_SIZES \
+          --milestone-fills $MIGRATION_MILESTONE_FILLS \
+          --setup-seed $SETUP_SEED \
+          --prefill-seed $PREFILL_SEED \
+          --db-path $COORD_DB_PATH \
+          --private \
+          --out-template $remote_out_dir/${MIGRATION_REGIME}_K{K}.json > $remote_log 2>&1
+      '
+    echo LAUNCHED
+  "
+
+  # Same SSH-survivable poll loop as cmd_publish_bench.
+  log "[$cname] polling $unit + streaming $remote_log -> $local_log"
+  local printed_bytes=0
+  local poll_rc=0
+  while true; do
+    local total_bytes
+    total_bytes="$(timeout 60 gcloud compute ssh "$cname" \
+      --zone="$ZONE" --tunnel-through-iap --strict-host-key-checking=no --quiet \
+      --ssh-flag="-o UserKnownHostsFile=/dev/null" \
+      --ssh-flag="-o StrictHostKeyChecking=no" \
+      --ssh-flag="-o LogLevel=ERROR" \
+      --command="wc -c < $remote_log 2>/dev/null || echo 0" 2>/dev/null \
+      | tr -d '[:space:]')"
+    total_bytes="${total_bytes:-0}"
+    if [[ "$total_bytes" =~ ^[0-9]+$ ]] && (( total_bytes > printed_bytes )); then
+      timeout 60 gcloud compute ssh "$cname" \
+        --zone="$ZONE" --tunnel-through-iap --strict-host-key-checking=no --quiet \
+        --ssh-flag="-o UserKnownHostsFile=/dev/null" \
+        --ssh-flag="-o StrictHostKeyChecking=no" \
+        --ssh-flag="-o LogLevel=ERROR" \
+        --command="tail -c +$((printed_bytes + 1)) $remote_log 2>/dev/null" 2>/dev/null \
+        | tee -a "$local_log" >&2
+      printed_bytes=$total_bytes
+    fi
+    local active
+    active="$(timeout 60 gcloud compute ssh "$cname" \
+      --zone="$ZONE" --tunnel-through-iap --strict-host-key-checking=no --quiet \
+      --ssh-flag="-o UserKnownHostsFile=/dev/null" \
+      --ssh-flag="-o StrictHostKeyChecking=no" \
+      --ssh-flag="-o LogLevel=ERROR" \
+      --command="systemctl is-active $unit 2>/dev/null || true" 2>/dev/null \
+      | tr -d '[:space:]')"
+    if [[ "$active" != "active" && "$active" != "activating" ]]; then
+      log "[$cname] $unit final state: '$active' ($total_bytes bytes printed)"
+      local exit_code
+      exit_code="$(timeout 60 gcloud compute ssh "$cname" \
+        --zone="$ZONE" --tunnel-through-iap --strict-host-key-checking=no --quiet \
+        --ssh-flag="-o UserKnownHostsFile=/dev/null" \
+        --ssh-flag="-o StrictHostKeyChecking=no" \
+        --ssh-flag="-o LogLevel=ERROR" \
+        --command="systemctl show $unit --property=ExecMainStatus --value 2>/dev/null || echo 0" 2>/dev/null \
+        | tr -d '[:space:]')"
+      poll_rc="${exit_code:-1}"
+      break
+    fi
+    sleep 60
+  done
+
+  # Flush final bytes the poll missed.
+  local total_bytes_final
+  total_bytes_final="$(timeout 60 gcloud compute ssh "$cname" \
+    --zone="$ZONE" --tunnel-through-iap --strict-host-key-checking=no --quiet \
+    --ssh-flag="-o UserKnownHostsFile=/dev/null" \
+    --ssh-flag="-o StrictHostKeyChecking=no" \
+    --ssh-flag="-o LogLevel=ERROR" \
+    --command="wc -c < $remote_log 2>/dev/null || echo 0" 2>/dev/null \
+    | tr -d '[:space:]')"
+  total_bytes_final="${total_bytes_final:-0}"
+  if [[ "$total_bytes_final" =~ ^[0-9]+$ ]] && (( total_bytes_final > printed_bytes )); then
+    timeout 60 gcloud compute ssh "$cname" \
+      --zone="$ZONE" --tunnel-through-iap --strict-host-key-checking=no --quiet \
+      --ssh-flag="-o UserKnownHostsFile=/dev/null" \
+      --ssh-flag="-o StrictHostKeyChecking=no" \
+      --ssh-flag="-o LogLevel=ERROR" \
+      --command="tail -c +$((printed_bytes + 1)) $remote_log 2>/dev/null" 2>/dev/null \
+      | tee -a "$local_log" >&2
+  fi
+
+  # Tar every per-K JSON together for one-shot fetch — even on
+  # failure, the bench may have flushed partial results before
+  # crashing, and we want them.
+  log "tarring $remote_out_dir -> $local_tar (regardless of exit status)"
+  remote "$cname" "tar -cf $remote_tar -C $remote_out_dir . 2>/dev/null || true"
+  scp_from "$cname" "$remote_tar" "$local_tar" 2>/dev/null \
+    || log "WARN: scp_from $remote_tar failed (no output produced or coord unreachable)"
+  if [[ -f "$local_tar" ]]; then
+    (cd "$LOCAL_MIGRATION_BENCH_DIR" && tar -xf "$local_tar") \
+      || log "WARN: tar -x $local_tar failed"
+  fi
+
+  # Pick best K by minimum total elapsed_ms — same logic as
+  # scripts/migration-bench.sh::pick_best_k. Pure-bash JSON probe;
+  # the per-K JSON's "total.elapsed_ms" is unique within the file.
+  local best_k="" best_ms=""
+  shopt -s nullglob
+  for f in "$LOCAL_MIGRATION_BENCH_DIR/${MIGRATION_REGIME}_K"*.json; do
+    local k ms
+    k="$(grep -oE '"chunk_size":[[:space:]]*[0-9]+' "$f" | head -1 | grep -oE '[0-9]+')"
+    ms="$(grep -A2 '"total":' "$f" | grep -oE '"elapsed_ms":[[:space:]]*[0-9.]+' | head -1 | grep -oE '[0-9.]+')"
+    if [[ -z "$k" || -z "$ms" ]]; then
+      log "  warn: could not parse k/elapsed_ms from $f, skipping"
+      continue
+    fi
+    if [[ -z "$best_ms" ]] || awk "BEGIN { exit !($ms < $best_ms) }"; then
+      best_k="$k"
+      best_ms="$ms"
+    fi
+  done
+  shopt -u nullglob
+  if [[ -n "$best_k" ]]; then
+    echo "$best_k" > "$LOCAL_MIGRATION_BENCH_DIR/${MIGRATION_REGIME}_best_k.txt"
+    log "  picked K=$best_k (total elapsed=${best_ms} ms) for regime=$MIGRATION_REGIME"
+    log "  wrote $LOCAL_MIGRATION_BENCH_DIR/${MIGRATION_REGIME}_best_k.txt"
+  else
+    log "  warn: no per-K JSONs found, not writing best_k.txt"
+  fi
+
+  if (( poll_rc != 0 )); then
+    log "[$cname] aegon_migration_bench exited with status $poll_rc"
+    return "$poll_rc"
+  fi
+  log "migration-bench complete: $LOCAL_MIGRATION_BENCH_DIR/${MIGRATION_REGIME}_K*.json"
+}
+
 cmd_bench() {
   require_project
   require_power_of_two "$N_SHARDS"
@@ -1986,6 +2228,23 @@ usage: $0 <subcommand>
                    under LOCAL_PUBLISH_BENCH_DIR (default
                    /tmp/aegon-publish-bench). Bootstrap between
                    stages should hit cache and be near-instant.
+  migration-bench  K-sweep migration-time bench against the live
+                   cluster. ONE bench-binary process holds the
+                   ShardedAegon across the whole K-sweep; between
+                   K's it fans a `ClearDictionary` RPC out to every
+                   shard (preserves SRS + DB handle + cluster
+                   topology). Emits one JSON per K under
+                   LOCAL_MIGRATION_BENCH_DIR (default
+                   /tmp/aegon-migration-bench) named
+                   `\${MIGRATION_REGIME}_K{K}.json`, plus a
+                   `\${MIGRATION_REGIME}_best_k.txt` picking the
+                   fastest K for downstream
+                   PUBLISH_WARMUP_BATCH_SIZE selection.
+                   Env: MIGRATION_CHUNK_SIZES (default
+                   16384,65536,262144,1048576), MIGRATION_REGIME
+                   (default n\${N_SHARDS}),
+                   MIGRATION_TARGET_FILL_PERCENT (default 90),
+                   MIGRATION_TRUE_LOG_CAP (auto-derived).
   start-shards     Start all shards once with --prefill-count 0 (per-fill
                    prefill is now driven via the ReconfigurePrefill RPC
                    issued by the bench binaries themselves). Run once
@@ -2039,6 +2298,7 @@ main() {
     bootstrap)      cmd_bootstrap ;;
     setup-bench)    cmd_setup_bench ;;
     publish-bench)  cmd_publish_bench ;;
+    migration-bench) cmd_migration_bench ;;
     start-shards)   cmd_start_shards ;;
     start-masking)  cmd_start_masking ;;
     bench)          cmd_bench ;;

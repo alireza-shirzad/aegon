@@ -69,6 +69,14 @@ service ShardService {
   // benches used to do between fill_percent stages.
   rpc ReconfigurePrefill(ReconfigurePrefillRequest)
       returns (ReconfigurePrefillResponse);
+
+  // Wipe this shard back to its post-setup empty state without
+  // touching the SRS, the gRPC transport, or any backing DB files.
+  // Restores from the stashed `setup_baseline` so commitments are
+  // bit-identical to the post-`init` state. Used between K's in
+  // the migration bench's K-sweep to amortize SRS generation across
+  // every K. Fails if a publish is in flight.
+  rpc ClearDictionary(Empty) returns (Empty);
 }
 
 message ReconfigurePrefillRequest {

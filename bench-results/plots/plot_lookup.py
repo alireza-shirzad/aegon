@@ -25,6 +25,8 @@ from matplotlib.ticker import LogLocator, ScalarFormatter
 REPO_ROOT = Path(__file__).resolve().parents[2]
 LOOKUP_DIR = REPO_ROOT / "bench-results" / "lookup"
 SMALL_LOOKUP_DIR = REPO_ROOT / "bench-results" / "_remote-small" / "lookup"
+PUBLISH_DIR = REPO_ROOT / "bench-results" / "publish"
+MIGRATION_DIR = REPO_ROOT / "bench-results" / "migration"
 PLOTS_DIR = REPO_ROOT / "bench-results" / "plots"
 
 # Lookup operations and the JSON field stems for each.
@@ -288,6 +290,76 @@ def _extract_concurrency_sweep(lvl: dict) -> tuple[str, list[dict]]:
     if not isinstance(block, dict):
         return "", []
     return str(block.get("lookup_kind", "")), list(block.get("samples", []))
+
+
+@dataclass
+class MigrationMilestone:
+    """One (fill_percent, elapsed) point from a migration-bench run."""
+    fill_percent: float
+    users_migrated: int
+    elapsed_ms: float
+    throughput_users_per_sec: float
+
+
+@dataclass
+class MigrationRun:
+    """All milestones from a single (regime, K) migration run."""
+    regime: str
+    chunk_size: int
+    target_fill_percent: float
+    total_users: int
+    total_elapsed_ms: float
+    total_throughput_users_per_sec: float
+    milestones: list[MigrationMilestone]
+
+
+def load_migration_runs(regime: str) -> list[MigrationRun]:
+    """Load every `{regime}_K*.json` from `bench-results/migration/`.
+    Returns the runs sorted by chunk_size. Empty if no runs exist
+    (migration bench never executed for this regime)."""
+    runs: list[MigrationRun] = []
+    if not MIGRATION_DIR.exists():
+        return runs
+    for path in sorted(MIGRATION_DIR.glob(f"{regime}_K*.json")):
+        try:
+            with path.open() as fh:
+                d = json.load(fh)
+        except json.JSONDecodeError:
+            continue
+        params = d.get("params", {})
+        total = d.get("total", {})
+        ms_list = d.get("milestones", [])
+        milestones = [
+            MigrationMilestone(
+                fill_percent=float(m.get("fill_percent", 0)),
+                users_migrated=int(m.get("users_migrated", 0)),
+                elapsed_ms=float(m.get("elapsed_ms", 0.0)),
+                throughput_users_per_sec=float(m.get("throughput_users_per_sec", 0.0)),
+            )
+            for m in ms_list
+        ]
+        runs.append(MigrationRun(
+            regime=regime,
+            chunk_size=int(params.get("chunk_size", 0)),
+            target_fill_percent=float(params.get("target_fill_percent", 0)),
+            total_users=int(total.get("users_migrated", 0)),
+            total_elapsed_ms=float(total.get("elapsed_ms", 0.0)),
+            total_throughput_users_per_sec=float(total.get("throughput_users_per_sec", 0.0)),
+            milestones=sorted(milestones, key=lambda m: m.fill_percent),
+        ))
+    runs.sort(key=lambda r: r.chunk_size)
+    return runs
+
+
+def load_best_k(regime: str) -> int | None:
+    """Read `{regime}_best_k.txt` written by migration-bench.sh."""
+    f = MIGRATION_DIR / f"{regime}_best_k.txt"
+    if not f.exists():
+        return None
+    try:
+        return int(f.read_text().strip())
+    except ValueError:
+        return None
 
 
 def load_small() -> list[LevelStats]:
@@ -1768,6 +1840,115 @@ def plot_latency_knee(
     return out_path
 
 
+def plot_migration_curves(
+    small_runs: list[MigrationRun],
+    medium_runs: list[MigrationRun],
+    large_runs: list[MigrationRun],
+    subset: tuple[str, ...],
+) -> Path:
+    """Migration-time vs target-fill, one curve per chunk size K,
+    one panel per regime in `subset`. The fastest K's endpoint is
+    annotated so the reader can see the throughput-optimal K at a
+    glance. If `bench-results/migration/{regime}_best_k.txt` exists,
+    its K is also marked in the panel title.
+
+    No median/max variant — each milestone is a single timed point
+    (no per-sample distribution).
+    """
+    all_runs = {"small": small_runs, "medium": medium_runs, "large": large_runs}
+    selected: list[tuple[str, list[MigrationRun]]] = []
+    for name in subset:
+        runs = all_runs.get(name, [])
+        if runs:
+            selected.append((name, runs))
+
+    out_path = PLOTS_DIR / f"migration_curves{_subset_suffix(subset)}.pdf"
+    if not selected:
+        fig, ax = plt.subplots(figsize=(6.0, 3.0))
+        ax.text(
+            0.5, 0.5,
+            "No migration data found.\n"
+            "Run `scripts/migration-bench.sh` first.",
+            transform=ax.transAxes, ha="center", va="center",
+            fontsize=10, color="#555555",
+        )
+        ax.set_axis_off()
+        fig.tight_layout()
+        fig.savefig(out_path, format="pdf", bbox_inches="tight")
+        plt.close(fig)
+        return out_path
+
+    fig, axes = plt.subplots(1, len(selected), figsize=(3.5 * len(selected), 3.2), sharey=False)
+    if len(selected) == 1:
+        axes = [axes]
+
+    # Within each panel, color curves by chunk size — use the same
+    # Spectral palette as the fill-colored plots, but anchored on the
+    # K values present (smallest K = red, largest K = blue). Sweep
+    # ranges differ per regime so the mapping is per-panel.
+    cmap = plt.get_cmap("Spectral")
+
+    for ax, (regime_name, runs) in zip(axes, selected):
+        ks_sorted = sorted({r.chunk_size for r in runs})
+        n_ks = len(ks_sorted)
+        if n_ks <= 1:
+            k_to_color_pos = {ks_sorted[0]: 0.0} if ks_sorted else {}
+        else:
+            k_to_color_pos = {
+                k: i / (n_ks - 1) for i, k in enumerate(ks_sorted)
+            }
+
+        # Identify the fastest K in this regime (smallest total
+        # elapsed). Used for the highlighted endpoint annotation.
+        fastest = min(runs, key=lambda r: r.total_elapsed_ms)
+        best_k_file = load_best_k(regime_name)
+
+        for run in runs:
+            if not run.milestones:
+                continue
+            xs = np.array([m.fill_percent for m in run.milestones])
+            ys_s = np.array([m.elapsed_ms / 1000.0 for m in run.milestones])
+            color = cmap(k_to_color_pos[run.chunk_size])
+            is_fastest = run.chunk_size == fastest.chunk_size
+            ax.plot(
+                xs, ys_s,
+                color=color,
+                marker="o",
+                linewidth=2.4 if is_fastest else 1.6,
+                markersize=6 if is_fastest else 5,
+                alpha=1.0 if is_fastest else 0.85,
+                label=f"K={run.chunk_size:,}",
+            )
+
+        # Annotate the fastest K's endpoint with the cumulative time
+        # and throughput at the highest milestone — this is the
+        # paper-quotable migration number.
+        if fastest.milestones:
+            last = fastest.milestones[-1]
+            ax.annotate(
+                f"  best K={fastest.chunk_size:,}\n"
+                f"  {last.elapsed_ms / 1000.0:.1f}s @ {last.fill_percent:g}%\n"
+                f"  {fastest.total_throughput_users_per_sec / 1000.0:.1f}k users/s",
+                xy=(last.fill_percent, last.elapsed_ms / 1000.0),
+                xycoords="data", fontsize=8, color="#222222",
+                ha="left", va="top",
+            )
+
+        title = regime_name
+        if best_k_file is not None:
+            title = f"{regime_name} (best_k.txt: K={best_k_file:,})"
+        ax.set_title(title, fontsize=10)
+        ax.set_xlabel("target fill (% of true capacity)")
+        ax.set_ylabel("elapsed time from epoch 0 (s)")
+        ax.grid(True, which="both", alpha=0.3)
+        ax.legend(frameon=False, loc="upper left", fontsize=8)
+
+    fig.tight_layout()
+    fig.savefig(out_path, format="pdf", bbox_inches="tight")
+    plt.close(fig)
+    return out_path
+
+
 def main() -> None:
     PLOTS_DIR.mkdir(parents=True, exist_ok=True)
     small = load_small()
@@ -1776,15 +1957,29 @@ def main() -> None:
     if not small and not medium and not large:
         raise SystemExit(f"no lookup JSONs found under {LOOKUP_DIR}")
 
-    # Every figure is rendered FOUR times — once per (subset, agg)
-    # pair. SMALL+MEDIUM vs LARGE keeps the qualitatively-different
-    # large regime from compressing small/medium's y-axis. MEDIAN vs
-    # MAX produces the typical-case and worst-case views of the same
-    # data. The output filenames are suffixed accordingly:
+    # Migration runs live in a separate JSON tree
+    # (`bench-results/migration/{regime}_K*.json`) populated by
+    # `scripts/migration-bench.sh`. Loaded once, fed only to the
+    # migration-curves plot — every other plot consumes `LevelStats`
+    # from the lookup JSONs as before.
+    small_runs = load_migration_runs("small")
+    medium_runs = load_migration_runs("medium")
+    large_runs = load_migration_runs("large")
+
+    # Every per-data-point figure is rendered FOUR times — once per
+    # (subset, agg) pair. SMALL+MEDIUM vs LARGE keeps the
+    # qualitatively-different large regime from compressing
+    # small/medium's y-axis. MEDIAN vs MAX produces the typical-case
+    # and worst-case views of the same data. The output filenames
+    # are suffixed accordingly:
     #   <name>_small_medium.pdf       <- median, small+medium
     #   <name>_small_medium_max.pdf   <- max,    small+medium
     #   <name>_large.pdf              <- median, large
     #   <name>_large_max.pdf          <- max,    large
+    #
+    # The migration-curves plot has no per-sample variance (each
+    # milestone is one timed crossing), so it's emitted once per
+    # subset, no agg variant.
     written: list[Path] = []
     for agg in (AGG_MEDIAN, AGG_MAX):
         for subset in (SMALL_MEDIUM, LARGE_ONLY):
@@ -1792,6 +1987,8 @@ def main() -> None:
             written.append(plot_publish_vs_batch(small, medium, large, subset, agg))
             written.append(plot_audit_vs_fill(small, medium, large, subset, agg))
             written.append(plot_latency_knee(small, medium, large, subset, agg))
+    for subset in (SMALL_MEDIUM, LARGE_ONLY):
+        written.append(plot_migration_curves(small_runs, medium_runs, large_runs, subset))
 
     for p in written:
         size = p.stat().st_size

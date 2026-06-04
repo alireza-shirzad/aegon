@@ -56,7 +56,6 @@ use super::types::{
 /// set_retain_epoch_polys(false)`. The commitments are always kept —
 /// `epoch_commitment(epoch)` (used by `verify_sharded_invariance`) only
 /// reads those four fields.
-#[derive(Clone)]
 struct EpochSnapshot<E: Pairing, P: AegonPcs<E>> {
     index_commitment: P::Commitment,
     value_commitment: P::Commitment,
@@ -90,6 +89,32 @@ struct EpochSnapshot<E: Pairing, P: AegonPcs<E>> {
     /// SRS, where the audit verifies the chain equation exactly. See
     /// [`super::sigma`] for the protocol details.
     audit_value_blinding_proof: Option<crate::aegon::sigma::BlindingEqProof<E, P>>,
+}
+
+// Manual Clone — the natural `#[derive(Clone)]` would bound `P: Clone`,
+// which is wrong: we only need the *associated types* we actually
+// store (`P::Commitment`, `P::State`, `P::HidingScalar`) to be Clone.
+impl<E: Pairing, P: AegonPcs<E>> Clone for EpochSnapshot<E, P>
+where
+    P::Commitment: Clone,
+    P::State: Clone,
+    P::HidingScalar: Clone,
+{
+    fn clone(&self) -> Self {
+        Self {
+            index_commitment: self.index_commitment.clone(),
+            value_commitment: self.value_commitment.clone(),
+            rand_index_poly: self.rand_index_poly.clone(),
+            rand_index_commitment: self.rand_index_commitment.clone(),
+            rand_index_state: self.rand_index_state.clone(),
+            rand_value_poly: self.rand_value_poly.clone(),
+            rand_value_commitment: self.rand_value_commitment.clone(),
+            rand_value_state: self.rand_value_state.clone(),
+            value_tau: self.value_tau.clone(),
+            rand_value_tau: self.rand_value_tau.clone(),
+            audit_value_blinding_proof: self.audit_value_blinding_proof.clone(),
+        }
+    }
 }
 
 pub struct Aegon<E, P, H = Sha256Hash>
@@ -164,7 +189,33 @@ where
     // publish() wrapper sets and consumes this in one call.
     pending: Option<PendingPublish<E, P>>,
 
+    // Snapshot of the initial post-setup state (zero polynomials, the
+    // commitments of those zero polynomials, and the epoch-0
+    // EpochSnapshot). Stashed at `init_with_arc` so `clear_dictionary`
+    // can restore "as if just created" state without rebuilding the
+    // SRS or replaying setup randomness. Memory cost is one extra
+    // copy of the four PCS states per shard — significant at large
+    // log_capacity but bounded.
+    setup_baseline: SetupBaseline<E, P>,
+
     _phantom: PhantomData<H>,
+}
+
+/// Stashed at setup time so [`Aegon::clear_dictionary`] can restore
+/// the post-setup state in O(state-copy) without redoing the SRS-time
+/// `commit_with_aux*` calls. Holds the initial (zero-polynomial)
+/// commitments and PCS states for both data and rand sides, plus the
+/// canonical epoch-0 [`EpochSnapshot`].
+struct SetupBaseline<E: Pairing, P: AegonPcs<E>> {
+    index_commitment: P::Commitment,
+    index_state: P::State,
+    value_commitment: P::Commitment,
+    value_state: P::State,
+    rand_index_commitment: P::Commitment,
+    rand_index_state: P::State,
+    rand_value_commitment: P::Commitment,
+    rand_value_state: P::State,
+    epoch_zero_snapshot: EpochSnapshot<E, P>,
 }
 
 /// Self-contained snapshot of an [`Aegon`]'s live state — everything
@@ -426,6 +477,23 @@ where
             None
         };
 
+        // Stash a deep copy of the post-init state so `clear_dictionary`
+        // can restore "as if just created" later without re-running the
+        // SRS or commit_with_aux. The epoch-0 snapshot we just built is
+        // exactly what a fresh setup would have inserted, so it is the
+        // canonical baseline.
+        let setup_baseline = SetupBaseline {
+            index_commitment: index_commitment.clone(),
+            index_state: index_state.clone(),
+            value_commitment: value_commitment.clone(),
+            value_state: value_state.clone(),
+            rand_index_commitment: rand_index_commitment.clone(),
+            rand_index_state: rand_index_state.clone(),
+            rand_value_commitment: rand_value_commitment.clone(),
+            rand_value_state: rand_value_state.clone(),
+            epoch_zero_snapshot: epoch_history.get(&0).expect("epoch 0 just inserted").clone(),
+        };
+
         Ok(Self {
             log_capacity,
             dims,
@@ -451,6 +519,7 @@ where
             epoch_history,
             retain_epoch_polys: true,
             pending: None,
+            setup_baseline,
             _phantom: PhantomData,
         })
     }
@@ -619,6 +688,56 @@ where
             None
         };
 
+        // Rebuild a baseline from fresh zero polys so `clear_dictionary`
+        // remains callable on a restored shard. The taus baked into the
+        // baseline are NOT the original setup-time taus — those aren't
+        // in the checkpoint — so a clear-after-restore produces a
+        // valid-but-not-bit-identical "empty" state. That's the right
+        // semantics: the bench harness only cares about "fresh empty",
+        // not about replaying the original tau distribution.
+        let baseline_zero_poly =
+            || SparseMultilinearExtension::from_evaluations(log_capacity, &[]);
+        let baseline_index_poly = baseline_zero_poly();
+        let baseline_value_poly = baseline_zero_poly();
+        let baseline_rand_index_poly = baseline_zero_poly();
+        let baseline_rand_value_poly = baseline_zero_poly();
+        let (baseline_index_commitment, baseline_index_state) =
+            commit_with_aux_non_zk::<E, P>(&prover_param, &baseline_index_poly)?;
+        let (baseline_value_commitment, baseline_value_state) =
+            commit_with_aux_value_side::<E, P>(&prover_param, &baseline_value_poly)?;
+        let (baseline_rand_index_commitment, baseline_rand_index_state) =
+            commit_with_aux_non_zk::<E, P>(&prover_param, &baseline_rand_index_poly)?;
+        let (baseline_rand_value_commitment, baseline_rand_value_state) =
+            commit_with_aux_value_side::<E, P>(&prover_param, &baseline_rand_value_poly)?;
+        let (baseline_value_tau, baseline_rand_value_tau) = extract_value_taus::<E, P>(
+            &prover_param,
+            &baseline_value_state,
+            &baseline_rand_value_state,
+        );
+        let setup_baseline = SetupBaseline {
+            index_commitment: baseline_index_commitment.clone(),
+            index_state: baseline_index_state.clone(),
+            value_commitment: baseline_value_commitment.clone(),
+            value_state: baseline_value_state.clone(),
+            rand_index_commitment: baseline_rand_index_commitment.clone(),
+            rand_index_state: baseline_rand_index_state.clone(),
+            rand_value_commitment: baseline_rand_value_commitment.clone(),
+            rand_value_state: baseline_rand_value_state.clone(),
+            epoch_zero_snapshot: EpochSnapshot {
+                index_commitment: baseline_index_commitment,
+                value_commitment: baseline_value_commitment,
+                rand_index_poly: Some(baseline_rand_index_poly),
+                rand_index_commitment: baseline_rand_index_commitment,
+                rand_index_state: Some(baseline_rand_index_state),
+                rand_value_poly: Some(baseline_rand_value_poly),
+                rand_value_commitment: baseline_rand_value_commitment,
+                rand_value_state: Some(baseline_rand_value_state),
+                value_tau: baseline_value_tau,
+                rand_value_tau: baseline_rand_value_tau,
+                audit_value_blinding_proof: None,
+            },
+        };
+
         Ok(Self {
             log_capacity,
             dims,
@@ -644,6 +763,7 @@ where
             epoch_history,
             retain_epoch_polys: true,
             pending: None,
+            setup_baseline,
             _phantom: PhantomData,
         })
     }
@@ -800,6 +920,62 @@ where
         // this signature purely so callers don't have to change
         // shape; it's unused by `prefill_with_random`.
         let _ = (db_source, filled_slots, shard_id);
+        Ok(())
+    }
+
+    /// Reset the dictionary to its post-setup state without rebuilding
+    /// the SRS, dropping the gRPC connections, or removing any backing
+    /// database. After this call, the shard is byte-identical to the
+    /// state it had at the end of `init_with_arc`:
+    ///
+    /// - `epoch = 0`
+    /// - All four polys are zero
+    /// - All four commitments + PCS states match the post-init values
+    ///   stashed in `setup_baseline`
+    /// - `epoch_history` carries only the canonical epoch-0 snapshot
+    /// - `r_index = r_value = 0`, `pending = None`, `label_table` empty
+    ///
+    /// The SRS, prover/verifier params, masking client, and VRF prover
+    /// are all left untouched. Memory cost: one PCS-state restore +
+    /// the epoch_history rebuild.
+    ///
+    /// Use case: bench harnesses that need to compare a sweep parameter
+    /// (chunk size, batching strategy, etc.) starting from the same
+    /// empty dictionary, without paying the SRS-generation cost of a
+    /// fresh `Aegon::setup`. The shard's gRPC layer can expose this
+    /// as a `ClearDictionary` RPC so the coordinator can fan it out
+    /// across a live cluster.
+    ///
+    /// Errors only if a publish is in flight. Callers must ensure no
+    /// concurrent publish is running.
+    pub fn clear_dictionary(&mut self) -> Result<(), AegonError> {
+        if self.pending.is_some() {
+            return Err(AegonError::Config(
+                "clear_dictionary called with a pending publish".into(),
+            ));
+        }
+        let zero_poly =
+            || SparseMultilinearExtension::from_evaluations(self.log_capacity, &[]);
+        self.epoch = 0;
+        self.index_poly = zero_poly();
+        self.value_poly = zero_poly();
+        self.rand_index_poly = zero_poly();
+        self.rand_value_poly = zero_poly();
+        self.index_commitment = self.setup_baseline.index_commitment.clone();
+        self.index_state = self.setup_baseline.index_state.clone();
+        self.value_commitment = self.setup_baseline.value_commitment.clone();
+        self.value_state = self.setup_baseline.value_state.clone();
+        self.rand_index_commitment = self.setup_baseline.rand_index_commitment.clone();
+        self.rand_index_state = self.setup_baseline.rand_index_state.clone();
+        self.rand_value_commitment = self.setup_baseline.rand_value_commitment.clone();
+        self.rand_value_state = self.setup_baseline.rand_value_state.clone();
+        self.r_index = E::ScalarField::zero();
+        self.r_value = E::ScalarField::zero();
+        self.label_table.clear();
+        self.epoch_history.clear();
+        self.epoch_history
+            .insert(0, self.setup_baseline.epoch_zero_snapshot.clone());
+        self.pending = None;
         Ok(())
     }
 

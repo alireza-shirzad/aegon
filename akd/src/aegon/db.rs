@@ -159,6 +159,14 @@ pub(crate) trait Db: Send + Sync {
     /// one round-trip. Returns each element as raw bytes (canonical-
     /// serialized `StoredValueHistoryEntry`); caller decodes.
     fn lrange(&self, key: &[u8], start: isize, stop: isize) -> Result<Vec<Vec<u8>>, AegonError>;
+    /// Bulk-delete every key beginning with `prefix`. The DB handle,
+    /// any column families, and any in-front caching layers are kept
+    /// open. RocksDB implements via a single `delete_range` over
+    /// `[prefix, next_prefix)`; Redis paginates via `SCAN` + batched
+    /// `DEL`. Used by `ShardedAegon::clear_dictionary` to wipe the
+    /// entire `aegon:` keyspace between benchmark iterations without
+    /// rebuilding the SRS or tearing down the cluster.
+    fn delete_prefix(&self, prefix: &[u8]) -> Result<(), AegonError>;
 }
 
 /// Redis-backed implementation. One connection behind a `Mutex` —
@@ -269,6 +277,48 @@ impl Db for RedisDb {
         let mut conn = self.lock_conn()?;
         conn.lrange::<&[u8], Vec<Vec<u8>>>(key, start, stop)
             .map_err(|e| AegonError::Database(format!("LRANGE: {e}")))
+    }
+
+    fn delete_prefix(&self, prefix: &[u8]) -> Result<(), AegonError> {
+        // Redis has no `KEYS prefix*` we'd want to use in production
+        // (O(N) and blocking), so SCAN cursor-iterates a chunk at a
+        // time and we DEL each chunk in a non-atomic pipeline. The
+        // pattern is a glob match against `prefix*`, with `*` and `?`
+        // and `[` escaped so they don't expand against caller-supplied
+        // bytes.
+        let mut conn = self.lock_conn()?;
+        let mut pattern: Vec<u8> = Vec::with_capacity(prefix.len() + 1);
+        for &b in prefix {
+            if matches!(b, b'*' | b'?' | b'[' | b'\\') {
+                pattern.push(b'\\');
+            }
+            pattern.push(b);
+        }
+        pattern.push(b'*');
+        let mut cursor: u64 = 0;
+        loop {
+            let (next, keys): (u64, Vec<Vec<u8>>) = redis::cmd("SCAN")
+                .arg(cursor)
+                .arg("MATCH")
+                .arg(&pattern[..])
+                .arg("COUNT")
+                .arg(1024_u64)
+                .query(&mut *conn)
+                .map_err(|e| AegonError::Database(format!("SCAN: {e}")))?;
+            if !keys.is_empty() {
+                let mut pipe = redis::pipe();
+                for k in &keys {
+                    pipe.del::<&[u8]>(k).ignore();
+                }
+                pipe.query::<()>(&mut *conn)
+                    .map_err(|e| AegonError::Database(format!("DEL batch ({}): {e}", keys.len())))?;
+            }
+            if next == 0 {
+                break;
+            }
+            cursor = next;
+        }
+        Ok(())
     }
 }
 
@@ -600,6 +650,65 @@ impl Db for RocksDb {
         Ok(list[lo..hi].to_vec())
     }
 
+    fn delete_prefix(&self, prefix: &[u8]) -> Result<(), AegonError> {
+        // RocksDB's `delete_range(start, end)` deletes every key in
+        // `[start, end)`. `end` here is the lexicographically next
+        // string after the prefix — found by incrementing the last
+        // byte that isn't already `0xff`. An all-`0xff` prefix has no
+        // strict upper bound; we fall back to a prefix-iterator + DEL
+        // scan, which is slower but never wrong.
+        let next_prefix = lex_next_prefix(prefix);
+        if let Some(end) = next_prefix {
+            let mut wb = rocksdb::WriteBatch::default();
+            wb.delete_range(prefix, &end);
+            let mut write_opts = rocksdb::WriteOptions::default();
+            write_opts.disable_wal(true);
+            self.inner.write_opt(wb, &write_opts).map_err(|e| {
+                AegonError::Database(format!("rocksdb delete_range({}): {e}", prefix.len()))
+            })?;
+        } else {
+            let iter = self.inner.prefix_iterator(prefix);
+            let mut wb = rocksdb::WriteBatch::default();
+            for kv in iter {
+                let (k, _v) = kv
+                    .map_err(|e| AegonError::Database(format!("rocksdb prefix-scan: {e}")))?;
+                if !k.starts_with(prefix) {
+                    break;
+                }
+                wb.delete(&k);
+            }
+            let mut write_opts = rocksdb::WriteOptions::default();
+            write_opts.disable_wal(true);
+            self.inner.write_opt(wb, &write_opts).map_err(|e| {
+                AegonError::Database(format!("rocksdb prefix-delete fallback: {e}"))
+            })?;
+        }
+        // Cheap async compaction over the cleared range so the next
+        // read-side iterator doesn't have to walk thousands of newly-
+        // tombstoned SST entries. Bounded to the deleted range so it
+        // doesn't touch any other live data.
+        if let Some(end) = lex_next_prefix(prefix) {
+            self.inner.compact_range(Some(prefix), Some(end.as_slice()));
+        }
+        Ok(())
+    }
+
+}
+
+/// Lexicographically next prefix after `prefix`. Returns `None` when
+/// every byte in `prefix` is `0xff` (no strict upper bound exists).
+/// Powers RocksDB's `delete_range(prefix, end)` upper bound — `end`
+/// must be exclusive and ordered after every `prefix + suffix` key.
+fn lex_next_prefix(prefix: &[u8]) -> Option<Vec<u8>> {
+    let mut out = prefix.to_vec();
+    while let Some(last) = out.last_mut() {
+        if *last < 0xff {
+            *last += 1;
+            return Some(out);
+        }
+        out.pop();
+    }
+    None
 }
 
 /// Redis-style negative-index normalization: `-1` → `len-1`,

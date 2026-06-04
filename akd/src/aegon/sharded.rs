@@ -1514,6 +1514,87 @@ where
         Ok(())
     }
 
+    /// Wipe the entire sharded dictionary back to its post-setup
+    /// state without rebuilding the SRS, tearing down any gRPC
+    /// connections, or removing the backing database files. After
+    /// the call returns:
+    ///
+    ///   - every (in-process) shard is byte-identical to the state
+    ///     it had right after [`Self::setup`] — see
+    ///     [`Aegon::clear_dictionary`];
+    ///   - the coordinator's `epoch = 0`, FS chain scalars are zero,
+    ///     `epoch_commits` carries only the freshly-rebuilt epoch-0
+    ///     entry, and the in-memory `routing` table is empty;
+    ///   - the coord-side DB (when configured) has every `aegon:`
+    ///     key dropped via a `delete_range`-style sweep, and the
+    ///     fresh epoch-0 `aegon:coord:state` + `aegon:coord:epoch_commit:0`
+    ///     are re-written so a downstream restart sees the empty
+    ///     dictionary, not the pre-clear one.
+    ///
+    /// Use case: migration-bench's K-sweep. Each K starts from a
+    /// truly empty dictionary, but we don't want to pay SRS
+    /// generation + cluster respin per K. One process, one cluster,
+    /// `clear_dictionary` between iterations.
+    ///
+    /// Returns `Err` when any shard is remote (gRPC transport): the
+    /// `ClearDictionary` RPC isn't wired up yet, so the per-shard
+    /// trait method errors out and we surface that.
+    pub fn clear_dictionary(&mut self) -> Result<(), AegonError> {
+        for shard in self.shards.iter_mut() {
+            shard.clear_dictionary()?;
+        }
+        let per_shard: Vec<EpochCommitment<E, P>> = self
+            .shards
+            .iter()
+            .map(|s| s.current_commitment())
+            .collect();
+        let refreshed = ShardedEpochCommitment::<E, P>::with_per_shard(0, per_shard);
+        self.epoch = 0;
+        self.r_index = E::ScalarField::zero();
+        self.r_value = E::ScalarField::zero();
+        self.epoch_commits.clear();
+        self.epoch_commits.push(refreshed.clone());
+        self.routing.clear();
+        if let Some(db) = &self.db {
+            // Single `delete_range` over [`aegon:`, `aegon;`) wipes
+            // every key the coord ever wrote. Cheaper than enumerating
+            // keyspaces (`aegon:value:`, `aegon:routing:`, …) and
+            // forward-compatible — any new `aegon:` keyspace added
+            // later is cleared by the same call without code changes.
+            db.delete_prefix(b"aegon:")?;
+            // Re-persist the fresh epoch-0 state. A restart between
+            // bench iterations would otherwise see no `coord:state`
+            // and treat the DB as never-initialized, which is fine
+            // for the no-restart bench flow but defends recovery in
+            // case the bench harness crashes mid-iteration.
+            let mut state_bytes: Vec<u8> = Vec::new();
+            self.epoch
+                .serialize_compressed(&mut state_bytes)
+                .map_err(|e| AegonError::Database(format!("serialize epoch: {e}")))?;
+            self.r_index
+                .serialize_compressed(&mut state_bytes)
+                .map_err(|e| AegonError::Database(format!("serialize r_index: {e}")))?;
+            self.r_value
+                .serialize_compressed(&mut state_bytes)
+                .map_err(|e| AegonError::Database(format!("serialize r_value: {e}")))?;
+            let mut commit_bytes: Vec<u8> = Vec::new();
+            refreshed
+                .serialize_compressed(&mut commit_bytes)
+                .map_err(|e| AegonError::Database(format!("serialize epoch commit: {e}")))?;
+            db.write_atomic(&[
+                DbOp::Set {
+                    key: key_coord_state().to_vec(),
+                    value: state_bytes,
+                },
+                DbOp::Set {
+                    key: key_epoch_commit(0),
+                    value: commit_bytes,
+                },
+            ])?;
+        }
+        Ok(())
+    }
+
     /// Apply a batch of updates and produce a new epoch.
     ///
     /// Six steps, each delegated to a private helper:

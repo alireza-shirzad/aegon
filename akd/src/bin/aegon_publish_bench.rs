@@ -131,6 +131,10 @@ struct Args {
     /// warmup finishes in a sensible time at large fill levels.
     /// Pick a value at the high end of `--batch-sizes` for the
     /// regime (e.g. 2048 for small/medium, 131072 for large).
+    ///
+    /// In a two-phase bench workflow this is set by reading
+    /// `bench-results/migration/{regime}_best_k.txt`, which the
+    /// migration bench writes after sweeping K.
     #[arg(long, default_value_t = 16384)]
     warmup_batch_size: u64,
 

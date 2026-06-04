@@ -26,6 +26,11 @@
 #   SETUP_SEED       SRS RNG seed (default 42)
 #   PREFILL_SEED     prefill RNG seed base (default 1)
 #   SKIP_SMALL       set to 1 to skip the small regime
+#   WARMUP_BATCH_SIZE_OVERRIDE
+#                    explicit value for `--warmup-batch-size`. If unset
+#                    the script reads `bench-results/migration/small_best_k.txt`
+#                    (or the regime-specific equivalent for the medium/large
+#                    cluster path) and falls back to 16384 if absent.
 #
 # True capacity for any regime is the shard polynomial size divided
 # by `OVER_PROVISIONING_FACTOR` (= 4); see `akd/src/aegon/config.rs`.
@@ -38,6 +43,29 @@ SAMPLES_PER_BATCH="${SAMPLES_PER_BATCH:-3}"
 SETUP_SEED="${SETUP_SEED:-42}"
 PREFILL_SEED="${PREFILL_SEED:-1}"
 mkdir -p "$OUT_DIR"
+
+# Per-regime best-K artifact written by `scripts/migration-bench.sh`.
+# When present, downstream warmup uses it; otherwise fall back to 16384.
+REPO_ROOT_FOR_K="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+MIGRATION_DIR="$REPO_ROOT_FOR_K/bench-results/migration"
+read_best_k_or_default() {
+  local regime="$1"
+  local default_k="$2"
+  if [[ -n "${WARMUP_BATCH_SIZE_OVERRIDE:-}" ]]; then
+    echo "$WARMUP_BATCH_SIZE_OVERRIDE"
+    return
+  fi
+  local f="$MIGRATION_DIR/${regime}_best_k.txt"
+  if [[ -r "$f" ]]; then
+    local k
+    k="$(tr -dc '0-9' < "$f")"
+    if [[ -n "$k" ]]; then
+      echo "$k"
+      return
+    fi
+  fi
+  echo "$default_k"
+}
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 log() { echo "[$(date +%H:%M:%S)] $*"; }
@@ -53,7 +81,9 @@ run_one() {
   local true_log_capacity="$3"
   local batch_sizes="$4"
   local out="$OUT_DIR/${label}.json"
-  log "$label: shard_log_capacity=$shard_log_capacity true_log_capacity=$true_log_capacity batches=$batch_sizes"
+  local warmup_k
+  warmup_k="$(read_best_k_or_default "$label" 16384)"
+  log "$label: shard_log_capacity=$shard_log_capacity true_log_capacity=$true_log_capacity batches=$batch_sizes warmup_batch_size=$warmup_k"
   "$PB" \
     --shard-log-capacity "$shard_log_capacity" \
     --true-log-capacity "$true_log_capacity" \
@@ -63,6 +93,7 @@ run_one() {
     --samples-per-batch "$SAMPLES_PER_BATCH" \
     --setup-seed "$SETUP_SEED" \
     --prefill-seed "$PREFILL_SEED" \
+    --warmup-batch-size "$warmup_k" \
     --private \
     --out "$out"
   log "$label: wrote $out"
