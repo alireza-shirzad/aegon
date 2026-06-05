@@ -48,7 +48,8 @@ pub mod proto {
 use proto::shard_service_client::ShardServiceClient;
 use proto::shard_service_server::{ShardService, ShardServiceServer};
 use proto::{
-    CommitmentResponse, Empty, OpenResponse, PublishPhase1Request, PublishPhase1Response,
+    CommitmentResponse, Empty, FindLabelSlotRequest, FindLabelSlotResponse, OpenResponse,
+    PublishBatchRequest, PublishBatchResponse, PublishPhase1Request, PublishPhase1Response,
     PublishPhase2Request, PublishPhase2Response, ReconfigurePrefillRequest,
     ReconfigurePrefillResponse, SlotEpochRequest, SlotOccupiedResponse, SlotRequest,
 };
@@ -198,6 +199,43 @@ where
     fn clear_dictionary(&mut self) -> Result<(), AegonError> {
         Err(AegonError::Config(
             "clear_dictionary not supported via this transport — wire up the ClearDictionary RPC"
+                .into(),
+        ))
+    }
+
+    /// Two-layer routing's publish entry. Takes raw `(label, value)`
+    /// tuples already routed to this shard by the coord's first-layer
+    /// `H_shard`. The shard runs its own second-layer `H_slot` open-
+    /// addressing internally to pick slots, then runs the phase-1
+    /// crypto pipeline. Returns commitments + per-label placements +
+    /// optional fullness signal — see [`PublishBatchOutcome`] for the
+    /// fields. The default `Err` keeps remote transports honest:
+    /// every concrete `ShardHandle` impl must opt in.
+    fn publish_batch(
+        &mut self,
+        _batch: &[(super::types::Label, super::types::Value)],
+    ) -> Result<super::server::PublishBatchOutcome<E, P>, AegonError>
+    where
+        P::Commitment: Clone,
+    {
+        Err(AegonError::Config(
+            "publish_batch not supported via this transport — wire up the PublishBatch RPC"
+                .into(),
+        ))
+    }
+
+    /// Two-layer routing's lookup entry: walk the intra-shard
+    /// `H_slot(slot_ctr, label)` probe trail and report the slot that
+    /// stores this label (and the `slot_ctr` it took to reach it), or
+    /// `None` if the label is not in this shard. Mirrors
+    /// [`Aegon::find_label_slot`]. The default `Err` keeps remote
+    /// transports honest — every concrete impl must opt in.
+    fn find_label_slot(
+        &self,
+        _label: &super::types::Label,
+    ) -> Result<Option<(Vec<bool>, u64)>, AegonError> {
+        Err(AegonError::Config(
+            "find_label_slot not supported via this transport — wire up the FindLabelSlot RPC"
                 .into(),
         ))
     }
@@ -418,6 +456,23 @@ where
 
     fn clear_dictionary(&mut self) -> Result<(), AegonError> {
         Aegon::clear_dictionary(self)
+    }
+
+    fn publish_batch(
+        &mut self,
+        batch: &[(super::types::Label, super::types::Value)],
+    ) -> Result<super::server::PublishBatchOutcome<E, P>, AegonError>
+    where
+        P::Commitment: Clone,
+    {
+        Aegon::publish_batch(self, batch)
+    }
+
+    fn find_label_slot(
+        &self,
+        label: &super::types::Label,
+    ) -> Result<Option<(Vec<bool>, u64)>, AegonError> {
+        Ok(Aegon::find_label_slot(self, label))
     }
 
     fn log_capacity(&self) -> usize {
@@ -832,6 +887,46 @@ where
         // is in flight on this shard.
         aegon.clear_dictionary().map_err(err_to_status)?;
         Ok(Response::new(Empty {}))
+    }
+
+    async fn publish_batch(
+        &self,
+        req: Request<PublishBatchRequest>,
+    ) -> Result<Response<PublishBatchResponse>, Status> {
+        let batch: Vec<(super::types::Label, super::types::Value)> =
+            decode(&req.into_inner().batch_bytes).map_err(err_to_status)?;
+        let mut aegon = self.aegon.write().await;
+        let outcome = aegon.publish_batch(&batch).map_err(err_to_status)?;
+        let is_full = outcome.fullness_proof.is_some();
+        let fullness_proof = outcome.fullness_proof.unwrap_or_default();
+        Ok(Response::new(PublishBatchResponse {
+            index_commitment: encode(&outcome.index_commitment).map_err(err_to_status)?,
+            value_commitment: encode(&outcome.value_commitment).map_err(err_to_status)?,
+            placed_count: outcome.placed_count as u64,
+            placements_bytes: encode(&outcome.placements).map_err(err_to_status)?,
+            is_full,
+            fullness_proof,
+        }))
+    }
+
+    async fn find_label_slot(
+        &self,
+        req: Request<FindLabelSlotRequest>,
+    ) -> Result<Response<FindLabelSlotResponse>, Status> {
+        let label = req.into_inner().label;
+        let aegon = self.aegon.read().await;
+        match Aegon::find_label_slot(&aegon, &label) {
+            Some((slot_bits, slot_ctr)) => Ok(Response::new(FindLabelSlotResponse {
+                found: true,
+                slot_bits: encode(&slot_bits).map_err(err_to_status)?,
+                slot_ctr,
+            })),
+            None => Ok(Response::new(FindLabelSlotResponse {
+                found: false,
+                slot_bits: Vec::new(),
+                slot_ctr: 0,
+            })),
+        }
     }
 }
 
@@ -1361,6 +1456,65 @@ where
             client.lock().await.clear_dictionary(Empty {}).await
         })?;
         Ok(())
+    }
+
+    fn publish_batch(
+        &mut self,
+        batch: &[(super::types::Label, super::types::Value)],
+    ) -> Result<super::server::PublishBatchOutcome<E, P>, AegonError>
+    where
+        P::Commitment: Clone,
+    {
+        let req = PublishBatchRequest {
+            batch_bytes: encode(&batch.to_vec())?,
+        };
+        let resp = self.runtime.block_on(async {
+            self.client
+                .lock()
+                .await
+                .publish_batch(req)
+                .await
+                .map_err(status_to_err)
+        })?;
+        let inner = resp.into_inner();
+        let index_commitment: P::Commitment = decode(&inner.index_commitment)?;
+        let value_commitment: P::Commitment = decode(&inner.value_commitment)?;
+        let placements: Vec<super::server::ShardPlacement> = decode(&inner.placements_bytes)?;
+        let fullness_proof = if inner.is_full {
+            Some(inner.fullness_proof)
+        } else {
+            None
+        };
+        Ok(super::server::PublishBatchOutcome {
+            placements,
+            placed_count: inner.placed_count as usize,
+            index_commitment,
+            value_commitment,
+            fullness_proof,
+        })
+    }
+
+    fn find_label_slot(
+        &self,
+        label: &super::types::Label,
+    ) -> Result<Option<(Vec<bool>, u64)>, AegonError> {
+        let req = FindLabelSlotRequest {
+            label: label.clone(),
+        };
+        let resp = self.runtime.block_on(async {
+            self.client
+                .lock()
+                .await
+                .find_label_slot(req)
+                .await
+                .map_err(status_to_err)
+        })?;
+        let inner = resp.into_inner();
+        if !inner.found {
+            return Ok(None);
+        }
+        let slot_bits: Vec<bool> = decode(&inner.slot_bits)?;
+        Ok(Some((slot_bits, inner.slot_ctr)))
     }
 }
 

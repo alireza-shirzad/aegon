@@ -29,9 +29,9 @@ use tonic::{Request, Response, Status};
 use super::error::AegonError;
 use super::hash::{HashSuite, Sha256Hash};
 use super::sharded::{
-    verify_lookup_history, verify_lookup_label, verify_lookup_label_history, verify_lookup_value,
-    LabelSlot, ShardedAegon, ShardedEpochCommitment, ShardedLabelHistory, ShardedLabelProof,
-    ShardedValueHistory, ShardedValueProof, ShardedVerifierContext,
+    verify_lookup_history, verify_lookup_label_history, verify_lookup_label_two_layer,
+    verify_lookup_value, LabelSlot, ShardedAegon, ShardedEpochCommitment, ShardedLabelHistory,
+    ShardedLabelProofTwoLayer, ShardedValueHistory, ShardedValueProof, ShardedVerifierContext,
 };
 use super::types::{AegonPcs, EpochCommitment, Label, Value};
 
@@ -249,7 +249,7 @@ where
         let state = Arc::clone(&self.state);
         let result = tokio::task::spawn_blocking(move || {
             let state = state.blocking_read();
-            state.lookup_label(&label)
+            state.lookup_label_two_layer(&label)
         })
         .await
         .map_err(|e| Status::internal(format!("lookup_label join: {e}")))?;
@@ -553,8 +553,10 @@ where
         })?;
         let inner = resp.into_inner();
         let server_slot: LabelSlot = decode(&inner.slot)?;
-        let proof: ShardedLabelProof<E, P> = decode(&inner.proof)?;
-        let verified_slot = verify_lookup_label::<E, P, H>(&self.verifier_ctx, commit, label, &proof)?;
+        let proof: ShardedLabelProofTwoLayer<E, P> = decode(&inner.proof)?;
+        let verified_slot = verify_lookup_label_two_layer::<E, P, H>(
+            &self.verifier_ctx, commit, label, &proof,
+        )?;
         // The server's claimed slot must match what falls out of the
         // verified chain — otherwise the server is hinting at a slot
         // its own proof doesn't actually prove.

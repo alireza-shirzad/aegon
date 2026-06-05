@@ -252,9 +252,9 @@ fn run_one_climb(
                 (phone_label(idx), rsa_value(idx))
             })
             .collect();
-        server.publish(&updates).map_err(|e| {
+        server.publish_two_layer(&updates).map_err(|e| {
             format!(
-                "publish error at current_count={current_count} chunk={chunk}: {e}"
+                "publish_two_layer error at current_count={current_count} chunk={chunk}: {e}"
             )
         })?;
         current_count += chunk;

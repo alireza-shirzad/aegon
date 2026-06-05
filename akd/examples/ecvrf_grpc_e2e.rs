@@ -76,7 +76,9 @@ async fn main() {
         .collect();
     let updates_for_publish = updates.clone();
     let commit_epoch = {
-        let commit = state.publish(&updates_for_publish).expect("publish");
+        let commit = state
+            .publish_two_layer(&updates_for_publish)
+            .expect("publish_two_layer");
         commit.epoch
     };
     println!("  published {} labels @ epoch {commit_epoch}.", updates.len());

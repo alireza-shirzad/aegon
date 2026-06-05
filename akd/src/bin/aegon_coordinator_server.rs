@@ -252,7 +252,7 @@ fn main() -> ExitCode {
             })
             .collect();
         let t = Instant::now();
-        match state.publish(&updates) {
+        match state.publish_two_layer(&updates) {
             Ok(_commit) => eprintln!(
                 "coordinator: seeded {} labels in {:.1} ms",
                 args.seed_batch_size,

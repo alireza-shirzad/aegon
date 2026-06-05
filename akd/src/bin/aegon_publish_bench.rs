@@ -324,7 +324,7 @@ fn main() -> ExitCode {
                         (phone_label(idx), rsa_value(idx))
                     })
                     .collect();
-                match server.publish(&updates) {
+                match server.publish_two_layer(&updates) {
                     Ok(_) => {},
                     Err(e) => {
                         eprintln!("[publish-bench] warmup publish error: {e}");
@@ -379,7 +379,7 @@ fn main() -> ExitCode {
                     })
                     .collect();
                 let t = Instant::now();
-                let commit = match server.publish(&updates) {
+                let commit = match server.publish_two_layer(&updates) {
                     Ok(c) => c,
                     Err(e) => {
                         eprintln!(

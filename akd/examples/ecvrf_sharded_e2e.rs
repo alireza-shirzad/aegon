@@ -19,8 +19,8 @@
 //! coexist cleanly.
 
 use akd::aegon::{
-    verify_lookup_label, verify_lookup_value, DbSource, EcVrfHash, Sha256Hash, ShardTransport,
-    ShardedAegon, ShardedAegonConfig, VrfProver, BENCH_VRF_SEED,
+    verify_lookup_label_two_layer, verify_lookup_value, DbSource, EcVrfHash, Sha256Hash,
+    ShardTransport, ShardedAegon, ShardedAegonConfig, VrfProver, BENCH_VRF_SEED,
 };
 use akd_core::aegon_crypto::pcs::kzhk::KZHK;
 use ark_bn254::Bn254;
@@ -58,7 +58,7 @@ fn run_ecvrf_path() {
     let updates: Vec<(Vec<u8>, Vec<u8>)> = (0..6)
         .map(|i| (format!("alice-{i}").into_bytes(), format!("pk-{i}").into_bytes()))
         .collect();
-    let commit = server.publish(&updates).expect("publish");
+    let commit = server.publish_two_layer(&updates).expect("publish_two_layer");
     println!("  published {} labels @ epoch {}.", updates.len(), commit.epoch);
 
     let ctx = server.sharded_verifier_context();
@@ -69,19 +69,30 @@ fn run_ecvrf_path() {
 
     let mut verified = 0usize;
     for (label, value) in &updates {
-        let (_db_value, _full_proof) = server.lookup(label).expect("lookup");
-        let (slot, label_proof) = server.lookup_label(label).expect("lookup_label");
-        // Sanity: every probe carries an 80-byte VRF proof.
-        for (i, probe) in label_proof.probes.iter().enumerate() {
+        let (_db_value, _full_proof) = server.lookup_two_layer(label).expect("lookup_two_layer");
+        let (slot, label_proof) = server
+            .lookup_label_two_layer(label)
+            .expect("lookup_label_two_layer");
+        // Sanity: every probe carries an 80-byte VRF proof — both
+        // the inter-shard route trail and the intra-shard slot trail.
+        for (i, p) in label_proof.route.iter().enumerate() {
             assert_eq!(
-                probe.vrf_proof.len(),
+                p.vrf_proof.len(),
                 80,
-                "probe {i} for {label:?}: vrf_proof length should be 80 (RFC 9381)"
+                "route[{i}] for {label:?}: vrf_proof length should be 80 (RFC 9381)"
             );
         }
-        let recovered =
-            verify_lookup_label::<Bn254, Pcs, EcVrfHash>(&ctx, &commit, label, &label_proof)
-                .expect("verify_lookup_label accepts honest VRF proofs");
+        for (i, p) in label_proof.slots.iter().enumerate() {
+            assert_eq!(
+                p.vrf_proof.len(),
+                80,
+                "slot[{i}] for {label:?}: vrf_proof length should be 80 (RFC 9381)"
+            );
+        }
+        let recovered = verify_lookup_label_two_layer::<Bn254, Pcs, EcVrfHash>(
+            &ctx, &commit, label, &label_proof,
+        )
+        .expect("verify_lookup_label_two_layer accepts honest VRF proofs");
         assert_eq!(recovered, slot, "recovered slot must match server's slot");
         let value_proof = server.lookup_value(&slot).expect("lookup_value");
         let ok = verify_lookup_value::<Bn254, Pcs, EcVrfHash>(
@@ -97,28 +108,34 @@ fn run_ecvrf_path() {
     }
     println!("  verified {verified}/{} label+value openings (ECVRF).", updates.len());
 
-    // ---- Negative test: an unrelated key must NOT verify. ----
-    let evil_prover = VrfProver::from_seed(b"a-totally-different-32-byte-seed");
-    let mut evil_server: ShardedAegon<Bn254, Pcs, EcVrfHash> =
-        ShardedAegon::<Bn254, Pcs, EcVrfHash>::setup(
-            &mut ChaCha20Rng::seed_from_u64(0xA5A5),
-            &cfg,
-        )
-        .expect("setup evil_server");
-    evil_server.set_vrf_prover(evil_prover);
-    let _ = evil_server.publish(&updates).expect("publish evil");
-    let (_, evil_proof) = evil_server.lookup_label(&updates[0].0).expect("lookup_label evil");
-    let res = verify_lookup_label::<Bn254, Pcs, EcVrfHash>(&ctx, &commit, &updates[0].0, &evil_proof);
+    // ---- Negative test: a verifier with the wrong public key
+    // rejects honest proofs from the legitimate server. The
+    // two-layer routing model couples the COORD's per-instance
+    // prover to the SHARD's deployment-wide `H::h_slot` key (they
+    // must match for publish/lookup to round-trip), so the negative
+    // case lives on the VERIFIER side: an unrelated public key
+    // can't validate any honest VRF proof.
+    use akd::aegon::VrfVerifier;
+    let (label, _value) = &updates[0];
+    let (_, honest_proof) = server
+        .lookup_label_two_layer(label)
+        .expect("lookup_label_two_layer honest");
+    let wrong_prover = VrfProver::from_seed(b"a-totally-different-32-byte-seed");
+    let mut wrong_ctx = ctx.clone();
+    wrong_ctx.vrf_verifier = Some(VrfVerifier::new(wrong_prover.public_key().clone()));
+    let res = verify_lookup_label_two_layer::<Bn254, Pcs, EcVrfHash>(
+        &wrong_ctx, &commit, label, &honest_proof,
+    );
     assert!(
         matches!(res, Err(_)),
-        "proofs from a different VRF key MUST be rejected, got {:?}",
+        "honest proofs MUST be rejected under a different verifier key, got {:?}",
         res
     );
-    println!("  proof from a wrong-key prover: REJECTED ✓");
+    println!("  honest proof under a wrong-key verifier: REJECTED ✓");
 }
 
 fn run_sha256_path() {
-    println!("\n── SHA-256 legacy path ──");
+    println!("\n── SHA-256 path ──");
     let mut rng = ChaCha20Rng::seed_from_u64(0xA5A5);
     let cfg = build_cfg(12, 1);
     let mut server: ShardedAegon<Bn254, Pcs, Sha256Hash> =
@@ -127,7 +144,7 @@ fn run_sha256_path() {
     let updates: Vec<(Vec<u8>, Vec<u8>)> = (0..6)
         .map(|i| (format!("bob-{i}").into_bytes(), format!("pk-{i}").into_bytes()))
         .collect();
-    let commit = server.publish(&updates).expect("publish");
+    let commit = server.publish_two_layer(&updates).expect("publish_two_layer");
 
     let ctx = server.sharded_verifier_context();
     assert!(
@@ -136,16 +153,27 @@ fn run_sha256_path() {
     );
 
     for (label, value) in &updates {
-        let (slot, label_proof) = server.lookup_label(label).expect("lookup_label");
-        for probe in &label_proof.probes {
+        let (slot, label_proof) = server
+            .lookup_label_two_layer(label)
+            .expect("lookup_label_two_layer");
+        // SHA-256 deployment: bits are publicly computable, so no
+        // VRF proofs ride either trail.
+        for p in &label_proof.route {
             assert!(
-                probe.vrf_proof.is_empty(),
-                "Sha256Hash path: probe.vrf_proof must be empty"
+                p.vrf_proof.is_empty(),
+                "Sha256Hash path: route vrf_proof must be empty"
             );
         }
-        let recovered =
-            verify_lookup_label::<Bn254, Pcs, Sha256Hash>(&ctx, &commit, label, &label_proof)
-                .expect("verify_lookup_label legacy path");
+        for p in &label_proof.slots {
+            assert!(
+                p.vrf_proof.is_empty(),
+                "Sha256Hash path: slot vrf_proof must be empty"
+            );
+        }
+        let recovered = verify_lookup_label_two_layer::<Bn254, Pcs, Sha256Hash>(
+            &ctx, &commit, label, &label_proof,
+        )
+        .expect("verify_lookup_label_two_layer");
         let value_proof = server.lookup_value(&slot).expect("lookup_value");
         let ok = verify_lookup_value::<Bn254, Pcs, Sha256Hash>(
             &ctx,

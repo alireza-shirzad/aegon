@@ -50,15 +50,16 @@ pub use server::Aegon;
 pub use sigma::BlindingEqProof;
 pub use sharded::{
     build_merkle_path, build_merkle_root_and_paths, merkle_root, probe_at,
-    rederive_sharded_fs_scalars, verify_lookup_history, verify_lookup_label,
-    verify_lookup_label_history, verify_lookup_value, verify_merkle_path,
-    verify_sharded_consistency, verify_sharded_invariance, verify_sharded_lookup, EpochDigest,
-    FreshnessAttestation, FreshnessAttestationLabel, LabelSlot, ShardTransport, ShardedAegon,
-    ShardedAegonConfig, ShardedAegonConfigBuilder, ShardedConsistencyProof,
-    ShardedEpochCommitment, ShardedLabelHistory, ShardedLabelProof, ShardedLookupProof,
-    ShardedProbe, ShardedRandPair, ShardedValueHistory, ShardedValueProof,
-    ShardedVerifierContext, SrsSource, StoredLabelPlacement, StoredValueHistoryEntry,
-    VerifiedLookupHistory, VerifiedLookupLabelHistory, HISTORY_WINDOW,
+    rederive_sharded_fs_scalars, verify_lookup_history, verify_lookup_label_history,
+    verify_lookup_label_two_layer, verify_lookup_value, verify_merkle_path,
+    verify_sharded_consistency_two_layer, verify_sharded_invariance,
+    verify_sharded_lookup_two_layer, EpochDigest, FreshnessAttestation,
+    FreshnessAttestationLabel, LabelSlot, ShardRoutingProbe, ShardSlotProbe, ShardSlotRandPair,
+    ShardTransport, ShardedAegon, ShardedAegonConfig, ShardedAegonConfigBuilder,
+    ShardedConsistencyProofTwoLayer, ShardedEpochCommitment, ShardedLabelHistory,
+    ShardedLabelProofTwoLayer, ShardedLookupProofTwoLayer, ShardedValueHistory,
+    ShardedValueProof, ShardedVerifierContext, SrsSource, StoredLabelPlacement,
+    StoredValueHistoryEntry, VerifiedLookupHistory, VerifiedLookupLabelHistory, HISTORY_WINDOW,
 };
 pub use types::{
     AegonPcs, AuditState, ConsistencyProof, EpochCommitment, HistoryOpeningEntry, HistoryOpenings,

@@ -140,13 +140,12 @@ async fn consistency_proof_holds_across_idle_epochs() {
 
     let s1 = directory.epoch_commitment(3).await.expect("e3 retained");
 
-    let (lookup_proof, _) = directory.lookup(label.clone()).await.expect("lookup");
-    let expected_ctr0 = aegon_facade::decode_ctr0(&lookup_proof).expect("decode ctr0");
+    let (_lookup_proof, _) = directory.lookup(label.clone()).await.expect("lookup");
     let proof: ConsistencyProof = directory
         .consistency_proof(&label, 1)
         .await
         .expect("consistency");
-    let ok = aegon_facade::verify_consistency(&ctx, &s0, &s1, &label, expected_ctr0, &proof)
+    let ok = aegon_facade::verify_consistency(&ctx, &s0, &s1, &label, &proof)
         .expect("verify_consistency");
     assert!(ok);
 }

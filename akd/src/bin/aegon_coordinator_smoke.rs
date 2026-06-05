@@ -22,7 +22,7 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 use akd::aegon::{
-    verify_sharded_lookup, DbSource, EcVrfHash, ShardTransport, ShardedAegon,
+    verify_sharded_lookup_two_layer, DbSource, EcVrfHash, ShardTransport, ShardedAegon,
     ShardedAegonConfig, SrsSource, VrfProver,
 };
 use akd_core::aegon_crypto::pcs::kzhk::KZHK;
@@ -150,7 +150,7 @@ fn main() -> ExitCode {
         .map(|i| (format!("user-{i}").into_bytes(), format!("v-{i}").into_bytes()))
         .collect();
     let t0 = Instant::now();
-    let commit = match server.publish(&updates) {
+    let commit = match server.publish_two_layer(&updates) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("error: publish failed: {e}");
@@ -173,7 +173,7 @@ fn main() -> ExitCode {
     let t0 = Instant::now();
     let mut failures = 0usize;
     for (label, value) in &updates {
-        let (db_value, proof) = match server.lookup(label) {
+        let (db_value, proof) = match server.lookup_two_layer(label) {
             Ok(p) => p,
             Err(e) => {
                 eprintln!("error: lookup {label:?} failed: {e}");
@@ -189,12 +189,12 @@ fn main() -> ExitCode {
             continue;
         }
         let verify_value = if using_db { &db_value } else { value };
-        match verify_sharded_lookup::<Bn254, Pcs, EcVrfHash>(
+        match verify_sharded_lookup_two_layer::<Bn254, Pcs, EcVrfHash>(
             &ctx, &commit, label, verify_value, &proof,
         ) {
             Ok(true) => {},
             Ok(false) => {
-                eprintln!("error: verify_sharded_lookup REJECTED for {label:?}");
+                eprintln!("error: verify_sharded_lookup_two_layer REJECTED for {label:?}");
                 failures += 1;
             },
             Err(e) => {

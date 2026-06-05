@@ -117,6 +117,59 @@ where
     }
 }
 
+/// Per-label placement record produced by [`Aegon::publish_batch`].
+/// Identifies, for one label that this shard successfully placed in
+/// the current batch, the final `(slot_bits, slot_ctr)` reached by
+/// the second-layer `H_slot` open-addressing walk. The coord uses
+/// this to build its lookup-time routing answer; the verifier uses
+/// `slot_ctr` to re-derive the same probe trail.
+#[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
+pub struct ShardPlacement {
+    /// The original label, copied through so the coord can pair
+    /// placements with the input batch order.
+    pub label: Label,
+    /// Boolean coordinates of the slot inside this shard's
+    /// polynomial — length `log_capacity`.
+    pub slot_bits: Vec<bool>,
+    /// The probe counter at which the walk landed on this slot.
+    /// `0` for a first-probe success (the common case at low fill).
+    pub slot_ctr: u64,
+    /// `true` when this batch was the first time the label was
+    /// placed in this shard (empty slot reached); `false` when the
+    /// label was already at this slot and this batch is a value-only
+    /// update (re-publish). The coord uses this to decide whether
+    /// to write a fresh `aegon:label_placement:` record and a new
+    /// LPUSH into `aegon:value_history:`, or just the LPUSH.
+    pub was_new: bool,
+}
+
+/// Outcome of [`Aegon::publish_batch`]. Carries the same commitment
+/// pair the legacy phase-1 returned, plus the per-label placement
+/// records and an optional fullness signal for the coord.
+#[derive(Clone, Debug)]
+pub struct PublishBatchOutcome<E: Pairing, P: AegonPcs<E>>
+where
+    P::Commitment: Clone,
+{
+    /// Successfully placed labels, in input order. Length equals
+    /// `placed_count`.
+    pub placements: Vec<ShardPlacement>,
+    /// Number of labels the shard accepted before either finishing
+    /// the batch or reporting full. `input_batch[..placed_count]`
+    /// succeeded; `input_batch[placed_count..]` (if any) must be
+    /// re-routed by the coord around this shard.
+    pub placed_count: usize,
+    /// Post-phase-1 index polynomial commitment.
+    pub index_commitment: P::Commitment,
+    /// Post-phase-1 value polynomial commitment.
+    pub value_commitment: P::Commitment,
+    /// `Some(bytes)` when the shard ran out of addressable slots
+    /// while processing this batch. Placeholder bytes for now (the
+    /// wire carries arbitrary bytes; the real soundness proof drops
+    /// in here later). `None` on a clean placement of every input.
+    pub fullness_proof: Option<Vec<u8>>,
+}
+
 pub struct Aegon<E, P, H = Sha256Hash>
 where
     E: Pairing,
@@ -1397,6 +1450,142 @@ where
         Ok((new_index_com, new_value_com))
     }
 
+    /// Two-layer entry point for sharded publish: takes raw
+    /// `(label, value)` tuples already pre-routed to this shard by
+    /// the coord's first-layer `H_shard`, runs the second-layer
+    /// `H_slot` open-addressing internally, and emits the same
+    /// commit outputs as [`Self::publish_phase_1_at_slots`] plus
+    /// per-label placement records and an optional fullness signal.
+    ///
+    /// Wraps `publish_phase_1_at_slots` — the crypto work is
+    /// identical; the only difference is who decides the slot.
+    ///
+    /// Stops early if the shard fills mid-batch. Returns the
+    /// placements made so far in `outcome.placements`
+    /// (`outcome.placed_count` entries), and sets
+    /// `outcome.fullness_proof = Some(b""…)` to signal the coord
+    /// that the remaining `batch[placed_count..]` labels must be
+    /// re-routed past this shard. The fullness proof is currently
+    /// a placeholder (empty `Vec<u8>`); the wire protocol carries
+    /// arbitrary bytes so the real soundness proof can drop in
+    /// without an RPC change.
+    pub fn publish_batch(
+        &mut self,
+        batch: &[(Label, Value)],
+    ) -> Result<PublishBatchOutcome<E, P>, AegonError>
+    where
+        P::Commitment: Clone,
+    {
+        // Capacity check used to decide fullness. The polynomial's
+        // current nonzero set plus the within-batch claims must stay
+        // strictly below the addressable capacity, else there's no
+        // free slot left to land any further probe.
+        let capacity = 1usize << self.log_capacity;
+        let mut claimed_indices: std::collections::HashSet<usize> =
+            std::collections::HashSet::with_capacity(batch.len());
+        let mut writes: Vec<ShardWrite<E::ScalarField>> = Vec::with_capacity(batch.len());
+        let mut placements: Vec<ShardPlacement> = Vec::with_capacity(batch.len());
+        let mut placed_count: usize = 0;
+        let mut full = false;
+
+        for (label, value) in batch {
+            let h_label = H::h_f(label);
+            // Pre-check: if every addressable slot is already taken
+            // (existing poly + intra-batch claims), no probe can
+            // succeed. Bail with fullness before walking the trail.
+            if self.index_poly.evaluations.len() + claimed_indices.len() >= capacity {
+                full = true;
+                break;
+            }
+            // Walk H_slot(ctr, label) for ctr = 0, 1, 2, ... until
+            // either landing on a slot with `h_label` already there
+            // (re-publish), or on a truly empty slot. The probe space
+            // is `2 ^ log_capacity` — bounded but enormous; in
+            // practice the expected probe count is `1 / (1 - fill)`,
+            // so at fill 25% expect ~1.33 probes per label.
+            let mut placed_record: Option<ShardPlacement> = None;
+            for ctr in 0u64.. {
+                let slot_bits = H::h_slot(ctr, label, self.log_capacity);
+                let slot_idx = bool_index_to_usize(&slot_bits, &self.dims);
+                if let Some(existing_h_label) = self.index_poly.evaluations.get(&slot_idx) {
+                    if *existing_h_label == h_label {
+                        // Re-publish: same label already lives here.
+                        // No new placement slot is claimed; the index
+                        // polynomial keeps its prior identity at this
+                        // slot. Only value side changes.
+                        writes.push(ShardWrite {
+                            slot_bits: slot_bits.clone(),
+                            h_label: None,
+                            h_value: H::h_f(value),
+                        });
+                        placed_record = Some(ShardPlacement {
+                            label: label.clone(),
+                            slot_bits,
+                            slot_ctr: ctr,
+                            was_new: false,
+                        });
+                        break;
+                    }
+                    // Collision with a different label — continue.
+                    continue;
+                }
+                if claimed_indices.contains(&slot_idx) {
+                    continue;
+                }
+                // Empty slot, not claimed in this batch — place here.
+                claimed_indices.insert(slot_idx);
+                writes.push(ShardWrite {
+                    slot_bits: slot_bits.clone(),
+                    h_label: Some(h_label),
+                    h_value: H::h_f(value),
+                });
+                placed_record = Some(ShardPlacement {
+                    label: label.clone(),
+                    slot_bits,
+                    slot_ctr: ctr,
+                    was_new: true,
+                });
+                break;
+            }
+            match placed_record {
+                Some(p) => {
+                    placements.push(p);
+                    placed_count += 1;
+                },
+                None => {
+                    // Probe loop is unbounded in `for ctr in 0u64..`,
+                    // so reaching here means the capacity pre-check
+                    // missed a corner. Treat as fullness defensively.
+                    full = true;
+                    break;
+                },
+            }
+        }
+
+        // Run the existing crypto pipeline on the writes we built.
+        // Returns the same (index_commitment, value_commitment) as
+        // the legacy call site would.
+        let (index_commitment, value_commitment) = self.publish_phase_1_at_slots(&writes)?;
+
+        let fullness_proof = if full {
+            // Placeholder: empty bytes. When the real fullness-proof
+            // protocol lands, replace this with the soundness proof
+            // showing every addressable slot in this shard is taken.
+            // The wire format already carries arbitrary bytes here.
+            Some(Vec::new())
+        } else {
+            None
+        };
+
+        Ok(PublishBatchOutcome {
+            placements,
+            placed_count,
+            index_commitment,
+            value_commitment,
+            fullness_proof,
+        })
+    }
+
     /// Second half of a sharded publish: consumes the pending state
     /// stashed by [`Self::publish_phase_1`], applies the externally-
     /// derived chain scalars to update the rand polynomials, commits
@@ -1980,6 +2169,36 @@ where
             .get(&idx)
             .map(|v| !v.is_zero())
             .unwrap_or(false)
+    }
+
+    /// Walk the second-layer `H_slot(ctr, label)` probe trail until
+    /// either landing on the slot where this shard stores `label`
+    /// (return `Some((slot_bits, ctr))`), or hitting an empty slot
+    /// (return `None` — the label is not in this shard).
+    ///
+    /// The early-out on the first empty slot is sound because
+    /// open-addressing placement walks the same probe sequence and
+    /// stops at the first empty slot. So if probe `ctr=K` is empty
+    /// during lookup, it was also empty during the original
+    /// placement, meaning the label was never placed beyond `ctr=K`
+    /// in this shard. Labels can never move (`index_poly` is
+    /// append-only), so an empty slot is a definitive "not here."
+    ///
+    /// Expected number of probes is `1 / (1 - per_shard_fill)`. At
+    /// the system's design operating point (per-shard fill ≤ 25%)
+    /// this is ≤ 1.33 probes — almost always one probe.
+    pub fn find_label_slot(&self, label: &Label) -> Option<(Vec<bool>, u64)> {
+        let h_label = H::h_f(label);
+        for ctr in 0u64.. {
+            let slot_bits = H::h_slot(ctr, label, self.log_capacity);
+            let slot_idx = bool_index_to_usize(&slot_bits, &self.dims);
+            match self.index_poly.evaluations.get(&slot_idx) {
+                Some(stored) if *stored == h_label => return Some((slot_bits, ctr)),
+                Some(_) => continue, // collision with a different label
+                None => return None, // empty slot reached → label not in this shard
+            }
+        }
+        None
     }
 
     /// Re-mask a publish-time **non-ZK** opening into a hiding (ZK)

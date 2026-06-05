@@ -77,6 +77,26 @@ service ShardService {
   // the migration bench's K-sweep to amortize SRS generation across
   // every K. Fails if a publish is in flight.
   rpc ClearDictionary(Empty) returns (Empty);
+
+  // Two-layer routing's publish entry: the coord has already routed
+  // `(label, value)` tuples to this shard via the first-layer
+  // `H_shard`. The shard runs its own second-layer `H_slot` open-
+  // addressing to pick slots, applies the phase-1 crypto pipeline,
+  // and reports back (commits, placed_count, optional fullness
+  // proof). When `fullness_proof` is non-empty (or even just
+  // present with empty bytes — the placeholder), the coord
+  // re-routes `batch[placed_count..]` past this shard via
+  // `H_shard(ctr+1, label)`.
+  rpc PublishBatch(PublishBatchRequest) returns (PublishBatchResponse);
+
+  // Two-layer routing's lookup entry: walk this shard's intra-shard
+  // `H_slot(slot_ctr, label)` probe trail and report the slot that
+  // stores `label` plus the `slot_ctr` it took to reach. `found =
+  // false` signals "label not in this shard" (the open-addressing
+  // walk hit an empty slot before finding the target hash). Mirrors
+  // `Aegon::find_label_slot`. The shard's index polynomial is the
+  // sole source of truth — no DB roundtrip.
+  rpc FindLabelSlot(FindLabelSlotRequest) returns (FindLabelSlotResponse);
 }
 
 message ReconfigurePrefillRequest {
@@ -115,6 +135,60 @@ message PublishPhase1Request {
 message PublishPhase1Response {
   bytes index_commitment = 1;
   bytes value_commitment = 2;
+}
+
+message PublishBatchRequest {
+  // Canonical-serialized `Vec<(Label, Value)>` (uncompressed, just
+  // length-prefixed pairs of raw byte slices). Field order on the
+  // wire: u32_le n, then n × (u32_le label_len || label bytes ||
+  // u32_le value_len || value bytes).
+  bytes batch_bytes = 1;
+}
+
+message PublishBatchResponse {
+  // Post-phase-1 index polynomial commitment (canonical-serialized).
+  bytes index_commitment = 1;
+  // Post-phase-1 value polynomial commitment.
+  bytes value_commitment = 2;
+  // How many labels from the input batch this shard accepted. The
+  // coord re-routes `batch[placed_count..]` past this shard if the
+  // shard reported fullness, or treats placed_count == batch.len()
+  // as a clean success.
+  uint64 placed_count = 3;
+  // Canonical-serialized `Vec<ShardPlacement>` recording, for each
+  // accepted label, the final (slot_bits, slot_ctr) reached by the
+  // shard's `H_slot` walk. Length matches `placed_count`. Used by
+  // the coord to drive lookup routing and (when needed) to bind
+  // the placement into the audit proof.
+  bytes placements_bytes = 4;
+  // Empty when the shard placed every input. Present (possibly
+  // with zero-length proof bytes — the placeholder) when the shard
+  // ran out of addressable slots mid-batch.
+  bool is_full = 5;
+  // Per-shard fullness proof, opaque to the coord. Placeholder
+  // (empty bytes) at this revision; real soundness proof drops in
+  // here later without an RPC change.
+  bytes fullness_proof = 6;
+}
+
+message FindLabelSlotRequest {
+  // Raw label bytes (uncompressed). The shard runs `H_slot(slot_ctr,
+  // label)` internally — no need to send a pre-derived ctr.
+  bytes label = 1;
+}
+
+message FindLabelSlotResponse {
+  // True when the shard found `label` in its index_poly. When false,
+  // `slot_bits` and `slot_ctr` are unset and the coord should treat
+  // this as "label not in this shard" (an empty slot was reached
+  // before the target hash).
+  bool found = 1;
+  // Canonical-serialized `Vec<bool>` of slot bits (low bit first).
+  // Empty when `found == false`.
+  bytes slot_bits = 2;
+  // The `H_slot` counter at the final probe — `slot_ctr0` in the
+  // intra-shard trail. Unset (zero) when `found == false`.
+  uint64 slot_ctr = 3;
 }
 
 message PublishPhase2Request {

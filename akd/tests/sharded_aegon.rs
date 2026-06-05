@@ -5,9 +5,9 @@
 //! exercising publish + lookup + sharded verification.
 
 use akd::aegon::{
-    probe_at, rederive_sharded_fs_scalars, verify_sharded_lookup, AuditState, Sha256Hash,
-    ShardedAegon, ShardedAegonConfig, ShardedEpochCommitment, ShardedLookupProof,
-    ShardedVerifierContext,
+    probe_at, rederive_sharded_fs_scalars, verify_sharded_lookup_two_layer, AuditState,
+    Sha256Hash, ShardedAegon, ShardedAegonConfig, ShardedEpochCommitment,
+    ShardedLookupProofTwoLayer, ShardedVerifierContext,
 };
 use ark_bn254::Bn254;
 use ark_ec::pairing::Pairing;
@@ -38,23 +38,311 @@ fn assert_lookup_verifies(
     expected_value: &[u8],
     commit: &ShardedEpochCommitment<Bn254, Pcs>,
 ) {
-    let (_db_value, proof): (Vec<u8>, ShardedLookupProof<Bn254, Pcs>) =
-        server.lookup(&label.to_vec()).expect("lookup");
+    let (_db_value, proof): (Vec<u8>, ShardedLookupProofTwoLayer<Bn254, Pcs>) =
+        server.lookup_two_layer(&label.to_vec()).expect("lookup_two_layer");
     let ctx: ShardedVerifierContext<Bn254, Pcs> = server.sharded_verifier_context();
-    let ok = verify_sharded_lookup::<Bn254, Pcs, Sha256Hash>(
+    let ok = verify_sharded_lookup_two_layer::<Bn254, Pcs, Sha256Hash>(
         &ctx,
         commit,
         &label.to_vec(),
         &expected_value.to_vec(),
         &proof,
     )
-    .expect("verify_sharded_lookup");
+    .expect("verify_sharded_lookup_two_layer");
     assert!(ok, "sharded lookup verification must accept for {label:?}");
 }
 
 #[test]
+fn two_layer_publish_lookup_round_trip() {
+    use akd::aegon::verify_sharded_lookup_two_layer;
+    let log_capacity = 6usize;
+    let log_n_shards = 1usize;
+    let mut server = fresh(log_capacity, log_n_shards);
+
+    // One publish across the two-layer pipeline. With log_n_shards=1
+    // there's only one shard, so the routing trail is one probe and
+    // every label lands there.
+    let updates = vec![
+        (b"alice".to_vec(), b"alice-v1".to_vec()),
+        (b"bob".to_vec(), b"bob-v1".to_vec()),
+        (b"carol".to_vec(), b"carol-v1".to_vec()),
+    ];
+    let commit = server
+        .publish_two_layer(&updates)
+        .expect("publish_two_layer");
+
+    let ctx = server.sharded_verifier_context();
+    for (label, expected_value) in &updates {
+        // `_db_value` is empty under `DbSource::None`; the polynomial
+        // still bound `H_F(expected_value)` at publish time, so we
+        // verify against `expected_value` (mirrors how the other
+        // tests in this file call `verify_sharded_lookup`).
+        let (_db_value, proof) = server
+            .lookup_two_layer(label)
+            .expect("lookup_two_layer");
+        let ok = verify_sharded_lookup_two_layer::<Bn254, Pcs, Sha256Hash>(
+            &ctx, &commit, label, expected_value, &proof,
+        )
+        .expect("verify_sharded_lookup_two_layer");
+        assert!(
+            ok,
+            "two-layer lookup must verify for {label:?}",
+        );
+    }
+}
+
+#[test]
+fn two_layer_publish_lookup_round_trip_multi_shard() {
+    use akd::aegon::verify_sharded_lookup_two_layer;
+    // Multi-shard layout (4 shards × 2^4 slots each = 2^6 total
+    // capacity). Exercises the inter-shard H_shard routing path:
+    // different labels will land on different shards, each producing
+    // its own within-shard trail.
+    let log_capacity = 6usize;
+    let log_n_shards = 2usize;
+    let mut server = fresh(log_capacity, log_n_shards);
+
+    // Enough labels to spread across all 4 shards with high
+    // probability (4-of-4 coverage with 16 labels is ~99.99%).
+    let updates: Vec<(Vec<u8>, Vec<u8>)> = (0..16u32)
+        .map(|i| (format!("user-{i}").into_bytes(), format!("v{i}").into_bytes()))
+        .collect();
+    let commit = server
+        .publish_two_layer(&updates)
+        .expect("publish_two_layer multi-shard");
+    let ctx = server.sharded_verifier_context();
+    for (label, expected_value) in &updates {
+        let (_db_value, proof) = server
+            .lookup_two_layer(label)
+            .expect("lookup_two_layer multi-shard");
+        let ok = verify_sharded_lookup_two_layer::<Bn254, Pcs, Sha256Hash>(
+            &ctx, &commit, label, expected_value, &proof,
+        )
+        .expect("verify_sharded_lookup_two_layer multi-shard");
+        assert!(
+            ok,
+            "two-layer multi-shard lookup must verify for {label:?}",
+        );
+    }
+}
+
+#[test]
+fn two_layer_publish_lookup_history_round_trip() {
+    use akd::aegon::{verify_lookup_history, verify_lookup_label_history, DbSource};
+
+    // Same shape as `rocks_backend_publish_lookup_history_round_trip`
+    // but driven via `publish_two_layer` instead of `publish`.
+    // Validates that publish_two_layer populates value_history +
+    // label_placement records (the path that didn't work pre-Phase 1
+    // of the two-layer migration).
+    let tmp_root = std::env::temp_dir();
+    let nonce: u64 = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0xC0FFEE);
+    let db_path = tmp_root.join(format!(
+        "aegon-rocks-two-layer-history-{}-{nonce}",
+        std::process::id()
+    ));
+    if db_path.exists() {
+        std::fs::remove_dir_all(&db_path).ok();
+    }
+
+    let cfg = ShardedAegonConfig::<Bn254, Pcs>::builder()
+        .shard_log_capacity(8 - 1)
+        .log_n_shards(1)
+        .private(false)
+        .kzh_k(2)
+        .db(DbSource::Rocks(db_path.clone()))
+        .build()
+        .expect("config builds (two-layer history)");
+    let mut rng = ChaCha20Rng::seed_from_u64(0xA56_5);
+    let mut server = Sharded::setup(&mut rng, &cfg).expect("setup");
+
+    // Publish 1: introduce three labels (placement events).
+    let updates_v1: Vec<(Vec<u8>, Vec<u8>)> = vec![
+        (b"alice".to_vec(), b"alice-v1".to_vec()),
+        (b"bob".to_vec(), b"bob-v1".to_vec()),
+        (b"carol".to_vec(), b"carol-v1".to_vec()),
+    ];
+    let _commit_v1 = server
+        .publish_two_layer(&updates_v1)
+        .expect("publish_two_layer v1");
+
+    // Publish 2: update alice + carol, leave bob unchanged. This is
+    // the value-only-update path through publish_batch, which sets
+    // was_new=false so step 7 (label_placement) is a no-op for these
+    // labels but step 6 (value_history) still LPUSHes a new entry.
+    let updates_v2: Vec<(Vec<u8>, Vec<u8>)> = vec![
+        (b"alice".to_vec(), b"alice-v2".to_vec()),
+        (b"carol".to_vec(), b"carol-v2".to_vec()),
+    ];
+    let _commit_v2 = server
+        .publish_two_layer(&updates_v2)
+        .expect("publish_two_layer v2");
+
+    let ctx = server.sharded_verifier_context();
+
+    // Alice: 2 entries (placement + update).
+    let alice_hist = server.lookup_history(&b"alice".to_vec()).expect("alice hist");
+    assert_eq!(alice_hist.entries.len(), 2, "alice has 2 history entries");
+    assert_eq!(alice_hist.entries[0].value_bytes, b"alice-v2");
+    assert_eq!(alice_hist.entries[1].value_bytes, b"alice-v1");
+
+    // Bob: 1 entry (placement only).
+    let bob_hist = server.lookup_history(&b"bob".to_vec()).expect("bob hist");
+    assert_eq!(bob_hist.entries.len(), 1, "bob has 1 entry (placement only)");
+    assert_eq!(bob_hist.entries[0].value_bytes, b"bob-v1");
+
+    // Both bundles verify cryptographically + freshness anchors under
+    // the current sharded root.
+    let alice_verified = verify_lookup_history::<Bn254, Pcs, Sha256Hash>(&ctx, &alice_hist)
+        .expect("verify alice history (two-layer)");
+    let bob_verified = verify_lookup_history::<Bn254, Pcs, Sha256Hash>(&ctx, &bob_hist)
+        .expect("verify bob history (two-layer)");
+    let current_root = server.current_commitment().merkle_root;
+    assert_eq!(
+        alice_verified.live_root,
+        Some(current_root),
+        "alice freshness anchors under live root"
+    );
+    assert_eq!(
+        bob_verified.live_root,
+        Some(current_root),
+        "bob freshness anchors under live root"
+    );
+
+    // Label-history round-trip. Bob's placement record was written
+    // at v1 and his slot was untouched by v2, so freshness equality
+    // holds.
+    let alice_lhist = server
+        .lookup_label_history(&b"alice".to_vec())
+        .expect("alice label hist (two-layer)");
+    let bob_lhist = server
+        .lookup_label_history(&b"bob".to_vec())
+        .expect("bob label hist (two-layer)");
+    assert!(alice_lhist.placement.is_some(), "alice placement present");
+    assert!(bob_lhist.placement.is_some(), "bob placement present");
+    let alice_lhist_v = verify_lookup_label_history::<Bn254, Pcs, Sha256Hash>(&ctx, &alice_lhist)
+        .expect("verify alice label hist");
+    let bob_lhist_v = verify_lookup_label_history::<Bn254, Pcs, Sha256Hash>(&ctx, &bob_lhist)
+        .expect("verify bob label hist");
+    assert_eq!(alice_lhist_v.live_root, Some(current_root));
+    assert_eq!(bob_lhist_v.live_root, Some(current_root));
+
+    drop(server);
+    std::fs::remove_dir_all(&db_path).ok();
+}
+
+#[test]
+fn two_layer_consistency_proof_round_trip() {
+    use akd::aegon::verify_sharded_consistency_two_layer;
+    let log_capacity = 6usize;
+    let log_n_shards = 1usize;
+    let mut server = fresh(log_capacity, log_n_shards);
+
+    // Publish a label at epoch 0; publish unrelated labels at epoch 1.
+    let label = b"alice".to_vec();
+    server
+        .publish_two_layer(&[(label.clone(), b"alice-v1".to_vec())])
+        .expect("publish_two_layer v1");
+    let s0 = server.current_commitment().epoch;
+    server
+        .publish_two_layer(&[(b"bob".to_vec(), b"bob-v1".to_vec())])
+        .expect("publish_two_layer v2 (unrelated)");
+    let s1_commit = server.current_commitment();
+
+    // alice's slot was untouched at epoch 1 — the consistency
+    // proof should accept.
+    let proof = server
+        .consistency_proof_two_layer(&label, s0)
+        .expect("consistency_proof_two_layer");
+    let ctx = server.sharded_verifier_context();
+    let s0_commit = server.epoch_commitment(s0).expect("epoch 1 commit");
+    let ok = verify_sharded_consistency_two_layer::<Bn254, Pcs, Sha256Hash>(
+        &ctx, &s0_commit, &s1_commit, &label, &proof,
+    )
+    .expect("verify two-layer consistency");
+    assert!(ok, "two-layer consistency proof must verify when slot is undisturbed");
+
+    // Now disturb alice's slot and confirm the proof is rejected.
+    server
+        .publish_two_layer(&[(label.clone(), b"alice-v2".to_vec())])
+        .expect("publish_two_layer disturbs alice");
+    let s2_commit = server.current_commitment();
+    let disturbed = server
+        .consistency_proof_two_layer(&label, s0)
+        .expect("consistency_proof_two_layer disturbed");
+    let ok2 = verify_sharded_consistency_two_layer::<Bn254, Pcs, Sha256Hash>(
+        &ctx, &s0_commit, &s2_commit, &label, &disturbed,
+    )
+    .expect("verify two-layer consistency disturbed");
+    assert!(
+        !ok2,
+        "two-layer consistency proof must reject when value at slot has changed"
+    );
+}
+
+#[test]
+fn two_layer_publish_lookup_round_trip_ecvrf() {
+    // VRF-mode exercise of the two-layer pipeline. Validates the
+    // VRF-keyed branches in lookup_label_two_layer (which emits
+    // prove_h_shard + prove_h_slot proofs) and
+    // verify_lookup_label_two_layer (which consumes them via
+    // verify_h_shard + verify_h_slot).
+    use akd::aegon::{
+        verify_sharded_lookup_two_layer, EcVrfHash, ShardedAegon as ShardedG, ShardedAegonConfig as Cfg,
+        VrfProver, BENCH_VRF_SEED,
+    };
+    let log_capacity = 6usize;
+    let log_n_shards = 2usize;
+    let cfg = Cfg::<Bn254, Pcs>::builder()
+        .shard_log_capacity(log_capacity - log_n_shards)
+        .log_n_shards(log_n_shards)
+        .private(false)
+        .kzh_k(2)
+        .build()
+        .expect("ecvrf cfg builds");
+    let mut rng = ChaCha20Rng::seed_from_u64(0xA56_5);
+    let mut server: ShardedG<Bn254, Pcs, EcVrfHash> =
+        ShardedG::<Bn254, Pcs, EcVrfHash>::setup(&mut rng, &cfg)
+            .expect("setup ecvrf");
+    server.set_vrf_prover(VrfProver::from_seed(&BENCH_VRF_SEED));
+
+    let updates: Vec<(Vec<u8>, Vec<u8>)> = (0..12u32)
+        .map(|i| (format!("user-{i}").into_bytes(), format!("v{i}").into_bytes()))
+        .collect();
+    let commit = server
+        .publish_two_layer(&updates)
+        .expect("publish_two_layer ecvrf");
+    let ctx = server.sharded_verifier_context();
+    assert!(
+        ctx.vrf_verifier.is_some(),
+        "ecvrf verifier context must carry vrf_verifier"
+    );
+    for (label, expected_value) in &updates {
+        let (_db_value, proof) = server
+            .lookup_two_layer(label)
+            .expect("lookup_two_layer ecvrf");
+        // Sanity: in vrf mode every probe must carry an 80-byte
+        // RFC 9381 ECVRF proof.
+        for (i, p) in proof.label_proof.route.iter().enumerate() {
+            assert_eq!(p.vrf_proof.len(), 80, "route[{i}] vrf_proof must be 80 bytes");
+        }
+        for (i, p) in proof.label_proof.slots.iter().enumerate() {
+            assert_eq!(p.vrf_proof.len(), 80, "slot[{i}] vrf_proof must be 80 bytes");
+        }
+        let ok = verify_sharded_lookup_two_layer::<Bn254, Pcs, EcVrfHash>(
+            &ctx, &commit, label, expected_value, &proof,
+        )
+        .expect("verify_sharded_lookup_two_layer ecvrf");
+        assert!(ok, "two-layer ecvrf lookup must verify for {label:?}");
+    }
+}
+
+#[test]
 fn srs_path_round_trip() {
-    use akd::aegon::{verify_sharded_lookup, SrsSource};
+    use akd::aegon::SrsSource;
 
     // Operator workflow: build a config, call generate_srs_to_file on
     // the setup machine, then on each shard build a SECOND config with
@@ -103,11 +391,11 @@ fn srs_path_round_trip() {
         (b"alice".to_vec(), b"alice-v1".to_vec()),
         (b"bob".to_vec(), b"bob-v1".to_vec()),
     ];
-    let commit = server.publish(&updates).expect("publish");
+    let commit = server.publish_two_layer(&updates).expect("publish");
     let ctx = server.sharded_verifier_context();
     for (label, value) in &updates {
-        let (_db_value, proof) = server.lookup(label).expect("lookup");
-        let ok = verify_sharded_lookup::<Bn254, Pcs, Sha256Hash>(
+        let (_db_value, proof) = server.lookup_two_layer(label).expect("lookup");
+        let ok = verify_sharded_lookup_two_layer::<Bn254, Pcs, Sha256Hash>(
             &ctx, &commit, label, value, &proof,
         )
         .expect("verify_sharded_lookup");
@@ -130,7 +418,7 @@ fn private_mode_publish_lookup_round_trip() {
     //     server configured)
     //   * `verify_zk` accepting the resulting hiding openings against
     //     the `tau*h`-blinded commitments
-    use akd::aegon::verify_sharded_lookup;
+    use akd::aegon::verify_sharded_lookup_two_layer;
     let log_capacity = 6usize;
     let log_n_shards = 1usize;
 
@@ -151,9 +439,9 @@ fn private_mode_publish_lookup_round_trip() {
         (b"alice".to_vec(), b"alice-v1".to_vec()),
         (b"bob".to_vec(), b"bob-v1".to_vec()),
     ];
-    let commit_v1 = server.publish(&updates_v1).expect("publish v1 (private)");
+    let commit_v1 = server.publish_two_layer(&updates_v1).expect("publish v1 (private)");
     let updates_v2 = vec![(b"alice".to_vec(), b"alice-v2".to_vec())];
-    let commit_v2 = server.publish(&updates_v2).expect("publish v2 (private)");
+    let commit_v2 = server.publish_two_layer(&updates_v2).expect("publish v2 (private)");
 
     let ctx = server.sharded_verifier_context();
     // alice gets the updated value; bob is unchanged. Both must
@@ -163,8 +451,8 @@ fn private_mode_publish_lookup_round_trip() {
         (b"alice".to_vec(), b"alice-v2".to_vec()),
         (b"bob".to_vec(), b"bob-v1".to_vec()),
     ] {
-        let (_db_value, proof) = server.lookup(&label).expect("private lookup");
-        let ok = verify_sharded_lookup::<Bn254, Pcs, Sha256Hash>(
+        let (_db_value, proof) = server.lookup_two_layer(&label).expect("private lookup");
+        let ok = verify_sharded_lookup_two_layer::<Bn254, Pcs, Sha256Hash>(
             &ctx, &commit_v2, &label, &expected_value, &proof,
         )
         .expect("verify_sharded_lookup under private=true");
@@ -214,9 +502,9 @@ fn private_mode_lookup_history_round_trip() {
         (b"alice".to_vec(), b"alice-v1".to_vec()),
         (b"bob".to_vec(), b"bob-v1".to_vec()),
     ];
-    server.publish(&updates_v1).expect("publish v1");
+    server.publish_two_layer(&updates_v1).expect("publish v1");
     let updates_v2 = vec![(b"alice".to_vec(), b"alice-v2".to_vec())];
-    server.publish(&updates_v2).expect("publish v2");
+    server.publish_two_layer(&updates_v2).expect("publish v2");
 
     let ctx = server.sharded_verifier_context();
     let alice_hist = server
@@ -381,7 +669,7 @@ fn n_shards_1_behaves_like_single_aegon() {
         (b"bob".to_vec(), b"bob-v1".to_vec()),
         (b"carol".to_vec(), b"carol-v1".to_vec()),
     ];
-    let commit = server.publish(&updates).expect("publish");
+    let commit = server.publish_two_layer(&updates).expect("publish");
     assert_eq!(commit.epoch, 1);
     assert_eq!(commit.per_shard.len(), 1);
 
@@ -401,7 +689,7 @@ fn n_shards_4_routes_via_vrf_and_audits() {
     let updates: Vec<(Vec<u8>, Vec<u8>)> = (0..12u32)
         .map(|i| (format!("user-{i}").into_bytes(), format!("v-{i}").into_bytes()))
         .collect();
-    let commit = server.publish(&updates).expect("publish");
+    let commit = server.publish_two_layer(&updates).expect("publish");
     assert_eq!(commit.epoch, 1);
     assert_eq!(commit.per_shard.len(), 4);
 
@@ -438,20 +726,26 @@ fn cross_shard_open_addressing_handles_collisions() {
     let mut server = fresh(4, 2);
     assert_eq!(server.n_shards(), 4);
 
-    let updates: Vec<(Vec<u8>, Vec<u8>)> = (0..6u32)
+    // 12 labels in 16-slot capacity (75% fill) is dense enough that
+    // some shard will see >1 label routed to it via H_shard AND have
+    // those labels collide on the same first H_slot probe with high
+    // probability, exercising the multi-probe within-shard trail.
+    let updates: Vec<(Vec<u8>, Vec<u8>)> = (0..12u32)
         .map(|i| (format!("u{i}").into_bytes(), format!("v{i}").into_bytes()))
         .collect();
-    let commit = server.publish(&updates).expect("publish");
+    let commit = server
+        .publish_two_layer(&updates)
+        .expect("publish_two_layer");
 
     for (label, value) in &updates {
         assert_lookup_verifies(&server, label, value, &commit);
     }
 
-    // At least one label should require ctr0 > 0 (i.e., the trail had
-    // to advance past its first probe).
+    // At least one label should require slot_ctr > 0 (i.e., the
+    // within-shard probe trail had to advance past its first slot).
     let any_multi_probe = updates.iter().any(|(label, _)| {
-        let (_, p) = server.lookup(label).unwrap();
-        p.ctr0 > 0
+        let (_, p) = server.lookup_two_layer(label).unwrap();
+        p.label_proof.slots.len() > 1
     });
     assert!(
         any_multi_probe,
@@ -515,14 +809,14 @@ fn rocks_backend_publish_lookup_history_round_trip() {
         (b"bob".to_vec(), b"bob-v1".to_vec()),
         (b"carol".to_vec(), b"carol-v1".to_vec()),
     ];
-    let commit_v1 = server.publish(&updates_v1).expect("publish v1");
+    let commit_v1 = server.publish_two_layer(&updates_v1).expect("publish v1");
 
     // Publish 2: update alice + carol, leave bob unchanged.
     let updates_v2: Vec<(Vec<u8>, Vec<u8>)> = vec![
         (b"alice".to_vec(), b"alice-v2".to_vec()),
         (b"carol".to_vec(), b"carol-v2".to_vec()),
     ];
-    let commit_v2 = server.publish(&updates_v2).expect("publish v2");
+    let commit_v2 = server.publish_two_layer(&updates_v2).expect("publish v2");
     let _ = (commit_v1, commit_v2);
 
     // Lookup history: alice should have 2 entries (v1 placement,
@@ -662,8 +956,8 @@ fn rocks_backend_publish_lookup_history_round_trip() {
     // Lookup the latest value via the regular `lookup` API to make
     // sure RocksDB-backed value:/routing: keys round-trip end-to-end
     // (not just the new history list).
-    let (alice_v_bytes, _proof): (Vec<u8>, ShardedLookupProof<Bn254, Pcs>) =
-        server.lookup(&b"alice".to_vec()).expect("lookup alice");
+    let (alice_v_bytes, _proof): (Vec<u8>, ShardedLookupProofTwoLayer<Bn254, Pcs>) =
+        server.lookup_two_layer(&b"alice".to_vec()).expect("lookup alice");
     assert_eq!(alice_v_bytes, b"alice-v2");
 
     // Tidy up; if this fails it's not a test failure (Linux /tmp
@@ -675,7 +969,7 @@ fn rocks_backend_publish_lookup_history_round_trip() {
 #[test]
 #[ignore = "production-scale validation — needs ~64 GB RAM and several minutes; run with `cargo test --release -- --ignored bench_production_shard_scale --nocapture`"]
 fn bench_production_shard_scale() {
-    use akd::aegon::verify_sharded_lookup;
+    use akd::aegon::verify_sharded_lookup_two_layer;
     // One shard at production parameters: log_capacity = 29 slots
     // (~537M), k = 10. Mirrors one of the 32 GCE shard machines in
     // the planned cluster. `log_n_shards = 0` collapses ShardedAegon
@@ -708,7 +1002,7 @@ fn bench_production_shard_scale() {
         .map(|i| (format!("user-{i}").into_bytes(), format!("v-{i}").into_bytes()))
         .collect();
     let t0 = std::time::Instant::now();
-    let commit = server.publish(&updates).expect("publish");
+    let commit = server.publish_two_layer(&updates).expect("publish");
     let publish_ms = t0.elapsed().as_millis();
     println!(
         "PUBLISH {n_users} entries: {publish_ms} ms ({:.2} s)",
@@ -720,10 +1014,10 @@ fn bench_production_shard_scale() {
     let ctx = server.sharded_verifier_context();
     let (label, value) = &updates[0];
     let t0 = std::time::Instant::now();
-    let (_db_value, proof) = server.lookup(label).expect("lookup");
+    let (_db_value, proof) = server.lookup_two_layer(label).expect("lookup");
     let lookup_ms = t0.elapsed().as_millis();
     let t0 = std::time::Instant::now();
-    let ok = verify_sharded_lookup::<Bn254, Pcs, Sha256Hash>(
+    let ok = verify_sharded_lookup_two_layer::<Bn254, Pcs, Sha256Hash>(
         &ctx, &commit, label, value, &proof,
     )
     .expect("verify");
@@ -757,7 +1051,7 @@ fn bench_setup_and_publish() {
         .map(|i| (format!("user-{i}").into_bytes(), format!("v-{i}").into_bytes()))
         .collect();
     let t0 = std::time::Instant::now();
-    let commit = server.publish(&updates).expect("publish");
+    let commit = server.publish_two_layer(&updates).expect("publish");
     let publish_ms = t0.elapsed().as_millis();
     println!(
         "publish {} entries across {n_shards} shards: {publish_ms} ms",
@@ -768,8 +1062,8 @@ fn bench_setup_and_publish() {
     let ctx = server.sharded_verifier_context();
     let t0 = std::time::Instant::now();
     for (label, value) in &updates {
-        let (_db_value, proof) = server.lookup(label).expect("lookup");
-        let ok = akd::aegon::verify_sharded_lookup::<Bn254, Pcs, Sha256Hash>(
+        let (_db_value, proof) = server.lookup_two_layer(label).expect("lookup");
+        let ok = akd::aegon::verify_sharded_lookup_two_layer::<Bn254, Pcs, Sha256Hash>(
             &ctx, &commit, label, value, &proof,
         )
         .expect("verify_sharded_lookup");
@@ -789,8 +1083,8 @@ fn auditor_rederives_shared_fs_scalars() {
     let audit_state = AuditState::<<Bn254 as Pairing>::ScalarField>::default();
 
     let next = server
-        .publish(&[(b"alice".to_vec(), b"a1".to_vec())])
-        .expect("publish");
+        .publish_two_layer(&[(b"alice".to_vec(), b"a1".to_vec())])
+        .expect("publish_two_layer");
 
     let (rederived_r_index, rederived_r_value) =
         rederive_sharded_fs_scalars::<Bn254, Pcs>(audit_state.r_index, audit_state.r_value, &next);

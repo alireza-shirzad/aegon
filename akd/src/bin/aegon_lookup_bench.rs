@@ -728,7 +728,7 @@ fn main() -> ExitCode {
             // publish onto the sequential path.
             let res = {
                 let mut s = shared.blocking_write();
-                s.publish(&updates)
+                s.publish_two_layer(&updates)
             };
             let ms = t.elapsed().as_secs_f64() * 1000.0;
             preload_publish_ms_total += ms;
@@ -804,7 +804,7 @@ fn main() -> ExitCode {
             let t = Instant::now();
             let server_label_result = {
                 let s = shared.blocking_read();
-                s.lookup_label(&label)
+                s.lookup_label_two_layer(&label)
             };
             let server_label_ns = t.elapsed().as_nanos() as u64;
             let (slot, label_proof) = match server_label_result {
@@ -1661,7 +1661,7 @@ fn main() -> ExitCode {
                     let t = Instant::now();
                     let res = {
                         let mut s = shared.blocking_write();
-                        s.publish(&updates)
+                        s.publish_two_layer(&updates)
                     };
                     let ms = t.elapsed().as_secs_f64() * 1000.0;
                     samples_ms.push(ms);

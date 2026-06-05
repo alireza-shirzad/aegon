@@ -37,7 +37,8 @@ use super::audit::verify_chain;
 use super::config::{AegonConfig, VerifierContext};
 use super::db::{
     key_coord_state, key_epoch_commit, key_history_openings, key_label_placement,
-    key_routing, key_slot, key_value, key_value_history, Db, DbOp, DbSource, RedisDb,
+    key_shard_fullness, key_value, key_value_history, Db, DbOp,
+    DbSource, RedisDb,
 };
 use super::error::AegonError;
 use super::hash::{bool_index_to_point, HashSuite, Sha256Hash};
@@ -46,12 +47,6 @@ use super::types::{
     AegonPcs, AuditState, EpochCommitment, HistoryOpeningEntry, HistoryOpenings, Label, RandPair,
     Value, ValueChangeEntry,
 };
-
-/// Lazily-built thread pool for the blocking gRPC fan-out in
-/// `plan_phase_1_batches`. Sized far above the coordinator's CPU
-/// count because each task spends nearly all its time blocked on a
-/// gRPC RTT, not on CPU — see comment at the call site.
-static FALLBACK_POOL: std::sync::OnceLock<rayon::ThreadPool> = std::sync::OnceLock::new();
 
 /// Where the shards live, and how the coordinator talks to them.
 ///
@@ -474,31 +469,15 @@ pub struct ShardWrite<F: Field> {
     pub h_value: F,
 }
 
-/// One shard's slice of a publish batch: the list of writes a single
-/// `ShardHandle::publish_phase_1_at_slots` call consumes.
-/// [`ShardedAegon::plan_phase_1_batches`] returns a `Vec<SubBatch<F>>`
-/// indexed by shard id.
-pub type SubBatch<F> = Vec<ShardWrite<F>>;
-
-/// Record of one **newly-placed** label in a publish — i.e., a label
-/// that was not in `self.routing` before this call. Returned by
-/// `plan_phase_1_batches` alongside the per-shard sub-batches so the
-/// post-publish DB durability barrier can write fresh `aegon:slot:*`
-/// and `aegon:routing:*` keys without scanning the routing table.
-///
-/// (Existing labels — being value-updated — don't need fresh routing /
-/// slot writes since those keys were committed in a prior epoch.)
+/// Record of one **newly-placed** label in a publish. Returned by
+/// `publish_two_layer` so the post-publish DB durability barrier can
+/// emit a fresh `aegon:label_placement:` record for each first-time
+/// placement. (Value-only updates reuse a prior epoch's record.)
 #[derive(Clone, Debug)]
 pub(crate) struct NewPlacement {
     pub(crate) label: Label,
     pub(crate) shard_id: u32,
     pub(crate) slot_idx: usize,
-    /// Full open-addressing probe trail (length 1 when no collisions, >1
-    /// when the label collided on earlier probes). Carried here so
-    /// `persist_publish_to_db` can write `routing:{label}` to the DB
-    /// without reading from an in-memory `self.routing` HashMap (which
-    /// the medium-scale refactor eliminated to keep coord RSS bounded).
-    pub(crate) trail: Vec<(u32, Vec<bool>)>,
 }
 
 /// Coordinator state recovered from the DB on restart. Built by
@@ -508,7 +487,6 @@ struct RecoveredState<E: Pairing, P: AegonPcs<E>> {
     r_index: E::ScalarField,
     r_value: E::ScalarField,
     epoch_commits: Vec<ShardedEpochCommitment<E, P>>,
-    routing: HashMap<Label, LabelRouting>,
 }
 
 /// External epoch commitment exposed by [`ShardedAegon::current_commitment`].
@@ -672,64 +650,6 @@ where
     }
 }
 
-/// One probe along a sharded open-addressing trail. The verifier
-/// recomputes `(shard_id, slot_bits)` from `H(ctr, label)`, then checks
-/// that `merkle_path` reconstructs the epoch root from `leaf`, and that
-/// the PCS `proof` verifies `evaluation` against `leaf.index_commitment`
-/// at the slot.
-///
-/// When the deployment uses a VRF for index assignment (`EcVrfHash`
-/// rather than `Sha256Hash`), `vrf_proof` carries the
-/// `VRF_PROOF_BYTES`-long Schnorr-style proof that this probe's
-/// `(ctr, label)` was honestly mapped — the verifier consumes it to
-/// recover `slot_bits` rather than computing them locally. For the
-/// SHA-256 path `vrf_proof` is the empty byte vector and the verifier
-/// falls back to `H::h_bits`.
-#[derive(Debug, CanonicalSerialize, CanonicalDeserialize)]
-pub struct ShardedProbe<E: Pairing, P: AegonPcs<E>> {
-    pub shard_id: u32,
-    pub leaf: EpochCommitment<E, P>,
-    pub merkle_path: Vec<EpochDigest>,
-    pub evaluation: E::ScalarField,
-    pub proof: P::Proof,
-    /// RFC 9381 ECVRF proof for `(ctr, label)` at this probe, or empty
-    /// when the deployment uses the non-VRF SHA-256 hash suite. Length
-    /// is exactly `VRF_PROOF_BYTES` (80) when present.
-    pub vrf_proof: Vec<u8>,
-}
-
-// Manual `Clone` impl: `#[derive(Clone)]` would generate
-// `where E: Clone, P: Clone`, but `E: Pairing` / `P: AegonPcs<E>`
-// don't carry `Clone`. The fields *are* all clonable on their own
-// (P::Proof: Clone via the PCS trait, ScalarField: Clone via Field,
-// EpochCommitment has a manual Clone impl), so we just spell it out.
-impl<E: Pairing, P: AegonPcs<E>> Clone for ShardedProbe<E, P> {
-    fn clone(&self) -> Self {
-        Self {
-            shard_id: self.shard_id,
-            leaf: self.leaf.clone(),
-            merkle_path: self.merkle_path.clone(),
-            evaluation: self.evaluation,
-            proof: self.proof.clone(),
-            vrf_proof: self.vrf_proof.clone(),
-        }
-    }
-}
-
-/// Lookup proof emitted by [`ShardedAegon::lookup`]. Carries one
-/// `ShardedProbe` per `ctr` in `0..=ctr0` (cross-shard trail) plus the
-/// value opening at the final probe's slot.
-#[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
-pub struct ShardedLookupProof<E: Pairing, P: AegonPcs<E>> {
-    /// Number of *additional* probes beyond ctr=0; trail length is `ctr0 + 1`.
-    pub ctr0: u64,
-    pub probes: Vec<ShardedProbe<E, P>>,
-    /// Value opening at `probes[ctr0]`'s `(shard_id, slot)`. The shard
-    /// and merkle anchor are reused from the final probe (saves a copy).
-    pub value_evaluation: E::ScalarField,
-    pub value_proof: P::Proof,
-}
-
 /// Where in the cluster a label has been canonically placed —
 /// `(shard, per-shard slot bits)`. Returned by `lookup_label` and
 /// reconstructed by `verify_lookup_label`. The client caches this
@@ -739,20 +659,6 @@ pub struct ShardedLookupProof<E: Pairing, P: AegonPcs<E>> {
 pub struct LabelSlot {
     pub shard_id: u32,
     pub slot_bits: Vec<bool>,
-}
-
-/// Proof that a label resides at a specific `(shard, slot)`. This is
-/// the open-addressing half of the original combined `lookup` proof —
-/// one probe per `ctr ∈ 0..=ctr0`, ending at the canonical slot. The
-/// verifier walks the trail, re-derives each `(shard, slot)` from
-/// `H(ctr, label)`, anchors each leaf under the epoch root, verifies
-/// each `index_poly` opening, and checks the open-addressing
-/// constraints (earlier slots are non-empty + non-`H_F(label)`, final
-/// slot equals `H_F(label)`).
-#[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
-pub struct ShardedLabelProof<E: Pairing, P: AegonPcs<E>> {
-    pub ctr0: u64,
-    pub probes: Vec<ShardedProbe<E, P>>,
 }
 
 /// Proof that `value_poly` opens to `evaluation` at the given slot.
@@ -970,26 +876,206 @@ pub struct FreshnessAttestation<E: Pairing, P: AegonPcs<E>> {
     pub merkle_path: Vec<EpochDigest>,
 }
 
-/// One probe's worth of consistency evidence: openings of `rand_index`
-/// at the same `(shard_id, slot)` at both `s0` and the current epoch.
+// ===================== two-layer routing proofs =====================
+//
+// The two-layer routing model replaces the old single cross-shard
+// open-addressing trail with TWO trails:
+//
+//   * inter-shard trail (`H_shard`): for each `shard_ctr` until the
+//     routing lands on a non-full shard, one `ShardRoutingProbe`
+//     carrying the VRF proof + (for intermediate ctrs) the shard's
+//     fullness proof.
+//   * intra-shard trail (`H_slot`): within the destination shard,
+//     one `ShardSlotProbe` per `slot_ctr` carrying the VRF proof +
+//     PCS opening of `index_poly` at the probed slot.
+//
+// The destination shard's leaf + merkle path are factored out into a
+// single (`dest_leaf`, `dest_merkle_path`) pair because every probe in
+// the intra-shard trail anchors against the same shard.
+
+/// One inter-shard `H_shard(shard_ctr, label) → shard_id` probe.
+///
+/// Carries the VRF proof so the verifier can re-derive `shard_id`
+/// without the VRF secret. For intermediate probes (the shard was
+/// full and routing skipped past it), `fullness_proof` is `Some(_)` —
+/// at this revision the bytes are a placeholder (empty); the real
+/// soundness proof drops in here without a struct change. For the
+/// final probe (routing landed) `fullness_proof` is `None`.
 #[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
-pub struct ShardedRandPair<E: Pairing, P: AegonPcs<E>> {
+pub struct ShardRoutingProbe {
+    /// Shard `H_shard(ctr, label)` lands on at this probe.
     pub shard_id: u32,
-    pub leaf_s0: EpochCommitment<E, P>,
-    pub leaf_s1: EpochCommitment<E, P>,
-    pub merkle_path_s0: Vec<EpochDigest>,
-    pub merkle_path_s1: Vec<EpochDigest>,
-    pub inner: RandPair<E, P>,
+    /// RFC 9381 ECVRF proof for `(shard_ctr, label)`, length
+    /// `VRF_PROOF_BYTES` when the deployment uses `EcVrfHash`; empty
+    /// when the deployment uses `Sha256Hash` (the verifier re-derives
+    /// the bits locally via `H::h_shard`).
+    pub vrf_proof: Vec<u8>,
+    /// Fullness proof bytes, `Some(_)` only for intermediate probes.
+    /// Placeholder (`Some(vec![])`) at this revision — the real proof
+    /// fits in here later without a wire format change.
+    pub fullness_proof: Option<Vec<u8>>,
 }
 
-/// Consistency proof emitted by [`ShardedAegon::consistency_proof`].
-/// Mirrors `aegon::ConsistencyProof` but every opening is anchored under
-/// the per-epoch Merkle root via the bundled paths.
-#[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
-pub struct ShardedConsistencyProof<E: Pairing, P: AegonPcs<E>> {
-    pub ctr0: u64,
-    pub index_witnesses: Vec<ShardedRandPair<E, P>>,
-    pub value_witness: ShardedRandPair<E, P>,
+/// One intra-shard `H_slot(slot_ctr, label) → slot_bits` probe inside
+/// the destination shard. All probes anchor against the same shard
+/// leaf + Merkle path; only the slot bits + opening change per probe.
+#[derive(Debug, CanonicalSerialize, CanonicalDeserialize)]
+pub struct ShardSlotProbe<E: Pairing, P: AegonPcs<E>> {
+    /// Slot bits within the destination shard at this probe. Empty
+    /// when `shard_log_capacity = 0` (degenerate single-slot shard).
+    pub slot_bits: Vec<bool>,
+    /// VRF proof for `(slot_ctr, label)`. Same encoding rule as
+    /// `ShardRoutingProbe::vrf_proof`.
+    pub vrf_proof: Vec<u8>,
+    /// `index_poly(slot_bits)` opened against
+    /// `dest_leaf.index_commitment`.
+    pub evaluation: E::ScalarField,
+    pub proof: P::Proof,
+}
+
+impl<E: Pairing, P: AegonPcs<E>> Clone for ShardSlotProbe<E, P> {
+    fn clone(&self) -> Self {
+        Self {
+            slot_bits: self.slot_bits.clone(),
+            vrf_proof: self.vrf_proof.clone(),
+            evaluation: self.evaluation,
+            proof: self.proof.clone(),
+        }
+    }
+}
+
+/// Two-layer label-residency proof. Replaces `ShardedLabelProof` in
+/// the new routing model.
+///
+///   * `route` walks `H_shard` from `shard_ctr = 0` until landing on a
+///     non-full shard. All intermediate probes carry a `fullness_proof`;
+///     the final probe (`route.last()`) does not. `route.len() ==
+///     final_shard_ctr + 1` and `route.last().shard_id == dest_shard_id`.
+///   * `dest_leaf` + `dest_merkle_path` anchor the destination shard
+///     under the published epoch root. Every slot probe verifies
+///     against `dest_leaf.index_commitment`.
+///   * `slots` walks `H_slot` inside `dest_shard_id` from `slot_ctr = 0`
+///     until landing on the slot that holds `H_F(label)`. Intermediate
+///     probes must hold a non-zero evaluation that is not `H_F(label)`;
+///     the final probe must hold exactly `H_F(label)`.
+#[derive(Debug, CanonicalSerialize, CanonicalDeserialize)]
+pub struct ShardedLabelProofTwoLayer<E: Pairing, P: AegonPcs<E>> {
+    pub route: Vec<ShardRoutingProbe>,
+    pub dest_shard_id: u32,
+    pub dest_leaf: EpochCommitment<E, P>,
+    pub dest_merkle_path: Vec<EpochDigest>,
+    pub slots: Vec<ShardSlotProbe<E, P>>,
+}
+
+impl<E: Pairing, P: AegonPcs<E>> Clone for ShardedLabelProofTwoLayer<E, P> {
+    fn clone(&self) -> Self {
+        Self {
+            route: self.route.clone(),
+            dest_shard_id: self.dest_shard_id,
+            dest_leaf: self.dest_leaf.clone(),
+            dest_merkle_path: self.dest_merkle_path.clone(),
+            slots: self.slots.clone(),
+        }
+    }
+}
+
+/// Combined two-layer lookup proof: label residency + value opening
+/// at the canonical slot. Mirrors `ShardedLookupProof` for the
+/// two-layer routing model.
+#[derive(Debug, CanonicalSerialize, CanonicalDeserialize)]
+pub struct ShardedLookupProofTwoLayer<E: Pairing, P: AegonPcs<E>> {
+    pub label_proof: ShardedLabelProofTwoLayer<E, P>,
+    /// `value_poly(final_slot_bits)` opened against
+    /// `dest_leaf.value_commitment`.
+    pub value_evaluation: E::ScalarField,
+    pub value_proof: P::Proof,
+}
+
+impl<E: Pairing, P: AegonPcs<E>> Clone for ShardedLookupProofTwoLayer<E, P> {
+    fn clone(&self) -> Self {
+        Self {
+            label_proof: self.label_proof.clone(),
+            value_evaluation: self.value_evaluation,
+            value_proof: self.value_proof.clone(),
+        }
+    }
+}
+
+/// One intra-shard slot probe in a two-layer consistency proof:
+/// `rand_index` opened at the same `(slot_bits)` at both `s0` and
+/// `s1`. The verifier checks both openings AND that the evaluations
+/// agree (which is what attests "this slot's rand_index didn't
+/// change between epochs").
+#[derive(Debug, CanonicalSerialize, CanonicalDeserialize)]
+pub struct ShardSlotRandPair<E: Pairing, P: AegonPcs<E>> {
+    /// Slot bits derived from `H_slot(slot_ctr, label)`.
+    pub slot_bits: Vec<bool>,
+    /// RFC 9381 ECVRF proof for `(slot_ctr, label)`, empty in
+    /// SHA-256 deployments.
+    pub vrf_proof: Vec<u8>,
+    pub rand_index_s0_eval: E::ScalarField,
+    pub rand_index_s0_proof: P::Proof,
+    pub rand_index_s1_eval: E::ScalarField,
+    pub rand_index_s1_proof: P::Proof,
+}
+
+impl<E: Pairing, P: AegonPcs<E>> Clone for ShardSlotRandPair<E, P> {
+    fn clone(&self) -> Self {
+        Self {
+            slot_bits: self.slot_bits.clone(),
+            vrf_proof: self.vrf_proof.clone(),
+            rand_index_s0_eval: self.rand_index_s0_eval,
+            rand_index_s0_proof: self.rand_index_s0_proof.clone(),
+            rand_index_s1_eval: self.rand_index_s1_eval,
+            rand_index_s1_proof: self.rand_index_s1_proof.clone(),
+        }
+    }
+}
+
+/// Two-layer consistency proof: attests that `label` was at the same
+/// `(shard, slot)` at epochs `s0` and `s1`, that no other publish
+/// disturbed any slot in the H_slot trail in between, and that the
+/// value at the final slot wasn't updated.
+///
+/// Shape:
+///   - `route` is the same inter-shard `H_shard` trail emitted by
+///     `lookup_label_two_layer` against the current epoch (`s1`).
+///   - `dest_leaf_s0` / `dest_leaf_s1` (+ merkle paths) anchor the
+///     destination shard's leaf under each epoch's sharded root.
+///   - `slots` carries one `ShardSlotRandPair` per intra-shard probe.
+///   - `value_rand_*` opens `rand_value` at the final slot at both
+///     epochs (its s0 == s1 equality attests "value unchanged").
+#[derive(Debug, CanonicalSerialize, CanonicalDeserialize)]
+pub struct ShardedConsistencyProofTwoLayer<E: Pairing, P: AegonPcs<E>> {
+    pub route: Vec<ShardRoutingProbe>,
+    pub dest_shard_id: u32,
+    pub dest_leaf_s0: EpochCommitment<E, P>,
+    pub dest_leaf_s1: EpochCommitment<E, P>,
+    pub dest_merkle_path_s0: Vec<EpochDigest>,
+    pub dest_merkle_path_s1: Vec<EpochDigest>,
+    pub slots: Vec<ShardSlotRandPair<E, P>>,
+    pub value_rand_s0_eval: E::ScalarField,
+    pub value_rand_s0_proof: P::Proof,
+    pub value_rand_s1_eval: E::ScalarField,
+    pub value_rand_s1_proof: P::Proof,
+}
+
+impl<E: Pairing, P: AegonPcs<E>> Clone for ShardedConsistencyProofTwoLayer<E, P> {
+    fn clone(&self) -> Self {
+        Self {
+            route: self.route.clone(),
+            dest_shard_id: self.dest_shard_id,
+            dest_leaf_s0: self.dest_leaf_s0.clone(),
+            dest_leaf_s1: self.dest_leaf_s1.clone(),
+            dest_merkle_path_s0: self.dest_merkle_path_s0.clone(),
+            dest_merkle_path_s1: self.dest_merkle_path_s1.clone(),
+            slots: self.slots.clone(),
+            value_rand_s0_eval: self.value_rand_s0_eval,
+            value_rand_s0_proof: self.value_rand_s0_proof.clone(),
+            value_rand_s1_eval: self.value_rand_s1_eval,
+            value_rand_s1_proof: self.value_rand_s1_proof.clone(),
+        }
+    }
 }
 
 /// Verifier-side bundle, including the deployment's `log_n_shards`
@@ -1037,27 +1123,6 @@ impl<E: Pairing, P: AegonPcs<E>> ShardedVerifierContext<E, P> {
 
 // ---------- ShardedAegon -----------------------------------------------
 
-/// Routing entry retained by the coordinator. The trail records every
-/// probe along the open-addressing chain (one entry per `ctr` from 0 up
-/// to and including `ctr0`); the last entry is the label's permanent
-/// home.
-///
-/// Derives `CanonicalSerialize` so the coordinator can persist its
-/// routing table to the DB and rebuild on restart.
-#[derive(Clone, CanonicalSerialize, CanonicalDeserialize)]
-pub(crate) struct LabelRouting {
-    pub(crate) trail: Vec<(u32, Vec<bool>)>,
-}
-
-impl LabelRouting {
-    fn ctr0(&self) -> u64 {
-        (self.trail.len() - 1) as u64
-    }
-    fn final_assignment(&self) -> &(u32, Vec<bool>) {
-        self.trail.last().expect("trail non-empty by construction")
-    }
-}
-
 /// Coordinator that owns `n_shards` independent [`Aegon`] instances.
 pub struct ShardedAegon<E, P, H = Sha256Hash>
 where
@@ -1090,12 +1155,6 @@ where
     // Coordinator's view of past epochs.
     epoch_commits: Vec<ShardedEpochCommitment<E, P>>,
 
-    // Routing table: label → full cross-shard probe trail. The trail is
-    // deterministic from the label given the public log_n_shards and
-    // shard log_capacity; the coordinator caches it for fast lookup and
-    // value-update batches.
-    routing: HashMap<Label, LabelRouting>,
-
     // Coordinator-side label→value store. `None` when the config asked
     // for `DbSource::None`: `lookup` then returns an empty value and
     // the caller is expected to know the value out-of-band.
@@ -1107,6 +1166,25 @@ where
     /// `None` for the SHA-256 path, in which case `vrf_proof` is left
     /// empty and the verifier re-derives slot bits via `H::h_bits`.
     vrf_prover: Option<super::hash::VrfProver>,
+
+    /// Two-layer routing's fullness map: index `i` is `Some(proof_bytes)`
+    /// iff shard `i` has reported back as full. Length is `N_shards`.
+    /// The coord consults this map at publish time to skip past full
+    /// shards via `H_shard(VRF, shard_ctr+1, label)`; at lookup time
+    /// the same map drives the same skip rule so the verifier walks
+    /// an identical shard-routing trail.
+    ///
+    /// `proof_bytes` is opaque to the coord — at this revision it's
+    /// always an empty `Vec<u8>` placeholder. The real per-shard
+    /// soundness proof of fullness drops in here later without any
+    /// wire-format change (the gRPC carries arbitrary bytes).
+    ///
+    /// Persisted at `aegon:coord:shard_fullness` so a coord restart
+    /// recovers the map exactly. The map is `O(N_shards)`, never
+    /// scales with the label count, so this is the *entire*
+    /// label-count-independent slice of coord state added by the
+    /// two-layer refactor.
+    shard_full_proofs: Vec<Option<Vec<u8>>>,
 }
 
 impl<E, P, H> ShardedAegon<E, P, H>
@@ -1294,6 +1372,15 @@ where
             None => None,
         };
 
+        // Fullness map: same length as shards, all `None` at boot.
+        // Try to restore the persisted map; missing key (fresh DB or
+        // pre-two-layer state) means "no shards reported full yet."
+        let shard_full_proofs = match &db {
+            Some(db_inner) => Self::try_recover_shard_full_proofs(&**db_inner, shards.len())?
+                .unwrap_or_else(|| vec![None; shards.len()]),
+            None => vec![None; shards.len()],
+        };
+
         if let Some(rec) = recovered {
             Ok(Self {
                 shards,
@@ -1305,9 +1392,9 @@ where
                 r_index: rec.r_index,
                 r_value: rec.r_value,
                 epoch_commits: rec.epoch_commits,
-                routing: rec.routing,
                 db,
                 vrf_prover: None,
+                shard_full_proofs,
             })
         } else {
             Ok(Self {
@@ -1320,9 +1407,9 @@ where
                 r_index: E::ScalarField::zero(),
                 r_value: E::ScalarField::zero(),
                 epoch_commits: vec![initial_commit],
-                routing: HashMap::new(),
                 db,
                 vrf_prover: None,
+                shard_full_proofs,
             })
         }
     }
@@ -1393,19 +1480,111 @@ where
 
         // 3. With DB present, routing is read on-demand from RocksDB
         //    (see `read_routing`). We deliberately do NOT pre-load the
-        //    full label→routing map here — at 60M+ entries that's
-        //    multiple GB of RAM that would defeat the point of having a
-        //    persistent store. RocksDB's bloom filters keep on-demand
-        //    `get` cheap (~µs per existence check).
-        let routing: HashMap<Label, LabelRouting> = HashMap::new();
-
         Ok(Some(RecoveredState {
             epoch,
             r_index,
             r_value,
             epoch_commits,
-            routing,
         }))
+    }
+
+    /// Load the two-layer routing's fullness map from the DB. Returns
+    /// `None` when the key isn't present (fresh DB or pre-two-layer
+    /// state — caller should treat as "no shard has reported full").
+    /// Errors if the key exists but is malformed.
+    ///
+    /// Wire format: `u32_le n` followed by `n` repetitions of
+    /// `u8 has_proof || u32_le proof_len || proof_bytes`. `has_proof
+    /// == 0` ⇒ slot is `None` (proof_len follows but is 0).
+    fn try_recover_shard_full_proofs(
+        db: &dyn Db,
+        expected_n: usize,
+    ) -> Result<Option<Vec<Option<Vec<u8>>>>, AegonError> {
+        let Some(bytes) = db.get(key_shard_fullness())? else {
+            return Ok(None);
+        };
+        if bytes.len() < 4 {
+            return Err(AegonError::Database(
+                "shard_fullness blob truncated (header)".into(),
+            ));
+        }
+        let n = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
+        if n != expected_n {
+            return Err(AegonError::Database(format!(
+                "shard_fullness length ({n}) does not match current shard count ({expected_n})"
+            )));
+        }
+        let mut out: Vec<Option<Vec<u8>>> = Vec::with_capacity(n);
+        let mut off = 4;
+        for i in 0..n {
+            if off + 5 > bytes.len() {
+                return Err(AegonError::Database(format!(
+                    "shard_fullness entry {i} truncated"
+                )));
+            }
+            let has_proof = bytes[off];
+            off += 1;
+            let plen = u32::from_le_bytes([
+                bytes[off], bytes[off + 1], bytes[off + 2], bytes[off + 3],
+            ]) as usize;
+            off += 4;
+            if off + plen > bytes.len() {
+                return Err(AegonError::Database(format!(
+                    "shard_fullness entry {i} proof bytes truncated"
+                )));
+            }
+            let proof = bytes[off..off + plen].to_vec();
+            off += plen;
+            out.push(if has_proof == 0 { None } else { Some(proof) });
+        }
+        Ok(Some(out))
+    }
+
+    /// Serialize the in-memory fullness map into the same wire format
+    /// `try_recover_shard_full_proofs` decodes. Cheap — the map is
+    /// `O(N_shards)` and each entry is small (placeholder proofs are
+    /// empty bytes, real ones are at most a few hundred bytes).
+    fn encode_shard_full_proofs(&self) -> Vec<u8> {
+        let n = self.shard_full_proofs.len();
+        let total_bytes_est: usize = 4 + n * 5
+            + self
+                .shard_full_proofs
+                .iter()
+                .filter_map(|p| p.as_ref().map(Vec::len))
+                .sum::<usize>();
+        let mut out = Vec::with_capacity(total_bytes_est);
+        out.extend_from_slice(&(n as u32).to_le_bytes());
+        for entry in &self.shard_full_proofs {
+            match entry {
+                None => {
+                    out.push(0);
+                    out.extend_from_slice(&0u32.to_le_bytes());
+                },
+                Some(proof) => {
+                    out.push(1);
+                    out.extend_from_slice(&(proof.len() as u32).to_le_bytes());
+                    out.extend_from_slice(proof);
+                },
+            }
+        }
+        out
+    }
+
+    /// Public read-only accessors for the fullness map. The publish
+    /// routing path consults `is_shard_full`, the verifier-side
+    /// shard-trail derivation consults the same to know how far to
+    /// advance `H_shard`'s ctr.
+    pub fn is_shard_full(&self, shard_id: usize) -> bool {
+        self.shard_full_proofs
+            .get(shard_id)
+            .map(|entry| entry.is_some())
+            .unwrap_or(false)
+    }
+
+    pub fn shard_fullness_proof(&self, shard_id: usize) -> Option<&[u8]> {
+        self.shard_full_proofs
+            .get(shard_id)
+            .and_then(|entry| entry.as_deref())
     }
 
     pub fn n_shards(&self) -> usize {
@@ -1554,7 +1733,6 @@ where
         self.r_value = E::ScalarField::zero();
         self.epoch_commits.clear();
         self.epoch_commits.push(refreshed.clone());
-        self.routing.clear();
         if let Some(db) = &self.db {
             // Single `delete_range` over [`aegon:`, `aegon;`) wipes
             // every key the coord ever wrote. Cheaper than enumerating
@@ -1595,117 +1773,233 @@ where
         Ok(())
     }
 
-    /// Apply a batch of updates and produce a new epoch.
+    /// Two-layer routing's publish entry. Replacement for
+    /// [`Self::publish`] under the new architecture where:
+    ///   - The coord uses `H_shard(VRF, shard_ctr, label)` to pick a
+    ///     destination shard, advancing `shard_ctr` only when the
+    ///     destination has reported full.
+    ///   - Each chosen shard runs its own `H_slot` open-addressing
+    ///     internally to land on a slot — no `is_slot_occupied` RPC
+    ///     fan-out from the coord.
+    ///   - Coord state stays `O(N_shards)` (the
+    ///     [`shard_full_proofs`](Self::shard_full_proofs) map) and
+    ///     never grows with the user count.
     ///
-    /// Six steps, each delegated to a private helper:
+    /// Multi-wave routing handles the partial-fullness case: if a
+    /// shard reports full mid-batch, the un-placed tail is re-routed
+    /// past it (via the same `H_shard` ctr-advance rule) in a
+    /// follow-up wave. At the system's design operating point
+    /// (per-shard fill ≤ 25%), the wave loop terminates after one
+    /// iteration almost surely; full multi-wave runs are vanishingly
+    /// rare.
     ///
-    ///   1. [`reject_duplicate_labels`](Self::reject_duplicate_labels) —
-    ///      no label may appear twice in the batch.
-    ///   2. [`plan_phase_1_batches`](Self::plan_phase_1_batches) —
-    ///      cross-shard open-addressing assigns a `(shard_id, slot)`
-    ///      to every new label; existing labels reuse their cached
-    ///      trail. Produces one write list per shard.
-    ///   3. [`run_phase_1`](Self::run_phase_1) — every shard applies
-    ///      its slice in parallel, returning new `(index, value)`
-    ///      commitments.
-    ///   4. [`derive_chain_scalars`](Self::derive_chain_scalars) — a
-    ///      single `(r_index, r_value)` pair is derived from prev-r +
-    ///      *all* shards' new commits, binding the FS challenge to
-    ///      every shard at once.
-    ///   5. [`run_phase_2`](Self::run_phase_2) — every shard updates
-    ///      its rand polynomials with the shared scalars and returns
-    ///      its `EpochCommitment`.
-    ///   6. [`finalize_epoch`](Self::finalize_epoch) + [`mirror_to_db`](Self::mirror_to_db)
-    ///      — coordinator advances `(r_index, r_value, epoch)`, builds
-    ///      the Merkle root, and mirrors raw `(label, value)` bytes
-    ///      into the DB for the lookup path.
-    #[cfg_attr(
-        feature = "tracing_instrument",
-        tracing::instrument(
-            level = "debug",
-            skip_all,
-            name = "ShardedAegon::Publish",
-            fields(num_updates = updates.len())
-        )
-    )]
-    pub fn publish(
+    /// Once routing completes, the rest of the pipeline
+    /// (`derive_chain_scalars`, `run_phase_2`, `finalize_epoch`,
+    /// `persist_publish_to_db`) is unchanged — the only delta in
+    /// persistence is the additional `aegon:coord:shard_fullness`
+    /// write.
+    ///
+    /// The legacy [`Self::publish`] remains during the transition
+    /// for tests + the existing wire-compatible path; once every
+    /// caller migrates, the legacy entry is removed.
+    pub fn publish_two_layer(
         &mut self,
         updates: &[(Label, Value)],
-    ) -> Result<ShardedEpochCommitment<E, P>, AegonError> {
-        let prof = super::instrument::publish_profile_enabled();
-        let t_total = std::time::Instant::now();
-        let t = std::time::Instant::now();
+    ) -> Result<ShardedEpochCommitment<E, P>, AegonError>
+    where
+        P::Commitment: Clone,
+    {
         Self::reject_duplicate_labels(updates)?;
-        if prof {
-            eprintln!(
-                "[pub-profile] coord.reject_duplicate_labels: {:.3} ms (updates={})",
-                t.elapsed().as_secs_f64() * 1000.0,
-                updates.len()
-            );
+        let n_shards = self.n_shards();
+        let mut shard_outcomes: Vec<Option<super::server::PublishBatchOutcome<E, P>>> =
+            (0..n_shards).map(|_| None).collect();
+
+        // Routing-wave loop. Each iteration: group still-unplaced
+        // labels by destination shard, dispatch a single
+        // `publish_batch` call per non-empty group, then queue any
+        // unplaced tail for the next wave.
+        let mut unplaced: Vec<(Label, Value)> = updates.to_vec();
+        let mut waves_executed = 0usize;
+        let wave_bound = n_shards + 2;
+
+        while !unplaced.is_empty() {
+            waves_executed += 1;
+            if waves_executed > wave_bound {
+                // Defensive bound. At the protocol's operating
+                // point we expect one wave; even pathological
+                // load-skew shouldn't need more than `n_shards`.
+                return Err(AegonError::Verification(
+                    "publish_two_layer: routing failed to converge — every shard reported full",
+                ));
+            }
+            let mut groups: Vec<Vec<(Label, Value)>> =
+                (0..n_shards).map(|_| Vec::new()).collect();
+            for (label, value) in unplaced.drain(..) {
+                let (shard_id, _final_ctr) = self.route_label_to_shard(&label, 0)?;
+                groups[shard_id].push((label, value));
+            }
+
+            let mut next_unplaced: Vec<(Label, Value)> = Vec::new();
+            for shard_id in 0..n_shards {
+                let group = std::mem::take(&mut groups[shard_id]);
+                if group.is_empty() {
+                    continue;
+                }
+                // A shard that ran successfully in a prior wave has
+                // a pending state that publish_batch wouldn't
+                // accept. The wave invariant prevents this: a shard
+                // is either (a) not full, never reached → can run
+                // now; (b) not full, ran in a prior wave and
+                // succeeded → no labels route to it again; (c)
+                // marked full → routing skips it. Mid-wave failures
+                // (c) is the only way labels get re-routed.
+                let outcome = self.shards[shard_id].publish_batch(&group)?;
+                let placed_count = outcome.placed_count;
+                if outcome.fullness_proof.is_some() {
+                    // Persist the (placeholder) fullness bytes.
+                    let proof_bytes = outcome.fullness_proof.clone().unwrap_or_default();
+                    self.shard_full_proofs[shard_id] = Some(proof_bytes);
+                    // Re-queue the tail. They'll route to a
+                    // different shard in the next wave because
+                    // `is_shard_full` now returns true here.
+                    for (label, value) in group.into_iter().skip(placed_count) {
+                        next_unplaced.push((label, value));
+                    }
+                }
+                shard_outcomes[shard_id] = Some(outcome);
+            }
+            unplaced = next_unplaced;
         }
-        let t = std::time::Instant::now();
-        let (sub_batches, new_placements) = self.plan_phase_1_batches(updates)?;
-        if prof {
-            eprintln!(
-                "[pub-profile] coord.plan_phase_1_batches: {:.3} ms (new_placements={})",
-                t.elapsed().as_secs_f64() * 1000.0,
-                new_placements.len()
-            );
+
+        // Cleanup pass: every shard that didn't receive any wave
+        // still needs to run phase-1 (with an empty batch) so its
+        // pending state is set up for phase-2's rand-poly advance.
+        for shard_id in 0..n_shards {
+            if shard_outcomes[shard_id].is_none() {
+                let outcome = self.shards[shard_id].publish_batch(&[])?;
+                shard_outcomes[shard_id] = Some(outcome);
+            }
         }
-        let t = std::time::Instant::now();
-        let (new_index_commits, new_value_commits) = self.run_phase_1(&sub_batches)?;
-        if prof {
-            eprintln!(
-                "[pub-profile] coord.run_phase_1: {:.3} ms (n_shards={})",
-                t.elapsed().as_secs_f64() * 1000.0,
-                sub_batches.len()
-            );
-        }
-        let t = std::time::Instant::now();
+
+        // Collect per-shard commits in shard_id order.
+        let new_index_commits: Vec<P::Commitment> = shard_outcomes
+            .iter()
+            .map(|o| {
+                o.as_ref()
+                    .expect("cleanup pass guarantees every shard has an outcome")
+                    .index_commitment
+                    .clone()
+            })
+            .collect();
+        let new_value_commits: Vec<P::Commitment> = shard_outcomes
+            .iter()
+            .map(|o| {
+                o.as_ref()
+                    .expect("cleanup pass guarantees every shard has an outcome")
+                    .value_commitment
+                    .clone()
+            })
+            .collect();
+
+        // Phase 2 + finalize: unchanged.
         let (new_r_index, new_r_value) =
             self.derive_chain_scalars(&new_index_commits, &new_value_commits);
-        if prof {
-            eprintln!(
-                "[pub-profile] coord.derive_chain_scalars: {:.3} ms",
-                t.elapsed().as_secs_f64() * 1000.0,
-            );
-        }
-        let t = std::time::Instant::now();
         let (per_shard_commits, per_shard_history) =
             self.run_phase_2(new_r_index, new_r_value)?;
-        if prof {
-            eprintln!(
-                "[pub-profile] coord.run_phase_2: {:.3} ms",
-                t.elapsed().as_secs_f64() * 1000.0,
-            );
+        let sharded_commit =
+            self.finalize_epoch(per_shard_commits, new_r_index, new_r_value);
+
+        // Build the placement metadata `persist_publish_to_db` needs:
+        //   - `all_placements`: one (shard_id, ShardPlacement) per
+        //     accepted label across all shards. Used to drive the
+        //     value_history slot->label map without any
+        //     `aegon:routing:` reads.
+        //   - `new_placements`: subset of the above where
+        //     `was_new == true`. Used to drive `aegon:label_placement:`
+        //     writes (step 7) and the §6.4 shard_slot_to_entry
+        //     bookkeeping.
+        let mut all_placements: Vec<(u32, super::server::ShardPlacement)> = Vec::new();
+        let mut new_placements: Vec<NewPlacement> = Vec::new();
+        for (shard_id, outcome_opt) in shard_outcomes.iter().enumerate() {
+            let Some(outcome) = outcome_opt else { continue };
+            for p in &outcome.placements {
+                if p.was_new {
+                    let slot_idx = bool_index_to_usize_dims(&p.slot_bits, &self.shard_dims);
+                    new_placements.push(NewPlacement {
+                        label: p.label.clone(),
+                        shard_id: shard_id as u32,
+                        slot_idx,
+                    });
+                }
+                all_placements.push((shard_id as u32, p.clone()));
+            }
         }
-        let t = std::time::Instant::now();
-        let sharded_commit = self.finalize_epoch(per_shard_commits, new_r_index, new_r_value);
-        if prof {
-            eprintln!(
-                "[pub-profile] coord.finalize_epoch: {:.3} ms",
-                t.elapsed().as_secs_f64() * 1000.0,
-            );
-        }
-        let t = std::time::Instant::now();
+
         self.persist_publish_to_db(
             updates,
             &new_placements,
+            &all_placements,
             &sharded_commit,
             &per_shard_history,
         )?;
-        if prof {
-            eprintln!(
-                "[pub-profile] coord.persist_publish_to_db: {:.3} ms",
-                t.elapsed().as_secs_f64() * 1000.0,
-            );
-            eprintln!(
-                "[pub-profile] COORD_PUBLISH_TOTAL: {:.3} ms (updates={})",
-                t_total.elapsed().as_secs_f64() * 1000.0,
-                updates.len()
-            );
+
+        // Persist the (possibly updated) per-shard fullness map.
+        if let Some(db) = &self.db {
+            db.write_atomic(&[DbOp::Set {
+                key: key_shard_fullness().to_vec(),
+                value: self.encode_shard_full_proofs(),
+            }])?;
         }
+
         Ok(sharded_commit)
+    }
+
+    /// Two-layer routing helper: starting from `shard_ctr_start`,
+    /// advance the first-layer ctr until landing on a shard that
+    /// has *not* been marked full in
+    /// [`Self::shard_full_proofs`]. Returns `(shard_id, final_ctr)`
+    /// so the caller can record the `shard_ctr` used (the lookup
+    /// proof carries it later for the verifier to re-derive the
+    /// same shard).
+    ///
+    /// Errors with `Verification` when the ctr walk would exceed a
+    /// defensive bound — only fires if `is_shard_full` is `true` for
+    /// at least `N_shards × 16` distinct `(shard_ctr, label)`
+    /// pairings, which empirically can only happen if every shard
+    /// has been marked full.
+    fn route_label_to_shard(
+        &self,
+        label: &[u8],
+        shard_ctr_start: u64,
+    ) -> Result<(usize, u64), AegonError> {
+        let mut shard_ctr = shard_ctr_start;
+        let bound: u64 = (self.n_shards() as u64).saturating_mul(16).max(64);
+        loop {
+            if shard_ctr > bound {
+                return Err(AegonError::Verification(
+                    "H_shard ctr walk exceeded its bound — every shard appears to be full",
+                ));
+            }
+            let shard_bits = if let Some(vrf) = &self.vrf_prover {
+                let (bits, _proof) = vrf.prove_h_shard(shard_ctr, label, self.log_n_shards);
+                bits
+            } else {
+                H::h_shard(shard_ctr, label, self.log_n_shards)
+            };
+            // log_n_shards == 0 (single-shard) → shard_bits is
+            // empty → shard_id always 0. Loop terminates immediately
+            // unless shard 0 is marked full.
+            let mut shard_id: usize = 0;
+            for (i, b) in shard_bits.iter().enumerate() {
+                if *b {
+                    shard_id |= 1usize << i;
+                }
+            }
+            if !self.is_shard_full(shard_id) {
+                return Ok((shard_id, shard_ctr));
+            }
+            shard_ctr += 1;
+        }
     }
 
     /// O(n) scan for `label` appearing twice. Errors out the whole
@@ -1723,305 +2017,6 @@ where
             }
         }
         Ok(())
-    }
-
-    /// Look up the routing entry for `label`. Source of truth depends
-    /// on whether a DB is attached:
-    ///   * DB present (production / bench): always read from RocksDB.
-    ///     `self.routing` HashMap is never populated, so coord RSS
-    ///     stays bounded as the dictionary grows. Cost: one DB get per
-    ///     call (microseconds; RocksDB has bloom filters on existence
-    ///     checks).
-    ///   * DB absent (in-process tests): fall back to the in-memory
-    ///     HashMap. At test scale this is a few hundred entries, so
-    ///     keeping it in RAM is fine.
-    fn read_routing(&self, label: &[u8]) -> Result<Option<LabelRouting>, AegonError> {
-        if let Some(db) = self.db.as_ref() {
-            let Some(bytes) = db.get(&key_routing(label))? else {
-                return Ok(None);
-            };
-            let lr = LabelRouting::deserialize_compressed(&bytes[..]).map_err(|e| {
-                AegonError::Database(format!("deserialize routing for {label:?}: {e}"))
-            })?;
-            Ok(Some(lr))
-        } else {
-            Ok(self.routing.get(label).cloned())
-        }
-    }
-
-    /// Decide where every `(label, value)` write lands. Returns one
-    /// sub-batch per shard, each entry shaped
-    /// `ShardWrite { slot_bits, h_label, h_value }`:
-    ///
-    /// - **New label**: open-addressing finds the first empty
-    ///   `(shard_id, slot)`; the trail is cached in `self.routing`,
-    ///   and the sub-batch entry carries `h_label = H_F(label)`.
-    /// - **Existing label**: reuse the cached trail and emit a value-
-    ///   only update — `h_label = 0` is the sentinel meaning "don't
-    ///   change the slot's identity field".
-    ///
-    /// `in_batch_claimed` per-shard sets ensure two new labels in the
-    /// same publish can't collide on the same empty slot.
-    #[cfg_attr(
-        feature = "tracing_instrument",
-        tracing::instrument(level = "debug", skip_all, name = "ShardedAegon::PlanPhase1")
-    )]
-    fn plan_phase_1_batches(
-        &mut self,
-        updates: &[(Label, Value)],
-    ) -> Result<(Vec<SubBatch<E::ScalarField>>, Vec<NewPlacement>), AegonError> {
-        let n = self.shards.len();
-        let mut sub_batches: Vec<SubBatch<E::ScalarField>> =
-            (0..n).map(|_| Vec::new()).collect();
-        let mut in_batch_claimed: Vec<HashSet<usize>> = (0..n).map(|_| HashSet::new()).collect();
-        let mut new_placements: Vec<NewPlacement> = Vec::new();
-
-        // Pass 1: route value-only updates (existing labels) directly,
-        // and stash brand-new labels for round-based occupancy probing.
-        // `update_idx` carries the original ordering so the in-batch
-        // collision semantics match the sequential implementation.
-        struct NewLabel<'a, F> {
-            update_idx: usize,
-            label: &'a [u8],
-            h_label: F,
-            h_value: F,
-            ctr: u64,
-            trail: Vec<(u32, Vec<bool>)>,
-        }
-        let mut new_labels: Vec<NewLabel<'_, E::ScalarField>> = Vec::new();
-
-        for (idx, (label, value)) in updates.iter().enumerate() {
-            let h_value = H::h_f(value);
-            if let Some(routing) = self.read_routing(label)? {
-                let (sid, slot_bits) = routing.final_assignment().clone();
-                sub_batches[sid as usize].push(ShardWrite {
-                    slot_bits,
-                    h_label: None,
-                    h_value,
-                });
-            } else {
-                new_labels.push(NewLabel {
-                    update_idx: idx,
-                    label: label.as_slice(),
-                    h_label: H::h_f(label),
-                    h_value,
-                    ctr: 0,
-                    trail: Vec::new(),
-                });
-            }
-        }
-
-        // Pass 2 — assign new labels via open-addressing.
-        //
-        // Round-based: each round issues ONE pipelined occupancy
-        // batch that covers every still-in-flight label at its
-        // current probe ctr (one network round-trip per round, not
-        // per probe). Then we resolve placements in original-input
-        // order — necessary to preserve the sequential
-        // implementation's "earlier label wins an in-batch
-        // collision" semantics — and advance any losers to ctr+1
-        // for the next round. At low load factor almost everyone
-        // places on round 0 and the whole pass collapses to a
-        // single round-trip.
-        //
-        // The coord's local DB is now the system-wide authority for
-        // slot occupancy — both Redis and RocksDB backends go
-        // through the same path. We always batch-query the local
-        // DB; for any probes the DB reports as empty we fall back
-        // to per-probe gRPC `is_index_slot_occupied` to the owning
-        // shard. The fallback handles the bench-cluster scenario
-        // where shards started with `--prefill-count N` (which
-        // populates the shard's polynomial in memory but
-        // deliberately does NOT write slot keys to the coord — see
-        // server.rs `prefill_with_random`). In a clean production
-        // deployment where every label arrives via a coord publish,
-        // the fallback never fires because the coord's local DB
-        // sees every placement.
-        //
-        // The DbSource::None branch falls back to per-label
-        // `assign_trail` against the shard's in-memory occupancy
-        // set (used by in-process tests).
-        let total_capacity = 1u64 << self.log_capacity();
-        if let Some(db) = self.db.as_ref() {
-            let log_n_shards = self.log_n_shards;
-            let shard_log_capacity = self.shard_log_capacity();
-            let shard_dims = self.shard_dims.clone();
-            while !new_labels.is_empty() {
-                // Compute (shard_id, slot_bits, slot_idx, key) for each
-                // in-flight label at its current ctr — pure CPU, no I/O.
-                let probes: Vec<(u32, Vec<bool>, usize, Vec<u8>)> = new_labels
-                    .iter()
-                    .map(|nl| {
-                        let (shard_id, slot_bits) = probe_at::<H, E::ScalarField>(
-                            nl.ctr,
-                            nl.label,
-                            log_n_shards,
-                            shard_log_capacity,
-                        );
-                        let slot_idx = bool_index_to_usize_dims(&slot_bits, &shard_dims);
-                        let key = key_slot(shard_id, slot_idx);
-                        (shard_id, slot_bits, slot_idx, key)
-                    })
-                    .collect();
-
-                // One round-trip for the whole round's DB lookup.
-                let keys: Vec<Vec<u8>> =
-                    probes.iter().map(|(_, _, _, k)| k.clone()).collect();
-                let mut occupied_prev = db.exists_many(&keys)?;
-                // For any probe the coord's DB doesn't have, fall
-                // back to asking the owning shard. This covers the
-                // bench prefill case (shard's polynomial has the
-                // slot, but the coord wasn't told). In a fresh-
-                // cluster bench the DB starts empty, so this fallback
-                // fires for *every* probe — at batch=16384 the
-                // serial-RPC loop costs ~8 s per publish. Each call
-                // is a blocking gRPC RTT (~2 ms intra-VPC), so we want
-                // many more concurrent threads than the coord's CPU
-                // count to amortize the RTT. The default rayon pool
-                // matches CPU count (4 on n2-standard-4 → still 8 s
-                // wall). A dedicated 64-thread pool brings it to
-                // ~0.5 s.
-                let shards = &self.shards;
-                let fallback_pool = FALLBACK_POOL.get_or_init(|| {
-                    rayon::ThreadPoolBuilder::new()
-                        .num_threads(64)
-                        .thread_name(|i| format!("aegon-occ-fallback-{i}"))
-                        .build()
-                        .expect("build fallback rayon pool")
-                });
-                let fallback_updates: Vec<usize> = fallback_pool.install(|| {
-                    probes
-                        .par_iter()
-                        .enumerate()
-                        .filter_map(|(i, (shard_id, slot_bits, _slot_idx, _key))| {
-                            if occupied_prev[i] {
-                                return None;
-                            }
-                            if shards[*shard_id as usize]
-                                .is_index_slot_occupied(slot_bits)
-                            {
-                                Some(i)
-                            } else {
-                                None
-                            }
-                        })
-                        .collect()
-                });
-                for i in fallback_updates {
-                    occupied_prev[i] = true;
-                }
-
-                // Resolve in input order so in-batch collisions are
-                // broken consistently with the sequential reference.
-                let mut next_round: Vec<NewLabel<'_, E::ScalarField>> = Vec::new();
-                let drained: Vec<NewLabel<'_, E::ScalarField>> =
-                    std::mem::take(&mut new_labels);
-                // Pair each new label with its probe + DB answer,
-                // then sort by original update index. Sort is stable on
-                // small Vecs (rayon not needed) and almost always a
-                // no-op on round 0.
-                let mut zipped: Vec<(
-                    NewLabel<'_, E::ScalarField>,
-                    (u32, Vec<bool>, usize, Vec<u8>),
-                    bool,
-                )> = drained
-                    .into_iter()
-                    .zip(probes.into_iter())
-                    .zip(occupied_prev.into_iter())
-                    .map(|((nl, probe), occ)| (nl, probe, occ))
-                    .collect();
-                zipped.sort_by_key(|(nl, _, _)| nl.update_idx);
-                for (mut nl, (shard_id, slot_bits, slot_idx, _key), occ_prev) in zipped {
-                    nl.trail.push((shard_id, slot_bits.clone()));
-                    let occupied_in_batch =
-                        in_batch_claimed[shard_id as usize].contains(&slot_idx);
-                    if !occ_prev && !occupied_in_batch {
-                        in_batch_claimed[shard_id as usize].insert(slot_idx);
-                        sub_batches[shard_id as usize].push(ShardWrite {
-                            slot_bits,
-                            h_label: Some(nl.h_label),
-                            h_value: nl.h_value,
-                        });
-                        let trail = nl.trail;
-                        new_placements.push(NewPlacement {
-                            label: nl.label.to_vec(),
-                            shard_id,
-                            slot_idx,
-                            trail: trail.clone(),
-                        });
-                        // Keep an in-memory copy ONLY when there's no DB
-                        // (test-only path). In production / bench, the
-                        // routing is persisted to RocksDB by
-                        // `persist_publish_to_db` later in this call and
-                        // looked up from there on future publishes,
-                        // keeping coord RSS bounded.
-                        if self.db.is_none() {
-                            self.routing
-                                .insert(nl.label.to_vec(), LabelRouting { trail });
-                        }
-                    } else {
-                        nl.ctr += 1;
-                        if nl.ctr >= total_capacity {
-                            return Err(AegonError::DictionaryFull {
-                                capacity: total_capacity as usize,
-                            });
-                        }
-                        next_round.push(nl);
-                    }
-                }
-                new_labels = next_round;
-            }
-        } else {
-            // No-DB fallback: per-label sequential probing against the
-            // shard's in-memory occupancy set, matching the original
-            // implementation. Round-based pipelining doesn't apply here
-            // since there's no network round-trip to amortise.
-            for nl in new_labels {
-                let trail = self.assign_trail(nl.label, &mut in_batch_claimed)?;
-                let (sid, slot_bits) = trail.final_assignment().clone();
-                let slot_idx = bool_index_to_usize_dims(&slot_bits, &self.shard_dims);
-                sub_batches[sid as usize].push(ShardWrite {
-                    slot_bits,
-                    h_label: Some(nl.h_label),
-                    h_value: nl.h_value,
-                });
-                let trail_for_placement = trail.trail.clone();
-                new_placements.push(NewPlacement {
-                    label: nl.label.to_vec(),
-                    shard_id: sid,
-                    slot_idx,
-                    trail: trail_for_placement,
-                });
-                // No-DB fallback path: this branch never has a DB to
-                // persist routing to, so we MUST keep the in-memory
-                // map. With DB, the analogous insert in the round-based
-                // path above is gated behind `self.db.is_none()`.
-                self.routing.insert(nl.label.to_vec(), trail);
-            }
-        }
-        Ok((sub_batches, new_placements))
-    }
-
-    /// Drive every shard's `publish_phase_1_at_slots` in parallel and
-    /// transpose the per-shard `(index_com, value_com)` pairs into
-    /// two shard-id-ordered vectors. Shards are independent (separate
-    /// polynomials + state), so rayon's data-parallel pattern is
-    /// safe; only the read-only prover_param is shared.
-    #[cfg_attr(
-        feature = "tracing_instrument",
-        tracing::instrument(level = "debug", skip_all, name = "ShardedAegon::RunPhase1")
-    )]
-    fn run_phase_1(
-        &mut self,
-        sub_batches: &[SubBatch<E::ScalarField>],
-    ) -> Result<(Vec<P::Commitment>, Vec<P::Commitment>), AegonError> {
-        let phase_1: Vec<(P::Commitment, P::Commitment)> = self
-            .shards
-            .par_iter_mut()
-            .zip(sub_batches.par_iter())
-            .map(|(shard, batch)| shard.publish_phase_1_at_slots(batch))
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(phase_1.into_iter().unzip())
     }
 
     /// Derive the shared `(r_index, r_value)` Fiat-Shamir scalars for
@@ -2133,6 +2128,7 @@ where
         &self,
         updates: &[(Label, Value)],
         new_placements: &[NewPlacement],
+        all_placements: &[(u32, super::server::ShardPlacement)],
         sharded_commit: &ShardedEpochCommitment<E, P>,
         per_shard_history: &[HistoryOpenings<E, P>],
     ) -> Result<(), AegonError> {
@@ -2140,13 +2136,12 @@ where
         let prof = super::instrument::publish_profile_enabled();
         let _persist_t_total = std::time::Instant::now();
 
-        // Pre-size: 1 op per update (value SET) + 2 ops per new
-        // placement (routing SET + slot SET) + 2 global ops
+        // Pre-size: 1 op per update (value SET) + 2 global ops
         // (coord:state SET + coord:epoch_commit:{epoch} SET) + 1 op
         // per non-empty shard's §6.4 history bundle.
         let non_empty_histories = per_shard_history.iter().filter(|h| !h.entries.is_empty()).count();
         let mut ops: Vec<DbOp> = Vec::with_capacity(
-            updates.len() + new_placements.len() * 2 + 2 + non_empty_histories,
+            updates.len() + 2 + non_empty_histories,
         );
 
         // 1. value:{label} for every update.
@@ -2166,37 +2161,11 @@ where
             );
         }
 
-        // 2. routing:{label} + slot:{shard}:{slot} for new placements.
-        //    Trail comes from the `NewPlacement` struct itself — no
-        //    lookup against `self.routing` (which is empty when DB is
-        //    present; the whole point of carrying the trail in
-        //    `NewPlacement` is to avoid that read).
-        let _step2_t = std::time::Instant::now();
-        for placement in new_placements {
-            let routing = LabelRouting {
-                trail: placement.trail.clone(),
-            };
-            let mut routing_bytes = Vec::new();
-            routing
-                .serialize_compressed(&mut routing_bytes)
-                .map_err(|e| AegonError::Database(format!("serialize routing: {e}")))?;
-            ops.push(DbOp::Set {
-                key: key_routing(&placement.label),
-                value: routing_bytes,
-            });
-            ops.push(DbOp::Set {
-                key: key_slot(placement.shard_id, placement.slot_idx),
-                value: placement.label.clone(),
-            });
-        }
-
-        if prof {
-            eprintln!(
-                "[pub-profile] persist.step2_routing_and_slot_serialize: {:.3} ms (placements={})",
-                _step2_t.elapsed().as_secs_f64() * 1000.0,
-                new_placements.len(),
-            );
-        }
+        // Step 2 (routing/slot keyspaces) is gone with the two-layer
+        // routing migration. `lookup_two_layer` derives the
+        // destination shard from `H_shard(shard_ctr, label)` and the
+        // intra-shard slot from `H_slot(slot_ctr, label)` — neither
+        // path needs a per-label routing record.
 
         // 3. coord:state — one key, contains (epoch, r_index, r_value).
         let _step3_t = std::time::Instant::now();
@@ -2298,27 +2267,14 @@ where
         } else {
             self.epoch_commits.get((sharded_commit.epoch - 1) as usize).cloned()
         };
+        // The shard's `publish_batch` returned a placement record for
+        // EVERY label (new + update), so we build the (shard_id,
+        // slot_bits) → label map in a single linear pass over
+        // `all_placements`.
         let mut slot_to_label: std::collections::HashMap<(u32, Vec<bool>), Label> =
             std::collections::HashMap::with_capacity(updates.len());
-        // First: register new placements from this batch.
-        let new_placement_labels: std::collections::HashSet<&[u8]> = new_placements
-            .iter()
-            .map(|p| p.label.as_slice())
-            .collect();
-        for placement in new_placements {
-            if let Some((sid, sbits)) = placement.trail.last() {
-                slot_to_label.insert((*sid, sbits.clone()), placement.label.clone());
-            }
-        }
-        // Then: value-only updates — look up in DB (or no-DB fallback).
-        for (label, _value) in updates {
-            if new_placement_labels.contains(label.as_slice()) {
-                continue;
-            }
-            if let Some(routing) = self.read_routing(label)? {
-                let (sid, sbits) = routing.final_assignment();
-                slot_to_label.insert((*sid, sbits.clone()), label.clone());
-            }
+        for (shard_id, p) in all_placements {
+            slot_to_label.insert((*shard_id, p.slot_bits.clone()), p.label.clone());
         }
         // Also build a (label -> value bytes) map so each entry can
         // carry the raw value_bytes the user later hashes against
@@ -2505,120 +2461,6 @@ where
         }
         r
     }
-
-    /// Walk the cross-shard probe trail for a brand-new `label`, marking
-    /// the first empty `(shard_id, slot)` as claimed in `in_batch_claimed`
-    /// and returning the full trail (including the chosen final probe).
-    /// `in_batch_claimed[s]` is the set of `usize`-encoded slot indices
-    /// already claimed by earlier entries in *this* publish batch.
-    fn assign_trail(
-        &self,
-        label: &[u8],
-        in_batch_claimed: &mut [HashSet<usize>],
-    ) -> Result<LabelRouting, AegonError> {
-        let total_capacity = 1u64 << self.log_capacity();
-        let mut trail: Vec<(u32, Vec<bool>)> = Vec::new();
-        for ctr in 0..total_capacity {
-            let (shard_id, slot_bits) =
-                probe_at::<H, E::ScalarField>(ctr, label, self.log_n_shards, self.shard_log_capacity());
-            trail.push((shard_id, slot_bits.clone()));
-
-            let slot_idx = bool_index_to_usize_dims(&slot_bits, &self.shard_dims);
-            // Occupancy check: when a DB is configured, ask the DB
-            // (one EXISTS — no gRPC). Otherwise fall back to the shard
-            // (in-process test path). The DB is authoritative once
-            // it's configured because `persist_publish_to_db` writes
-            // `aegon:slot:*` in the same atomic txn as the shard
-            // commitments are finalized, so the two never disagree
-            // unless we're mid-recovery.
-            // Coord's local DB is authoritative for slots the coord
-            // itself placed. For slots the coord doesn't know about
-            // (bench-prefill case), fall back to the shard's own
-            // in-memory occupancy. In production where every label
-            // arrives via a coord publish, the fallback never fires.
-            let occupied_prev = match self.db.as_ref() {
-                Some(db) => {
-                    db.exists(&key_slot(shard_id, slot_idx))?
-                        || self.shards[shard_id as usize].is_index_slot_occupied(&slot_bits)
-                },
-                None => self.shards[shard_id as usize].is_index_slot_occupied(&slot_bits),
-            };
-            let occupied_in_batch = in_batch_claimed[shard_id as usize].contains(&slot_idx);
-            if !occupied_prev && !occupied_in_batch {
-                in_batch_claimed[shard_id as usize].insert(slot_idx);
-                return Ok(LabelRouting { trail });
-            }
-        }
-        Err(AegonError::DictionaryFull {
-            capacity: total_capacity as usize,
-        })
-    }
-
-    /// First half of the split lookup design: prove that `label` is
-    /// canonically placed at a specific `(shard_id, slot_bits)`.
-    ///
-    /// Walks the open-addressing trail in `self.routing`, opens
-    /// `index_poly` at each probe against the corresponding shard's
-    /// current commitment, and packages everything into a
-    /// `ShardedLabelProof`. Returns the canonical `LabelSlot` so the
-    /// caller can cache it for future `lookup_value` calls without
-    /// re-proving residency.
-    ///
-    /// Does **not** touch `value_poly` and does **not** fetch any
-    /// side-channel value bytes — that's `lookup_value`'s job.
-    pub fn lookup_label(
-        &self,
-        label: &Label,
-    ) -> Result<(LabelSlot, ShardedLabelProof<E, P>), AegonError> {
-        let routing = self
-            .read_routing(label)?
-            .ok_or_else(|| AegonError::UnknownLabel(label.clone()))?;
-        let current = self.current_commitment();
-
-        let mut probes: Vec<ShardedProbe<E, P>> = Vec::with_capacity(routing.trail.len());
-        let total_bits = self.log_n_shards + self.shard_log_capacity();
-        for (ctr_us, (shard_id, slot_bits)) in routing.trail.iter().enumerate() {
-            let (evaluation, proof) =
-                self.shards[*shard_id as usize].open_index_at_slot(slot_bits)?;
-            let leaf = current.per_shard[*shard_id as usize].clone();
-            let merkle_path = current.merkle_path(*shard_id as usize).to_vec();
-            // When the deployment runs with a VRF prover (EcVrfHash),
-            // recompute the proof for this `(ctr, label)` pair so the
-            // client can verify the slot bits independently. Cost is
-            // ~150 µs per probe on modern x86; a typical α=4 trail of
-            // ~3 probes adds ~0.5 ms to `lookup_label`. For the SHA-
-            // 256 path the vector stays empty and the verifier falls
-            // back to `H::h_bits`.
-            let vrf_proof: Vec<u8> = if let Some(prover) = self.vrf_prover.as_ref() {
-                let (_bits, proof_bytes) = prover.prove_h_bits(ctr_us as u64, label, total_bits);
-                proof_bytes.to_vec()
-            } else {
-                Vec::new()
-            };
-            probes.push(ShardedProbe {
-                shard_id: *shard_id,
-                leaf,
-                merkle_path,
-                evaluation,
-                proof,
-                vrf_proof,
-            });
-        }
-
-        let (final_shard, final_slot) = routing.final_assignment();
-        let slot = LabelSlot {
-            shard_id: *final_shard,
-            slot_bits: final_slot.clone(),
-        };
-        Ok((
-            slot,
-            ShardedLabelProof {
-                ctr0: routing.ctr0(),
-                probes,
-            },
-        ))
-    }
-
     /// Second half of the split lookup design: open `value_poly` at a
     /// cached `(shard, slot)` and return just the value-side proof.
     ///
@@ -2866,20 +2708,165 @@ where
         })
     }
 
-    /// Backward-compat wrapper that does both halves in one call and
-    /// also pulls the raw value bytes from the coordinator's KV store
-    /// (or returns an empty `Value` when `DbSource::None`). Composes
-    /// `lookup_label` and `lookup_value` so the splits and the
-    /// combined call always agree.
+    // ============= two-layer routing lookup methods ====================
+    //
+    // Mirror of `lookup_label` / `lookup_value` / `lookup` for the
+    // two-layer routing model. The label-residency proof carries:
+    //
+    //   * an inter-shard `H_shard` trail (the coord's first-layer
+    //     routing) advancing `shard_ctr` past full shards;
+    //   * a single shard leaf + Merkle path for the destination shard;
+    //   * an intra-shard `H_slot` trail produced by the shard itself.
+    //
+    // Coord state used is `O(N_shards)` (the `shard_full_proofs` map);
+    // no per-label state is read or required at lookup time.
+
+    /// Two-layer label-residency proof. The coord walks
+    /// `H_shard(shard_ctr, label)` until landing on a non-full shard,
+    /// asks that shard for the within-shard trail length via
+    /// `find_label_slot`, then collects an index opening per
+    /// `H_slot(slot_ctr, label)` probe.
     ///
-    /// New code should prefer the split methods directly: clients
-    /// typically only need to look up a label once and want to call
-    /// `lookup_value` many times against the cached slot.
-    pub fn lookup(
+    /// Returns the canonical `LabelSlot` (so the client can call
+    /// `lookup_value_two_layer(slot)` against it without re-proving
+    /// residency) together with the proof.
+    pub fn lookup_label_two_layer(
         &self,
         label: &Label,
-    ) -> Result<(Value, ShardedLookupProof<E, P>), AegonError> {
-        let (slot, label_proof) = self.lookup_label(label)?;
+    ) -> Result<(LabelSlot, ShardedLabelProofTwoLayer<E, P>), AegonError> {
+        // First-layer routing: walk H_shard until landing on a
+        // non-full shard. `route_label_to_shard` does the same walk
+        // publish does, so lookup and publish always agree on the
+        // destination shard.
+        let (dest_shard_id, final_shard_ctr) =
+            self.route_label_to_shard(label, 0)?;
+
+        // Build the inter-shard route trail. For ctr in
+        // 0..final_shard_ctr we emit an intermediate probe carrying
+        // the shard's fullness proof (placeholder at this revision —
+        // empty bytes). For ctr == final_shard_ctr we emit the
+        // landing probe (no fullness proof).
+        let mut route: Vec<ShardRoutingProbe> =
+            Vec::with_capacity((final_shard_ctr as usize) + 1);
+        for ctr in 0..=final_shard_ctr {
+            let (bits, vrf_proof_bytes) = if let Some(prover) = self.vrf_prover.as_ref() {
+                let (b, p) = prover.prove_h_shard(ctr, label, self.log_n_shards);
+                (b, p.to_vec())
+            } else {
+                let b = H::h_shard(ctr, label, self.log_n_shards);
+                (b, Vec::new())
+            };
+            let mut shard_id: u32 = 0;
+            for (i, b) in bits.iter().enumerate() {
+                if *b {
+                    shard_id |= 1u32 << i;
+                }
+            }
+            let fullness_proof = if ctr < final_shard_ctr {
+                // Intermediate probe: must carry a (placeholder)
+                // fullness proof. Pull the bytes from the persisted
+                // map — if the shard isn't recorded as full, something
+                // upstream is inconsistent.
+                let bytes = self
+                    .shard_fullness_proof(shard_id as usize)
+                    .ok_or_else(|| {
+                        AegonError::Verification(
+                            "lookup_label_two_layer: routing skipped a shard not marked full",
+                        )
+                    })?
+                    .to_vec();
+                Some(bytes)
+            } else {
+                None
+            };
+            route.push(ShardRoutingProbe {
+                shard_id,
+                vrf_proof: vrf_proof_bytes,
+                fullness_proof,
+            });
+        }
+
+        // Anchor the destination shard's leaf under the live root.
+        let current = self.current_commitment();
+        let dest_leaf = current.per_shard[dest_shard_id].clone();
+        let dest_merkle_path = current.merkle_path(dest_shard_id).to_vec();
+
+        // Second-layer routing: ask the destination shard for the
+        // within-shard placement of `label`. `find_label_slot`
+        // returns `(slot_bits, slot_ctr0)` — the final probe — or
+        // `None` if the label is not in this shard.
+        let (final_slot_bits, slot_ctr0) = self.shards[dest_shard_id]
+            .find_label_slot(label)?
+            .ok_or_else(|| AegonError::UnknownLabel(label.clone()))?;
+
+        // Walk the intra-shard trail. For each ctr in 0..=slot_ctr0,
+        // re-derive slot_bits via H_slot (collecting the VRF proof
+        // where applicable) and ask the shard for an opening.
+        let shard_log_capacity = self.shard_log_capacity();
+        let mut slots: Vec<ShardSlotProbe<E, P>> =
+            Vec::with_capacity((slot_ctr0 as usize) + 1);
+        for slot_ctr in 0..=slot_ctr0 {
+            let (slot_bits, vrf_proof_bytes) = if let Some(prover) = self.vrf_prover.as_ref() {
+                let (b, p) = prover.prove_h_slot(slot_ctr, label, shard_log_capacity);
+                (b, p.to_vec())
+            } else {
+                let b = H::h_slot(slot_ctr, label, shard_log_capacity);
+                (b, Vec::new())
+            };
+            // The shard's `find_label_slot` already used the same
+            // H_slot walk to find the placement, so the bits we
+            // re-derive here match the path the shard took. The
+            // final probe's slot_bits must match `final_slot_bits`
+            // (we sanity-check that).
+            if slot_ctr == slot_ctr0 && slot_bits != final_slot_bits {
+                return Err(AegonError::Verification(
+                    "lookup_label_two_layer: derived final slot_bits disagree with shard's find_label_slot",
+                ));
+            }
+            let (evaluation, proof) =
+                self.shards[dest_shard_id].open_index_at_slot(&slot_bits)?;
+            slots.push(ShardSlotProbe {
+                slot_bits,
+                vrf_proof: vrf_proof_bytes,
+                evaluation,
+                proof,
+            });
+        }
+
+        let slot = LabelSlot {
+            shard_id: dest_shard_id as u32,
+            slot_bits: final_slot_bits,
+        };
+        let proof = ShardedLabelProofTwoLayer {
+            route,
+            dest_shard_id: dest_shard_id as u32,
+            dest_leaf,
+            dest_merkle_path,
+            slots,
+        };
+        Ok((slot, proof))
+    }
+
+    /// Second half of the two-layer lookup. Identical to
+    /// [`Self::lookup_value`] — the value opening is independent of
+    /// routing, so we just delegate. Kept as a named wrapper so
+    /// callers reading two-layer code have an obvious paired entry
+    /// point.
+    pub fn lookup_value_two_layer(
+        &self,
+        slot: &LabelSlot,
+    ) -> Result<ShardedValueProof<E, P>, AegonError> {
+        self.lookup_value(slot)
+    }
+
+    /// Combined two-layer lookup: residency proof + value opening +
+    /// raw value bytes (when a DB is attached). Mirror of
+    /// [`Self::lookup`] for the two-layer routing model.
+    pub fn lookup_two_layer(
+        &self,
+        label: &Label,
+    ) -> Result<(Value, ShardedLookupProofTwoLayer<E, P>), AegonError> {
+        let (slot, label_proof) = self.lookup_label_two_layer(label)?;
         let value_proof = self.lookup_value(&slot)?;
         let value: Value = match &self.db {
             Some(db) => db.get(&key_value(label))?.ok_or_else(|| {
@@ -2891,78 +2878,131 @@ where
         };
         Ok((
             value,
-            ShardedLookupProof {
-                ctr0: label_proof.ctr0,
-                probes: label_proof.probes,
+            ShardedLookupProofTwoLayer {
+                label_proof,
                 value_evaluation: value_proof.evaluation,
                 value_proof: value_proof.proof,
             },
         ))
     }
 
-    /// Produce a consistency proof for `label` from epoch `s0` to the
-    /// current epoch. Opens `rand_index` at every probe in the label's
-    /// trail (at both `s0` and now), plus `rand_value` at the final
-    /// probe (at both epochs).
-    pub fn consistency_proof(
+    /// Two-layer consistency proof. Attests that `label` was at the
+    /// same `(shard, slot)` at epochs `s0` and `s1 = self.epoch`,
+    /// that no other publish disturbed any slot in the H_slot
+    /// trail in between, and that the value at the final slot
+    /// wasn't updated.
+    pub fn consistency_proof_two_layer(
         &self,
         label: &Label,
         s0: u64,
-    ) -> Result<ShardedConsistencyProof<E, P>, AegonError> {
-        let routing = self
-            .routing
-            .get(label)
-            .ok_or_else(|| AegonError::UnknownLabel(label.clone()))?;
+    ) -> Result<ShardedConsistencyProofTwoLayer<E, P>, AegonError> {
         let s0_commit = self
             .epoch_commitment(s0)
             .ok_or(AegonError::InvalidEpoch(s0))?;
         let s1_commit = self.current_commitment();
         let s1 = self.epoch;
 
-        let mut index_witnesses: Vec<ShardedRandPair<E, P>> = Vec::with_capacity(routing.trail.len());
-        for (shard_id, slot_bits) in &routing.trail {
-            let (eval_s0, proof_s0) =
-                self.shards[*shard_id as usize].open_rand_index_at_slot_in_epoch(slot_bits, s0)?;
-            let (eval_s1, proof_s1) =
-                self.shards[*shard_id as usize].open_rand_index_at_slot_in_epoch(slot_bits, s1)?;
-            index_witnesses.push(ShardedRandPair {
-                shard_id: *shard_id,
-                leaf_s0: s0_commit.per_shard[*shard_id as usize].clone(),
-                leaf_s1: s1_commit.per_shard[*shard_id as usize].clone(),
-                merkle_path_s0: s0_commit.merkle_path(*shard_id as usize).to_vec(),
-                merkle_path_s1: s1_commit.merkle_path(*shard_id as usize).to_vec(),
-                inner: RandPair {
-                    eval_s0,
-                    proof_s0,
-                    eval_s1,
-                    proof_s1,
-                },
+        // (1) Inter-shard route trail — same walk lookup_label_two_layer
+        // does (uses self.shard_full_proofs at the current epoch).
+        let (dest_shard_id, final_shard_ctr) = self.route_label_to_shard(label, 0)?;
+        let mut route: Vec<ShardRoutingProbe> =
+            Vec::with_capacity((final_shard_ctr as usize) + 1);
+        for ctr in 0..=final_shard_ctr {
+            let (bits, vrf_proof_bytes) = if let Some(prover) = self.vrf_prover.as_ref() {
+                let (b, p) = prover.prove_h_shard(ctr, label, self.log_n_shards);
+                (b, p.to_vec())
+            } else {
+                let b = H::h_shard(ctr, label, self.log_n_shards);
+                (b, Vec::new())
+            };
+            let mut shard_id: u32 = 0;
+            for (i, b) in bits.iter().enumerate() {
+                if *b {
+                    shard_id |= 1u32 << i;
+                }
+            }
+            let fullness_proof = if ctr < final_shard_ctr {
+                let bytes = self
+                    .shard_fullness_proof(shard_id as usize)
+                    .ok_or_else(|| {
+                        AegonError::Verification(
+                            "consistency_proof_two_layer: routing skipped a shard not marked full",
+                        )
+                    })?
+                    .to_vec();
+                Some(bytes)
+            } else {
+                None
+            };
+            route.push(ShardRoutingProbe {
+                shard_id,
+                vrf_proof: vrf_proof_bytes,
+                fullness_proof,
             });
         }
 
-        let (final_shard, final_slot) = routing.final_assignment();
-        let (eval_s0, proof_s0) = self.shards[*final_shard as usize]
-            .open_rand_value_at_slot_in_epoch(final_slot, s0)?;
-        let (eval_s1, proof_s1) = self.shards[*final_shard as usize]
-            .open_rand_value_at_slot_in_epoch(final_slot, s1)?;
-        let value_witness = ShardedRandPair {
-            shard_id: *final_shard,
-            leaf_s0: s0_commit.per_shard[*final_shard as usize].clone(),
-            leaf_s1: s1_commit.per_shard[*final_shard as usize].clone(),
-            merkle_path_s0: s0_commit.merkle_path(*final_shard as usize).to_vec(),
-            merkle_path_s1: s1_commit.merkle_path(*final_shard as usize).to_vec(),
-            inner: RandPair {
-                eval_s0,
-                proof_s0,
-                eval_s1,
-                proof_s1,
-            },
-        };
+        // (2) Destination shard leaves + Merkle paths at both epochs.
+        let dest_leaf_s0 = s0_commit.per_shard[dest_shard_id].clone();
+        let dest_leaf_s1 = s1_commit.per_shard[dest_shard_id].clone();
+        let dest_merkle_path_s0 = s0_commit.merkle_path(dest_shard_id).to_vec();
+        let dest_merkle_path_s1 = s1_commit.merkle_path(dest_shard_id).to_vec();
 
-        Ok(ShardedConsistencyProof {
-            ctr0: routing.ctr0(),
-            index_witnesses,
-            value_witness,
+        // (3) Within-shard slot trail. Use the current (s1) shard
+        // state to learn slot_ctr0 — by design the rand_index walk
+        // must look identical at s0 (else the proof's equality
+        // check fails, surfacing the disturbance).
+        let (final_slot_bits, slot_ctr0) = self.shards[dest_shard_id]
+            .find_label_slot(label)?
+            .ok_or_else(|| AegonError::UnknownLabel(label.clone()))?;
+
+        let shard_log_capacity = self.shard_log_capacity();
+        let mut slots: Vec<ShardSlotRandPair<E, P>> =
+            Vec::with_capacity((slot_ctr0 as usize) + 1);
+        for slot_ctr in 0..=slot_ctr0 {
+            let (slot_bits, vrf_proof_bytes) = if let Some(prover) = self.vrf_prover.as_ref() {
+                let (b, p) = prover.prove_h_slot(slot_ctr, label, shard_log_capacity);
+                (b, p.to_vec())
+            } else {
+                let b = H::h_slot(slot_ctr, label, shard_log_capacity);
+                (b, Vec::new())
+            };
+            if slot_ctr == slot_ctr0 && slot_bits != final_slot_bits {
+                return Err(AegonError::Verification(
+                    "consistency_proof_two_layer: derived final slot_bits disagree with shard's find_label_slot",
+                ));
+            }
+            let (eval_s0, proof_s0) = self.shards[dest_shard_id]
+                .open_rand_index_at_slot_in_epoch(&slot_bits, s0)?;
+            let (eval_s1, proof_s1) = self.shards[dest_shard_id]
+                .open_rand_index_at_slot_in_epoch(&slot_bits, s1)?;
+            slots.push(ShardSlotRandPair {
+                slot_bits,
+                vrf_proof: vrf_proof_bytes,
+                rand_index_s0_eval: eval_s0,
+                rand_index_s0_proof: proof_s0,
+                rand_index_s1_eval: eval_s1,
+                rand_index_s1_proof: proof_s1,
+            });
+        }
+
+        // (4) rand_value at the final slot at both epochs.
+        let (value_rand_s0_eval, value_rand_s0_proof) = self.shards[dest_shard_id]
+            .open_rand_value_at_slot_in_epoch(&final_slot_bits, s0)?;
+        let (value_rand_s1_eval, value_rand_s1_proof) = self.shards[dest_shard_id]
+            .open_rand_value_at_slot_in_epoch(&final_slot_bits, s1)?;
+
+        Ok(ShardedConsistencyProofTwoLayer {
+            route,
+            dest_shard_id: dest_shard_id as u32,
+            dest_leaf_s0,
+            dest_leaf_s1,
+            dest_merkle_path_s0,
+            dest_merkle_path_s1,
+            slots,
+            value_rand_s0_eval,
+            value_rand_s0_proof,
+            value_rand_s1_eval,
+            value_rand_s1_proof,
         })
     }
 }
@@ -2989,145 +3029,6 @@ where
 /// open-addressing trail against `H(ctr, label)` for the verified
 /// `ctr0`) so the client doesn't have to trust the server for the
 /// slot — it falls out of the verified chain.
-pub fn verify_lookup_label<E, P, H>(
-    ctx: &ShardedVerifierContext<E, P>,
-    commit: &ShardedEpochCommitment<E, P>,
-    label: &Label,
-    proof: &ShardedLabelProof<E, P>,
-) -> Result<LabelSlot, AegonError>
-where
-    E: Pairing,
-    P: AegonPcs<E>,
-    H: HashSuite<E::ScalarField>,
-{
-    let expected = proof.ctr0 as usize + 1;
-    if proof.probes.len() != expected {
-        return Err(AegonError::Verification(
-            "sharded probe vector length does not match ctr0",
-        ));
-    }
-
-    let h_label = H::h_f(label);
-    let mut final_slot: Option<(u32, Vec<bool>)> = None;
-
-    let total_bits = ctx.log_n_shards + ctx.shard_log_capacity();
-    for (ctr_us, probe) in proof.probes.iter().enumerate() {
-        let ctr = ctr_us as u64;
-        // Recover (shard_id, slot_bits) for this probe. Two paths:
-        //   * VRF deployment (`ctx.vrf_verifier == Some`): consume
-        //     `probe.vrf_proof`, run `VRF.verify`, slice the VRF
-        //     output into total_bits. This is the *only* way the
-        //     client can compute these bits — the VRF secret lives
-        //     on the server.
-        //   * SHA-256 deployment: call `H::h_bits` locally. The hash
-        //     is publicly computable, so no proof is needed.
-        let (expected_shard, slot_bits) = if let Some(verifier) = ctx.vrf_verifier.as_ref() {
-            if probe.vrf_proof.is_empty() {
-                return Err(AegonError::Verification(
-                    "verifier configured with VRF public key but probe.vrf_proof is empty",
-                ));
-            }
-            let bits = verifier
-                .verify_h_bits(ctr, label, &probe.vrf_proof, total_bits)
-                .map_err(|e| {
-                    // Pre-format the verification error so the
-                    // returned static-str variant carries enough
-                    // context for a debugger. Distinguishes "bytes
-                    // didn't parse" from "proof rejected by the key".
-                    match e {
-                        super::hash::VrfVerifyError::Malformed(_) => AegonError::Verification(
-                            "probe.vrf_proof failed to parse as an RFC 9381 ECVRF proof",
-                        ),
-                        super::hash::VrfVerifyError::InvalidProof(_) => AegonError::Verification(
-                            "probe.vrf_proof did not verify under the deployment's VRF public key",
-                        ),
-                    }
-                })?;
-            // Split bits into (shard_id, slot_bits) using the same
-            // little-endian convention as probe_at.
-            let mut shard_id: u32 = 0;
-            for (i, b) in bits[..ctx.log_n_shards].iter().enumerate() {
-                if *b {
-                    shard_id |= 1u32 << i;
-                }
-            }
-            let slot_bits = bits[ctx.log_n_shards..].to_vec();
-            (shard_id, slot_bits)
-        } else {
-            // Legacy SHA-256 path: re-derive (shard_id, slot_bits)
-            // from H(ctr, label) — the server can't lie about which
-            // slot any given ctr probes because anyone can hash.
-            probe_at::<H, E::ScalarField>(
-                ctr,
-                label,
-                ctx.log_n_shards,
-                ctx.shard_log_capacity(),
-            )
-        };
-        let _ = total_bits; // silence dead-let warning on the legacy branch.
-        if expected_shard != probe.shard_id {
-            return Err(AegonError::Verification(
-                "probe shard_id does not match H(ctr, label)",
-            ));
-        }
-        // Merkle anchor: this probe's leaf must hash up to `commit.merkle_root`.
-        let reconstructed = verify_merkle_path::<E, P>(
-            &probe.leaf,
-            probe.shard_id as usize,
-            &probe.merkle_path,
-        );
-        if reconstructed != commit.merkle_root {
-            return Err(AegonError::Verification(
-                "probe merkle path does not reconstruct epoch root",
-            ));
-        }
-        // PCS opening against the shard's index commitment.
-        let point = bool_index_to_point::<E::ScalarField>(&slot_bits);
-        let mut tr = IOPTranscript::<E::ScalarField>::new(b"aegon.index.open");
-        let ok = P::verify(
-            &ctx.inner.verifier_param,
-            &probe.leaf.index_commitment,
-            &point,
-            &probe.evaluation,
-            &probe.proof,
-            &mut tr,
-        )?;
-        if !ok {
-            return Err(AegonError::Verification(
-                "probe opening did not verify against index commitment",
-            ));
-        }
-        // Open-addressing constraints (paper §6.1, Fig. 4):
-        //   * earlier probes must be non-empty and not the label's own hash,
-        //     otherwise the server could have stopped at a smaller `ctr`;
-        //   * the final probe must hold exactly `H_F(label)`.
-        if ctr < proof.ctr0 {
-            if probe.evaluation.is_zero() {
-                return Err(AegonError::Verification(
-                    "earlier probe slot is empty: server picked a non-canonical index",
-                ));
-            }
-            if probe.evaluation == h_label {
-                return Err(AegonError::Verification(
-                    "earlier probe slot holds H_F(label): label was already assigned at a smaller counter",
-                ));
-            }
-        } else {
-            if probe.evaluation != h_label {
-                return Err(AegonError::Verification(
-                    "final probe slot does not hold H_F(label)",
-                ));
-            }
-            final_slot = Some((probe.shard_id, slot_bits));
-        }
-    }
-
-    let (shard_id, slot_bits) = final_slot.ok_or(AegonError::Verification(
-        "verify_lookup_label: empty probe trail (ctr0 underflow)",
-    ))?;
-    Ok(LabelSlot { shard_id, slot_bits })
-}
-
 /// Verify the value at a cached `LabelSlot` opens to `value`'s hash.
 ///
 /// The second half of the split lookup. Unlike `verify_lookup_label`,
@@ -3522,194 +3423,435 @@ where
     }
 }
 
-/// Backward-compat wrapper that verifies both halves of the original
-/// combined `lookup` proof in one call. New code should call
-/// `verify_lookup_label` + `verify_lookup_value` separately so a
-/// client can stash the slot after the first label verification.
-pub fn verify_sharded_lookup<E, P, H>(
+
+// ================ two-layer routing verifiers ========================
+
+/// Verify a two-layer label-residency proof. Re-derives the
+/// destination shard from the `H_shard` route, anchors the
+/// destination shard's leaf under `commit.merkle_root`, then walks
+/// the `H_slot` intra-shard trail checking each PCS opening + the
+/// open-addressing constraints (intermediate non-zero/non-H_F(label),
+/// final == H_F(label)).
+///
+/// Returns the canonical `LabelSlot` (so the caller can pair it with
+/// a `lookup_value_two_layer` call without re-proving residency).
+pub fn verify_lookup_label_two_layer<E, P, H>(
+    ctx: &ShardedVerifierContext<E, P>,
+    commit: &ShardedEpochCommitment<E, P>,
+    label: &Label,
+    proof: &ShardedLabelProofTwoLayer<E, P>,
+) -> Result<LabelSlot, AegonError>
+where
+    E: Pairing,
+    P: AegonPcs<E>,
+    H: HashSuite<E::ScalarField>,
+{
+    if proof.route.is_empty() {
+        return Err(AegonError::Verification(
+            "two-layer label proof has an empty route trail",
+        ));
+    }
+    if proof.slots.is_empty() {
+        return Err(AegonError::Verification(
+            "two-layer label proof has an empty slot trail",
+        ));
+    }
+
+    // (1) Inter-shard routing trail. Re-derive shard_id at each
+    // shard_ctr via H_shard (consuming the VRF proof when present),
+    // confirm intermediate probes carry a fullness proof and the
+    // landing probe doesn't, and that the landing probe's shard_id
+    // matches `proof.dest_shard_id`.
+    let final_idx = proof.route.len() - 1;
+    for (ctr_us, rprobe) in proof.route.iter().enumerate() {
+        let ctr = ctr_us as u64;
+        let bits = if let Some(verifier) = ctx.vrf_verifier.as_ref() {
+            if rprobe.vrf_proof.is_empty() {
+                return Err(AegonError::Verification(
+                    "two-layer label proof: vrf-mode route probe has empty vrf_proof",
+                ));
+            }
+            verifier
+                .verify_h_shard(ctr, label, &rprobe.vrf_proof, ctx.log_n_shards)
+                .map_err(|e| match e {
+                    super::hash::VrfVerifyError::Malformed(_) => AegonError::Verification(
+                        "two-layer route probe vrf_proof failed to parse",
+                    ),
+                    super::hash::VrfVerifyError::InvalidProof(_) => AegonError::Verification(
+                        "two-layer route probe vrf_proof did not verify",
+                    ),
+                })?
+        } else {
+            H::h_shard(ctr, label, ctx.log_n_shards)
+        };
+        let mut shard_id: u32 = 0;
+        for (i, b) in bits.iter().enumerate() {
+            if *b {
+                shard_id |= 1u32 << i;
+            }
+        }
+        if shard_id != rprobe.shard_id {
+            return Err(AegonError::Verification(
+                "two-layer route probe shard_id does not match H_shard(ctr, label)",
+            ));
+        }
+        if ctr_us < final_idx {
+            // Intermediate probe: must advertise a fullness proof.
+            // Placeholder bytes are accepted; real soundness check
+            // drops in here when the fullness-proof system lands.
+            if rprobe.fullness_proof.is_none() {
+                return Err(AegonError::Verification(
+                    "two-layer route probe in intermediate position lacks a fullness proof",
+                ));
+            }
+        } else {
+            // Landing probe: must not carry a fullness proof, and
+            // must announce the same shard_id as proof.dest_shard_id.
+            if rprobe.fullness_proof.is_some() {
+                return Err(AegonError::Verification(
+                    "two-layer route probe in landing position carries a fullness proof",
+                ));
+            }
+            if rprobe.shard_id != proof.dest_shard_id {
+                return Err(AegonError::Verification(
+                    "two-layer route landing shard_id does not match proof.dest_shard_id",
+                ));
+            }
+        }
+    }
+
+    // (2) Anchor the destination shard leaf under commit.merkle_root.
+    let dest_root = verify_merkle_path::<E, P>(
+        &proof.dest_leaf,
+        proof.dest_shard_id as usize,
+        &proof.dest_merkle_path,
+    );
+    if dest_root != commit.merkle_root {
+        return Err(AegonError::Verification(
+            "two-layer label proof: dest_merkle_path does not reconstruct epoch root",
+        ));
+    }
+
+    // (3) Intra-shard slot trail. Each probe: re-derive slot_bits via
+    // H_slot (consuming VRF proof when present), verify PCS opening
+    // against dest_leaf.index_commitment, check open-addressing
+    // constraints (intermediate != 0 and != h_label; final == h_label).
+    let h_label = H::h_f(label);
+    let shard_log_capacity = ctx.shard_log_capacity();
+    let final_slot_idx = proof.slots.len() - 1;
+    let mut final_slot_bits: Option<Vec<bool>> = None;
+    for (slot_ctr_us, sprobe) in proof.slots.iter().enumerate() {
+        let slot_ctr = slot_ctr_us as u64;
+        let derived_bits = if let Some(verifier) = ctx.vrf_verifier.as_ref() {
+            if sprobe.vrf_proof.is_empty() {
+                return Err(AegonError::Verification(
+                    "two-layer label proof: vrf-mode slot probe has empty vrf_proof",
+                ));
+            }
+            verifier
+                .verify_h_slot(slot_ctr, label, &sprobe.vrf_proof, shard_log_capacity)
+                .map_err(|e| match e {
+                    super::hash::VrfVerifyError::Malformed(_) => AegonError::Verification(
+                        "two-layer slot probe vrf_proof failed to parse",
+                    ),
+                    super::hash::VrfVerifyError::InvalidProof(_) => AegonError::Verification(
+                        "two-layer slot probe vrf_proof did not verify",
+                    ),
+                })?
+        } else {
+            H::h_slot(slot_ctr, label, shard_log_capacity)
+        };
+        if derived_bits != sprobe.slot_bits {
+            return Err(AegonError::Verification(
+                "two-layer slot probe slot_bits do not match H_slot(slot_ctr, label)",
+            ));
+        }
+        // PCS opening against the destination shard's index_poly.
+        let point = bool_index_to_point::<E::ScalarField>(&sprobe.slot_bits);
+        let mut tr = IOPTranscript::<E::ScalarField>::new(b"aegon.index.open");
+        let ok = P::verify(
+            &ctx.inner.verifier_param,
+            &proof.dest_leaf.index_commitment,
+            &point,
+            &sprobe.evaluation,
+            &sprobe.proof,
+            &mut tr,
+        )?;
+        if !ok {
+            return Err(AegonError::Verification(
+                "two-layer slot probe opening did not verify against dest index commitment",
+            ));
+        }
+        if slot_ctr_us < final_slot_idx {
+            // Intermediate slot probe: must be non-empty and not
+            // already this label (else placement would have stopped
+            // earlier in the H_slot walk).
+            if sprobe.evaluation.is_zero() {
+                return Err(AegonError::Verification(
+                    "two-layer intermediate slot is empty: shard placement was not canonical",
+                ));
+            }
+            if sprobe.evaluation == h_label {
+                return Err(AegonError::Verification(
+                    "two-layer intermediate slot holds H_F(label): label would have been placed earlier",
+                ));
+            }
+        } else {
+            // Final probe: must hold this label's hash.
+            if sprobe.evaluation != h_label {
+                return Err(AegonError::Verification(
+                    "two-layer final slot does not hold H_F(label)",
+                ));
+            }
+            final_slot_bits = Some(sprobe.slot_bits.clone());
+        }
+    }
+
+    let slot_bits = final_slot_bits.ok_or(AegonError::Verification(
+        "two-layer label proof: empty slot trail (final probe missing)",
+    ))?;
+    Ok(LabelSlot {
+        shard_id: proof.dest_shard_id,
+        slot_bits,
+    })
+}
+
+/// Combined two-layer lookup verifier. Mirrors `verify_sharded_lookup`
+/// but reads from the two-layer proof shape. Returns `Ok(true)` iff
+/// the residency proof verifies, the value opening verifies under
+/// `dest_leaf.value_commitment`, and `H_F(value) == value_evaluation`.
+pub fn verify_sharded_lookup_two_layer<E, P, H>(
     ctx: &ShardedVerifierContext<E, P>,
     commit: &ShardedEpochCommitment<E, P>,
     label: &Label,
     value: &Value,
-    proof: &ShardedLookupProof<E, P>,
+    proof: &ShardedLookupProofTwoLayer<E, P>,
 ) -> Result<bool, AegonError>
 where
     E: Pairing,
     P: AegonPcs<E>,
     H: HashSuite<E::ScalarField>,
 {
-    // Split the combined proof into its two halves and run each
-    // verifier. The value-side leaf is implicitly the final probe's
-    // leaf (which is exactly what the splitter would have stored), so
-    // we lift it out and rebuild a `ShardedValueProof` on the fly.
-    let label_proof = ShardedLabelProof {
-        ctr0: proof.ctr0,
-        probes: proof.probes.clone(),
-    };
-    let slot = verify_lookup_label::<E, P, H>(ctx, commit, label, &label_proof)?;
-
-    let final_probe = proof.probes.last().expect("ctr0 + 1 >= 1 probes");
+    let slot = verify_lookup_label_two_layer::<E, P, H>(
+        ctx,
+        commit,
+        label,
+        &proof.label_proof,
+    )?;
+    // Rebuild a `ShardedValueProof` from the bundled value parts +
+    // the residency-verified dest leaf/path so we can reuse the
+    // existing value-side verifier.
     let value_proof = ShardedValueProof {
         shard_id: slot.shard_id,
         slot_bits: slot.slot_bits.clone(),
-        leaf: final_probe.leaf.clone(),
-        merkle_path: final_probe.merkle_path.clone(),
+        leaf: proof.label_proof.dest_leaf.clone(),
+        merkle_path: proof.label_proof.dest_merkle_path.clone(),
         evaluation: proof.value_evaluation,
         proof: proof.value_proof.clone(),
     };
     if !verify_lookup_value::<E, P, H>(ctx, commit, &slot, value, &value_proof)? {
         return Ok(false);
     }
-    // `verify_lookup_value` already checks `H_F(value) == evaluation`,
-    // so the combined wrapper has nothing left to add.
     Ok(true)
 }
 
-/// Verify a sharded consistency proof. Recomputes the trail from
-/// `label`, anchors every per-probe leaf under both epoch roots,
-/// verifies every PCS opening, and checks that the `s0` and `s1`
-/// evaluations agree pointwise (which is what guarantees the slot
-/// didn't change between epochs — see paper §5.2 / §6.1).
-///
-/// `expected_ctr0` should be the `ctr0` the caller learned from a
-/// fresh lookup against the *current* epoch. Pinning it on the user
-/// side prevents a server from substituting a shorter or longer
-/// trail (which would otherwise verify but for a different label's
-/// effective slot).
-pub fn verify_sharded_consistency<E, P, H>(
+
+/// Verify a two-layer consistency proof. Returns `Ok(true)` iff the
+/// route, intra-shard openings, and rand_value openings all verify
+/// AND every `s0 == s1` equality (the per-slot rand_index pair plus
+/// the final rand_value pair) holds. Returns `Ok(false)` when the
+/// crypto is well-formed but the slot was disturbed (legitimate
+/// rejection); `Err` only on malformed proofs.
+pub fn verify_sharded_consistency_two_layer<E, P, H>(
     ctx: &ShardedVerifierContext<E, P>,
     s0_commit: &ShardedEpochCommitment<E, P>,
     s1_commit: &ShardedEpochCommitment<E, P>,
     label: &Label,
-    expected_ctr0: u64,
-    proof: &ShardedConsistencyProof<E, P>,
+    proof: &ShardedConsistencyProofTwoLayer<E, P>,
 ) -> Result<bool, AegonError>
 where
     E: Pairing,
     P: AegonPcs<E>,
     H: HashSuite<E::ScalarField>,
 {
-    if proof.ctr0 != expected_ctr0 {
+    if proof.route.is_empty() {
         return Err(AegonError::Verification(
-            "consistency proof ctr0 does not match the caller's expected ctr0",
+            "two-layer consistency proof has an empty route trail",
         ));
     }
-    let expected = proof.ctr0 as usize + 1;
-    if proof.index_witnesses.len() != expected {
+    if proof.slots.is_empty() {
         return Err(AegonError::Verification(
-            "consistency index_witnesses length does not match ctr0",
+            "two-layer consistency proof has an empty slot trail",
         ));
     }
 
-    for (ctr_us, w) in proof.index_witnesses.iter().enumerate() {
+    // (1) Walk the inter-shard route trail, re-deriving shard_id from
+    // H_shard and confirming intermediate vs landing semantics.
+    let final_idx = proof.route.len() - 1;
+    for (ctr_us, rprobe) in proof.route.iter().enumerate() {
         let ctr = ctr_us as u64;
-        let (expected_shard, slot_bits) =
-            probe_at::<H, E::ScalarField>(ctr, label, ctx.log_n_shards, ctx.shard_log_capacity());
-        if expected_shard != w.shard_id {
+        let bits = if let Some(verifier) = ctx.vrf_verifier.as_ref() {
+            if rprobe.vrf_proof.is_empty() {
+                return Err(AegonError::Verification(
+                    "two-layer consistency: vrf-mode route probe has empty vrf_proof",
+                ));
+            }
+            verifier
+                .verify_h_shard(ctr, label, &rprobe.vrf_proof, ctx.log_n_shards)
+                .map_err(|e| match e {
+                    super::hash::VrfVerifyError::Malformed(_) => AegonError::Verification(
+                        "two-layer consistency route vrf_proof failed to parse",
+                    ),
+                    super::hash::VrfVerifyError::InvalidProof(_) => AegonError::Verification(
+                        "two-layer consistency route vrf_proof did not verify",
+                    ),
+                })?
+        } else {
+            H::h_shard(ctr, label, ctx.log_n_shards)
+        };
+        let mut shard_id: u32 = 0;
+        for (i, b) in bits.iter().enumerate() {
+            if *b {
+                shard_id |= 1u32 << i;
+            }
+        }
+        if shard_id != rprobe.shard_id {
             return Err(AegonError::Verification(
-                "consistency probe shard_id does not match H(ctr, label)",
+                "two-layer consistency route shard_id does not match H_shard",
             ));
         }
-        if verify_merkle_path::<E, P>(&w.leaf_s0, w.shard_id as usize, &w.merkle_path_s0)
-            != s0_commit.merkle_root
-        {
-            return Err(AegonError::Verification(
-                "consistency s0 merkle path does not reconstruct s0 root",
-            ));
-        }
-        if verify_merkle_path::<E, P>(&w.leaf_s1, w.shard_id as usize, &w.merkle_path_s1)
-            != s1_commit.merkle_root
-        {
-            return Err(AegonError::Verification(
-                "consistency s1 merkle path does not reconstruct s1 root",
-            ));
-        }
-        let point = bool_index_to_point::<E::ScalarField>(&slot_bits);
-        let mut tr0 = IOPTranscript::<E::ScalarField>::new(b"aegon.rand_index.open");
-        let ok0 = P::verify(
-            &ctx.inner.verifier_param,
-            &w.leaf_s0.rand_index_commitment,
-            &point,
-            &w.inner.eval_s0,
-            &w.inner.proof_s0,
-            &mut tr0,
-        )?;
-        let mut tr1 = IOPTranscript::<E::ScalarField>::new(b"aegon.rand_index.open");
-        let ok1 = P::verify(
-            &ctx.inner.verifier_param,
-            &w.leaf_s1.rand_index_commitment,
-            &point,
-            &w.inner.eval_s1,
-            &w.inner.proof_s1,
-            &mut tr1,
-        )?;
-        if !(ok0 && ok1) {
-            return Ok(false);
-        }
-        if w.inner.eval_s0 != w.inner.eval_s1 {
-            // Slot's rand_index diverged → the user's open-addressing
-            // path changed across (s0, s1]. Caller treats this as a
-            // legitimate rejection, not a malformed proof.
-            return Ok(false);
+        if ctr_us < final_idx {
+            if rprobe.fullness_proof.is_none() {
+                return Err(AegonError::Verification(
+                    "two-layer consistency intermediate route probe lacks fullness proof",
+                ));
+            }
+        } else {
+            if rprobe.fullness_proof.is_some() {
+                return Err(AegonError::Verification(
+                    "two-layer consistency landing route probe carries fullness proof",
+                ));
+            }
+            if rprobe.shard_id != proof.dest_shard_id {
+                return Err(AegonError::Verification(
+                    "two-layer consistency route landing shard_id does not match dest_shard_id",
+                ));
+            }
         }
     }
 
-    // Value half.
-    let w = &proof.value_witness;
-    let (expected_shard, final_slot) = probe_at::<H, E::ScalarField>(
-        proof.ctr0,
-        label,
-        ctx.log_n_shards,
-        ctx.shard_log_capacity(),
-    );
-    if expected_shard != w.shard_id {
-        return Err(AegonError::Verification(
-            "consistency value witness shard_id does not match H(ctr0, label)",
-        ));
-    }
-    if verify_merkle_path::<E, P>(&w.leaf_s0, w.shard_id as usize, &w.merkle_path_s0)
-        != s0_commit.merkle_root
+    // (2) Anchor the destination shard leaves under each epoch root.
+    if verify_merkle_path::<E, P>(
+        &proof.dest_leaf_s0,
+        proof.dest_shard_id as usize,
+        &proof.dest_merkle_path_s0,
+    ) != s0_commit.merkle_root
     {
         return Err(AegonError::Verification(
-            "consistency value s0 merkle path does not reconstruct s0 root",
+            "two-layer consistency dest_merkle_path_s0 does not reconstruct s0 root",
         ));
     }
-    if verify_merkle_path::<E, P>(&w.leaf_s1, w.shard_id as usize, &w.merkle_path_s1)
-        != s1_commit.merkle_root
+    if verify_merkle_path::<E, P>(
+        &proof.dest_leaf_s1,
+        proof.dest_shard_id as usize,
+        &proof.dest_merkle_path_s1,
+    ) != s1_commit.merkle_root
     {
         return Err(AegonError::Verification(
-            "consistency value s1 merkle path does not reconstruct s1 root",
+            "two-layer consistency dest_merkle_path_s1 does not reconstruct s1 root",
         ));
     }
+
+    // (3) Intra-shard slot trail. Each probe must verify openings
+    // under both s0 and s1 dest_leaf.rand_index_commitment AND its
+    // s0 evaluation must match its s1 evaluation (slot undisturbed).
+    let shard_log_capacity = ctx.shard_log_capacity();
+    let mut final_slot_bits: Option<Vec<bool>> = None;
+    for (slot_ctr_us, sprobe) in proof.slots.iter().enumerate() {
+        let slot_ctr = slot_ctr_us as u64;
+        let derived_bits = if let Some(verifier) = ctx.vrf_verifier.as_ref() {
+            if sprobe.vrf_proof.is_empty() {
+                return Err(AegonError::Verification(
+                    "two-layer consistency: vrf-mode slot probe has empty vrf_proof",
+                ));
+            }
+            verifier
+                .verify_h_slot(slot_ctr, label, &sprobe.vrf_proof, shard_log_capacity)
+                .map_err(|e| match e {
+                    super::hash::VrfVerifyError::Malformed(_) => AegonError::Verification(
+                        "two-layer consistency slot vrf_proof failed to parse",
+                    ),
+                    super::hash::VrfVerifyError::InvalidProof(_) => AegonError::Verification(
+                        "two-layer consistency slot vrf_proof did not verify",
+                    ),
+                })?
+        } else {
+            H::h_slot(slot_ctr, label, shard_log_capacity)
+        };
+        if derived_bits != sprobe.slot_bits {
+            return Err(AegonError::Verification(
+                "two-layer consistency slot bits disagree with H_slot",
+            ));
+        }
+        let point = bool_index_to_point::<E::ScalarField>(&sprobe.slot_bits);
+        let mut tr_s0 = IOPTranscript::<E::ScalarField>::new(b"aegon.rand_index.open");
+        let ok_s0 = P::verify(
+            &ctx.inner.verifier_param,
+            &proof.dest_leaf_s0.rand_index_commitment,
+            &point,
+            &sprobe.rand_index_s0_eval,
+            &sprobe.rand_index_s0_proof,
+            &mut tr_s0,
+        )?;
+        let mut tr_s1 = IOPTranscript::<E::ScalarField>::new(b"aegon.rand_index.open");
+        let ok_s1 = P::verify(
+            &ctx.inner.verifier_param,
+            &proof.dest_leaf_s1.rand_index_commitment,
+            &point,
+            &sprobe.rand_index_s1_eval,
+            &sprobe.rand_index_s1_proof,
+            &mut tr_s1,
+        )?;
+        if !(ok_s0 && ok_s1) {
+            return Ok(false);
+        }
+        if sprobe.rand_index_s0_eval != sprobe.rand_index_s1_eval {
+            return Ok(false);
+        }
+        if slot_ctr_us == proof.slots.len() - 1 {
+            final_slot_bits = Some(sprobe.slot_bits.clone());
+        }
+    }
+    let final_slot = final_slot_bits.ok_or(AegonError::Verification(
+        "two-layer consistency: missing final slot",
+    ))?;
+
+    // (4) rand_value at the final slot.
     let value_point = bool_index_to_point::<E::ScalarField>(&final_slot);
-    let mut tr0 = IOPTranscript::<E::ScalarField>::new(b"aegon.rand_value.open");
-    let ok0 = P::verify(
+    let mut tr_v_s0 = IOPTranscript::<E::ScalarField>::new(b"aegon.rand_value.open");
+    let ok_v_s0 = P::verify(
         &ctx.inner.verifier_param,
-        &w.leaf_s0.rand_value_commitment,
+        &proof.dest_leaf_s0.rand_value_commitment,
         &value_point,
-        &w.inner.eval_s0,
-        &w.inner.proof_s0,
-        &mut tr0,
+        &proof.value_rand_s0_eval,
+        &proof.value_rand_s0_proof,
+        &mut tr_v_s0,
     )?;
-    let mut tr1 = IOPTranscript::<E::ScalarField>::new(b"aegon.rand_value.open");
-    let ok1 = P::verify(
+    let mut tr_v_s1 = IOPTranscript::<E::ScalarField>::new(b"aegon.rand_value.open");
+    let ok_v_s1 = P::verify(
         &ctx.inner.verifier_param,
-        &w.leaf_s1.rand_value_commitment,
+        &proof.dest_leaf_s1.rand_value_commitment,
         &value_point,
-        &w.inner.eval_s1,
-        &w.inner.proof_s1,
-        &mut tr1,
+        &proof.value_rand_s1_eval,
+        &proof.value_rand_s1_proof,
+        &mut tr_v_s1,
     )?;
-    if !(ok0 && ok1) {
+    if !(ok_v_s0 && ok_v_s1) {
         return Ok(false);
     }
-    if w.inner.eval_s0 != w.inner.eval_s1 {
-        // Value-slot's rand_value diverged → the user's value was
-        // updated across (s0, s1]. Caller treats this as a legitimate
-        // rejection, not a malformed proof.
+    if proof.value_rand_s0_eval != proof.value_rand_s1_eval {
         return Ok(false);
     }
-
     Ok(true)
 }
 

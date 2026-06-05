@@ -25,14 +25,14 @@ use crate::{AkdLabel, LookupProof};
 
 use crate::aegon::AegonError;
 use crate::aegon::EcVrfHash;
-use crate::aegon::verify_sharded_consistency as aegon_verify_consistency;
+use crate::aegon::verify_sharded_consistency_two_layer as aegon_verify_consistency;
 use crate::aegon::verify_sharded_invariance as aegon_verify_invariance;
-use crate::aegon::verify_sharded_lookup as aegon_verify_lookup;
+use crate::aegon::verify_sharded_lookup_two_layer as aegon_verify_lookup;
 
 /// Sharded epoch commitment specialised to AKD's BN254+KZHK backend.
 pub type EpochCommitment = crate::aegon::ShardedEpochCommitment<DirectoryE, DirectoryPcs>;
 /// Sharded consistency proof specialised to AKD's BN254+KZHK backend.
-pub type ConsistencyProof = crate::aegon::ShardedConsistencyProof<DirectoryE, DirectoryPcs>;
+pub type ConsistencyProof = crate::aegon::ShardedConsistencyProofTwoLayer<DirectoryE, DirectoryPcs>;
 /// Sharded verifier context specialised to AKD's BN254+KZHK backend.
 pub type VerifierContext = crate::aegon::ShardedVerifierContext<DirectoryE, DirectoryPcs>;
 /// Aegon `AuditState` over BN254's scalar field.
@@ -73,7 +73,7 @@ pub fn verify_lookup_aegon(
     commitment: &EpochCommitment,
     label: &crate::aegon::Label,
     value: &crate::aegon::Value,
-    proof: &crate::aegon::ShardedLookupProof<DirectoryE, DirectoryPcs>,
+    proof: &crate::aegon::ShardedLookupProofTwoLayer<DirectoryE, DirectoryPcs>,
 ) -> Result<bool, AkdError> {
     aegon_verify_lookup::<DirectoryE, DirectoryPcs, EcVrfHash>(
         ctx, commitment, label, value, proof,
@@ -98,16 +98,14 @@ pub fn verify_invariance(
 }
 
 /// Verify a per-user consistency proof showing the user's slot did
-/// not change between two epochs `s0 < s1`. `expected_ctr0` should
-/// come from a fresh lookup against the *current* epoch (see
-/// [`decode_ctr0`]); pinning it client-side stops a server from
-/// substituting a different trail length on the consistency proof.
+/// not change between two epochs `s0 < s1`. In the two-layer
+/// routing model the routing trail length is bundled in the proof
+/// itself, so no client-side pinning is required.
 pub fn verify_consistency(
     ctx: &VerifierContext,
     s0: &EpochCommitment,
     s1: &EpochCommitment,
     label: &AkdLabel,
-    expected_ctr0: u64,
     proof: &ConsistencyProof,
 ) -> Result<bool, AkdError> {
     let label_bytes: crate::aegon::Label = label.0.clone();
@@ -116,18 +114,9 @@ pub fn verify_consistency(
         s0,
         s1,
         &label_bytes,
-        expected_ctr0,
         proof,
     )
     .map_err(map_aegon_err)
-}
-
-/// Extract the `ctr0` (open-addressing trail length) from an AKD
-/// [`LookupProof`]. Needed by callers that want to feed it as
-/// `expected_ctr0` into [`verify_consistency`].
-pub fn decode_ctr0(proof: &LookupProof) -> Result<u64, AkdError> {
-    let (_commit, aegon_proof) = decode_lookup_payload(&proof.commitment_nonce)?;
-    Ok(aegon_proof.ctr0)
 }
 
 fn map_aegon_err(e: AegonError) -> AkdError {

@@ -168,12 +168,6 @@ async fn user_consistency(
         .epoch_commitment(s0_epoch)
         .await
         .unwrap_or_else(|| panic!("commitment retained at epoch {s0_epoch}"));
-    let (lookup_proof, _) = directory
-        .lookup(user.label.clone())
-        .await
-        .expect("lookup-for-ctr0");
-    let expected_ctr0 =
-        aegon_facade::decode_ctr0(&lookup_proof).expect("decode ctr0 from lookup");
     let proof: ConsistencyProof = directory
         .consistency_proof(&user.label, s0_epoch)
         .await
@@ -183,7 +177,6 @@ async fn user_consistency(
         &s0,
         current,
         &user.label,
-        expected_ctr0,
         &proof,
     )
     .expect("verify_consistency");

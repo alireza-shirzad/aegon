@@ -17,10 +17,50 @@
 use ark_ff::PrimeField;
 use sha2::{Digest, Sha256};
 
-/// The two hash functions needed by Aegon's index-assignment protocol.
+/// The hash functions needed by Aegon's two-layer index-assignment
+/// protocol.
+///
+/// **Two-layer routing:** in the sharded deployment, label placement
+/// is split into:
+///   - `H_shard(shard_ctr, label) -> shard_id` — picks which shard
+///     the label lives in. `shard_ctr` advances only when the picked
+///     shard reports fullness back to the coordinator. The
+///     coordinator keeps an `O(N_shards)` map of which shards have
+///     reported full and skips them at routing time.
+///   - `H_slot(slot_ctr, label)  -> slot_bits` — within the chosen
+///     shard, picks an open-addressing slot. `slot_ctr` advances when
+///     the current slot is already occupied by a *different* label
+///     (collision); intra-shard probing is driven entirely by the
+///     shard, with no coord involvement.
+///
+/// Both layers must be VRF-backed in privacy deployments so adversaries
+/// cannot enumerate placements offline. The `EcVrfHash` impl wires both
+/// to the same process-wide VRF key with disjoint domain-separation
+/// tags so the two layers cannot be confused or replayed against each
+/// other.
+///
+/// The legacy single-layer `H_bits` is retained for the unsharded /
+/// single-shard call sites (e.g., `Aegon::publish` internal probing,
+/// `verify::verify_lookup`) that don't need the shard / slot split.
 pub trait HashSuite<F: PrimeField> {
-    /// Maps `(ctr, label)` to a boolean vector of length `num_vars`.
+    /// Single-layer hash: maps `(ctr, label)` to `num_vars` bits.
+    /// Used by the unsharded code paths. The two-layer code paths use
+    /// `h_shard` + `h_slot` instead.
     fn h_bits(ctr: u64, label: &[u8], num_vars: usize) -> Vec<bool>;
+
+    /// First-layer hash: maps `(shard_ctr, label)` to `num_vars` bits.
+    /// The output is interpreted as a `shard_id` index by the
+    /// coordinator. Must be domain-separated from `h_slot` and from
+    /// the legacy `h_bits`. `shard_ctr` advances only when the
+    /// targeted shard has reported full to the coord.
+    fn h_shard(shard_ctr: u64, label: &[u8], num_vars: usize) -> Vec<bool>;
+
+    /// Second-layer hash: maps `(slot_ctr, label)` to `num_vars` bits.
+    /// The output is interpreted as `slot_bits` within the chosen
+    /// shard. Must be domain-separated from `h_shard` and from the
+    /// legacy `h_bits`. `slot_ctr` advances on intra-shard slot
+    /// collision (regular open addressing).
+    fn h_slot(slot_ctr: u64, label: &[u8], num_vars: usize) -> Vec<bool>;
 
     /// Maps `label` to a non-zero field element.
     fn h_f(label: &[u8]) -> F;
@@ -30,30 +70,47 @@ pub trait HashSuite<F: PrimeField> {
 /// `H_bits` and `H_F` cannot collide.
 pub struct Sha256Hash;
 
+/// Shared implementation for SHA-256-based bit derivation under a
+/// domain tag. Stretches SHA-256 output if `num_vars` exceeds 256
+/// bits by re-hashing with an internal counter, same convention as
+/// the original `h_bits`. Domain separation lives entirely in the
+/// `tag` bytes — `tag` must be a unique constant per call site
+/// (one of `b"aegon.h_bits"`, `b"aegon.h_shard"`, `b"aegon.h_slot"`).
+fn sha256_bits_with_tag(tag: &[u8], ctr: u64, label: &[u8], num_vars: usize) -> Vec<bool> {
+    let mut bits = Vec::with_capacity(num_vars);
+    let mut counter: u32 = 0;
+    while bits.len() < num_vars {
+        let mut h = Sha256::new();
+        h.update(tag);
+        h.update(ctr.to_le_bytes());
+        h.update(counter.to_le_bytes());
+        h.update((label.len() as u64).to_le_bytes());
+        h.update(label);
+        let digest = h.finalize();
+        for byte in digest.iter() {
+            for bit in 0..8 {
+                if bits.len() == num_vars {
+                    return bits;
+                }
+                bits.push((byte >> bit) & 1 == 1);
+            }
+        }
+        counter += 1;
+    }
+    bits
+}
+
 impl<F: PrimeField> HashSuite<F> for Sha256Hash {
     fn h_bits(ctr: u64, label: &[u8], num_vars: usize) -> Vec<bool> {
-        // Stretch SHA-256 output if num_vars exceeds 256 bits.
-        let mut bits = Vec::with_capacity(num_vars);
-        let mut counter: u32 = 0;
-        while bits.len() < num_vars {
-            let mut h = Sha256::new();
-            h.update(b"aegon.h_bits");
-            h.update(ctr.to_le_bytes());
-            h.update(counter.to_le_bytes());
-            h.update((label.len() as u64).to_le_bytes());
-            h.update(label);
-            let digest = h.finalize();
-            for byte in digest.iter() {
-                for bit in 0..8 {
-                    if bits.len() == num_vars {
-                        return bits;
-                    }
-                    bits.push((byte >> bit) & 1 == 1);
-                }
-            }
-            counter += 1;
-        }
-        bits
+        sha256_bits_with_tag(b"aegon.h_bits", ctr, label, num_vars)
+    }
+
+    fn h_shard(shard_ctr: u64, label: &[u8], num_vars: usize) -> Vec<bool> {
+        sha256_bits_with_tag(b"aegon.h_shard", shard_ctr, label, num_vars)
+    }
+
+    fn h_slot(slot_ctr: u64, label: &[u8], num_vars: usize) -> Vec<bool> {
+        sha256_bits_with_tag(b"aegon.h_slot", slot_ctr, label, num_vars)
     }
 
     fn h_f(label: &[u8]) -> F {
@@ -157,17 +214,27 @@ pub const VRF_PROOF_BYTES: usize = akd_core::ecvrf::PROOF_LENGTH;
 pub const VRF_PUBLIC_KEY_BYTES: usize = 32;
 
 /// Build the canonical alpha string fed to `VRF.prove` / `VRF.verify`
-/// for `(ctr, label)`. Format: `b"aegon.h_bits" || ctr_le8 ||
-/// label_len_le8 || label`. Stable across `EcVrfHash`, `VrfProver`,
-/// and `VrfVerifier` — changing the encoding here is a wire-format
-/// break, so it is documented and unit-tested.
-fn vrf_alpha(ctr: u64, label: &[u8]) -> Vec<u8> {
-    let mut alpha = Vec::with_capacity(12 + 8 + 8 + label.len());
-    alpha.extend_from_slice(b"aegon.h_bits");
+/// for `(domain_tag, ctr, label)`. Format: `tag || ctr_le8 ||
+/// label_len_le8 || label`. The tag is the layer's domain-separation
+/// string — one of `b"aegon.h_bits"`, `b"aegon.h_shard"`,
+/// `b"aegon.h_slot"` — and must match between prover and verifier.
+/// Stable across `EcVrfHash`, `VrfProver`, and `VrfVerifier`; changing
+/// the encoding here is a wire-format break, so it is documented and
+/// unit-tested.
+fn vrf_alpha_with_tag(tag: &[u8], ctr: u64, label: &[u8]) -> Vec<u8> {
+    let mut alpha = Vec::with_capacity(tag.len() + 8 + 8 + label.len());
+    alpha.extend_from_slice(tag);
     alpha.extend_from_slice(&ctr.to_le_bytes());
     alpha.extend_from_slice(&(label.len() as u64).to_le_bytes());
     alpha.extend_from_slice(label);
     alpha
+}
+
+/// Legacy single-layer alpha (`b"aegon.h_bits"` tag). Retained so the
+/// unsharded code paths and existing unit tests stay byte-stable.
+/// New code should use `vrf_alpha_with_tag` with a layer-specific tag.
+fn vrf_alpha(ctr: u64, label: &[u8]) -> Vec<u8> {
+    vrf_alpha_with_tag(b"aegon.h_bits", ctr, label)
 }
 
 /// Slice the 64-byte VRF output into `num_vars` Boolean bits using
@@ -340,15 +407,55 @@ impl VrfProver {
     /// Compute `H_bits(ctr, label)` together with the VRF proof.
     /// The proof bytes (`VRF_PROOF_BYTES = 80`) attach to the lookup
     /// response; the verifier then recovers the same bits via
-    /// `VrfVerifier::verify_h_bits`.
+    /// `VrfVerifier::verify_h_bits`. Used by the legacy single-layer
+    /// code paths; new code should use `prove_h_shard` / `prove_h_slot`.
     pub fn prove_h_bits(
         &self,
         ctr: u64,
         label: &[u8],
         num_vars: usize,
     ) -> (Vec<bool>, [u8; VRF_PROOF_BYTES]) {
+        self.prove_with_tag(b"aegon.h_bits", ctr, label, num_vars)
+    }
+
+    /// Compute `H_shard(shard_ctr, label)` together with the VRF
+    /// proof. First layer of the two-layer routing — selects which
+    /// shard. The coordinator only needs `shard_ctr > 0` when the
+    /// targeted shard has reported full; in steady state `shard_ctr =
+    /// 0` is sufficient.
+    pub fn prove_h_shard(
+        &self,
+        shard_ctr: u64,
+        label: &[u8],
+        num_vars: usize,
+    ) -> (Vec<bool>, [u8; VRF_PROOF_BYTES]) {
+        self.prove_with_tag(b"aegon.h_shard", shard_ctr, label, num_vars)
+    }
+
+    /// Compute `H_slot(slot_ctr, label)` together with the VRF
+    /// proof. Second layer of the two-layer routing — picks an
+    /// open-addressing slot within the shard chosen by `prove_h_shard`.
+    /// `slot_ctr` advances on intra-shard collision.
+    pub fn prove_h_slot(
+        &self,
+        slot_ctr: u64,
+        label: &[u8],
+        num_vars: usize,
+    ) -> (Vec<bool>, [u8; VRF_PROOF_BYTES]) {
+        self.prove_with_tag(b"aegon.h_slot", slot_ctr, label, num_vars)
+    }
+
+    /// Shared core: prove the VRF for `(tag, ctr, label)` and return
+    /// `(bits, proof)`. Tag is the layer's domain-separation string.
+    fn prove_with_tag(
+        &self,
+        tag: &[u8],
+        ctr: u64,
+        label: &[u8],
+        num_vars: usize,
+    ) -> (Vec<bool>, [u8; VRF_PROOF_BYTES]) {
         use akd_core::ecvrf::Output;
-        let alpha = vrf_alpha(ctr, label);
+        let alpha = vrf_alpha_with_tag(tag, ctr, label);
         let proof = self.sk.prove(&alpha);
         let output = Output::from(&proof);
         let bits = output_to_bits(&output.to_bytes(), num_vars);
@@ -407,9 +514,50 @@ impl VrfVerifier {
     /// Verify `proof` against `(ctr, label)` under the embedded public
     /// key and recover the first `num_vars` bits of the VRF output.
     /// On verification failure the returned `Err` carries the reason
-    /// (malformed bytes vs invalid proof).
+    /// (malformed bytes vs invalid proof). Legacy single-layer entry;
+    /// new code should use `verify_h_shard` / `verify_h_slot`.
     pub fn verify_h_bits(
         &self,
+        ctr: u64,
+        label: &[u8],
+        proof_bytes: &[u8],
+        num_vars: usize,
+    ) -> Result<Vec<bool>, VrfVerifyError> {
+        self.verify_with_tag(b"aegon.h_bits", ctr, label, proof_bytes, num_vars)
+    }
+
+    /// Verify a `prove_h_shard` proof and recover the shard-routing
+    /// bits. The verifier consumes the same `shard_ctr` the server
+    /// used to land on a non-full shard — the shard_ctr is part of the
+    /// public lookup proof.
+    pub fn verify_h_shard(
+        &self,
+        shard_ctr: u64,
+        label: &[u8],
+        proof_bytes: &[u8],
+        num_vars: usize,
+    ) -> Result<Vec<bool>, VrfVerifyError> {
+        self.verify_with_tag(b"aegon.h_shard", shard_ctr, label, proof_bytes, num_vars)
+    }
+
+    /// Verify a `prove_h_slot` proof and recover the slot bits within
+    /// the chosen shard. The verifier walks one of these per
+    /// intra-shard probe in the lookup proof.
+    pub fn verify_h_slot(
+        &self,
+        slot_ctr: u64,
+        label: &[u8],
+        proof_bytes: &[u8],
+        num_vars: usize,
+    ) -> Result<Vec<bool>, VrfVerifyError> {
+        self.verify_with_tag(b"aegon.h_slot", slot_ctr, label, proof_bytes, num_vars)
+    }
+
+    /// Shared core: verify the VRF for `(tag, ctr, label)` and return
+    /// the recovered bits.
+    fn verify_with_tag(
+        &self,
+        tag: &[u8],
         ctr: u64,
         label: &[u8],
         proof_bytes: &[u8],
@@ -418,7 +566,7 @@ impl VrfVerifier {
         use akd_core::ecvrf::{Output, Proof};
         let proof = Proof::try_from(proof_bytes)
             .map_err(|e| VrfVerifyError::Malformed(format!("{e:?}")))?;
-        let alpha = vrf_alpha(ctr, label);
+        let alpha = vrf_alpha_with_tag(tag, ctr, label);
         self.pk
             .verify(&proof, &alpha)
             .map_err(|e| VrfVerifyError::InvalidProof(format!("{e:?}")))?;
@@ -458,8 +606,35 @@ impl EcVrfHash {
         label: &[u8],
         num_vars: usize,
     ) -> (Vec<bool>, [u8; VRF_PROOF_BYTES]) {
+        Self::prove_with_tag(b"aegon.h_bits", ctr, label, num_vars)
+    }
+
+    /// Two-layer entry: prove + bits for the shard-routing hash.
+    pub fn prove_h_shard(
+        shard_ctr: u64,
+        label: &[u8],
+        num_vars: usize,
+    ) -> (Vec<bool>, [u8; VRF_PROOF_BYTES]) {
+        Self::prove_with_tag(b"aegon.h_shard", shard_ctr, label, num_vars)
+    }
+
+    /// Two-layer entry: prove + bits for the intra-shard slot hash.
+    pub fn prove_h_slot(
+        slot_ctr: u64,
+        label: &[u8],
+        num_vars: usize,
+    ) -> (Vec<bool>, [u8; VRF_PROOF_BYTES]) {
+        Self::prove_with_tag(b"aegon.h_slot", slot_ctr, label, num_vars)
+    }
+
+    fn prove_with_tag(
+        tag: &[u8],
+        ctr: u64,
+        label: &[u8],
+        num_vars: usize,
+    ) -> (Vec<bool>, [u8; VRF_PROOF_BYTES]) {
         use akd_core::ecvrf::Output;
-        let alpha = vrf_alpha(ctr, label);
+        let alpha = vrf_alpha_with_tag(tag, ctr, label);
         let proof = vrf_secret_key().prove(&alpha);
         let output = Output::from(&proof);
         let bits = output_to_bits(&output.to_bytes(), num_vars);
@@ -474,6 +649,16 @@ impl<F: PrimeField> HashSuite<F> for EcVrfHash {
         // signature is static. Production call sites surface the
         // proof via `VrfProver` / `EcVrfHash::prove_h_bits` instead.
         let (bits, _proof) = Self::prove_h_bits(ctr, label, num_vars);
+        bits
+    }
+
+    fn h_shard(shard_ctr: u64, label: &[u8], num_vars: usize) -> Vec<bool> {
+        let (bits, _proof) = Self::prove_h_shard(shard_ctr, label, num_vars);
+        bits
+    }
+
+    fn h_slot(slot_ctr: u64, label: &[u8], num_vars: usize) -> Vec<bool> {
+        let (bits, _proof) = Self::prove_h_slot(slot_ctr, label, num_vars);
         bits
     }
 
@@ -570,5 +755,74 @@ mod ecvrf_tests {
             let (bits_keyed, _proof) = prover.prove_h_bits(ctr, b"frank", 27);
             assert_eq!(bits_static, bits_keyed);
         }
+    }
+
+    #[test]
+    fn layers_are_domain_separated() {
+        // The three layers (h_bits, h_shard, h_slot) must produce
+        // INDEPENDENT outputs for the same (ctr, label) — that's the
+        // only thing preventing a server from replaying an h_shard
+        // proof as an h_slot proof (or vice versa) and confusing the
+        // verifier about which layer it just consumed. Backed by
+        // distinct ASCII tags in the alpha string.
+        let prover = VrfProver::from_seed(&BENCH_VRF_SEED);
+        let label = b"replay-attacker@example.com";
+        for ctr in 0u64..3 {
+            let (bits_bits,  proof_bits)  = prover.prove_h_bits(ctr,  label, 27);
+            let (bits_shard, proof_shard) = prover.prove_h_shard(ctr, label, 27);
+            let (bits_slot,  proof_slot)  = prover.prove_h_slot(ctr,  label, 27);
+            assert_ne!(bits_bits,  bits_shard, "h_bits vs h_shard collide at ctr={ctr}");
+            assert_ne!(bits_bits,  bits_slot,  "h_bits vs h_slot collide at ctr={ctr}");
+            assert_ne!(bits_shard, bits_slot,  "h_shard vs h_slot collide at ctr={ctr}");
+            assert_ne!(proof_bits,  proof_shard);
+            assert_ne!(proof_bits,  proof_slot);
+            assert_ne!(proof_shard, proof_slot);
+        }
+    }
+
+    #[test]
+    fn shard_layer_round_trip() {
+        let prover = VrfProver::from_seed(&BENCH_VRF_SEED);
+        let pk_bytes = prover.public_key().as_bytes().to_vec();
+        let verifier = VrfVerifier::from_public_key_bytes(&pk_bytes).unwrap();
+        let label = b"shard-layer-rt";
+        for ctr in 0u64..4 {
+            let (bits, proof) = prover.prove_h_shard(ctr, label, 7);
+            let recovered = verifier.verify_h_shard(ctr, label, &proof, 7).unwrap();
+            assert_eq!(bits, recovered);
+            // An h_bits-encoded proof must not verify under h_shard.
+            let (_, wrong_layer) = prover.prove_h_bits(ctr, label, 7);
+            assert!(verifier.verify_h_shard(ctr, label, &wrong_layer, 7).is_err());
+        }
+    }
+
+    #[test]
+    fn slot_layer_round_trip() {
+        let prover = VrfProver::from_seed(&BENCH_VRF_SEED);
+        let pk_bytes = prover.public_key().as_bytes().to_vec();
+        let verifier = VrfVerifier::from_public_key_bytes(&pk_bytes).unwrap();
+        let label = b"slot-layer-rt";
+        for ctr in 0u64..4 {
+            let (bits, proof) = prover.prove_h_slot(ctr, label, 22);
+            let recovered = verifier.verify_h_slot(ctr, label, &proof, 22).unwrap();
+            assert_eq!(bits, recovered);
+            // Cross-layer rejection: an h_shard proof must not verify
+            // under h_slot for the same (ctr, label).
+            let (_, wrong_layer) = prover.prove_h_shard(ctr, label, 22);
+            assert!(verifier.verify_h_slot(ctr, label, &wrong_layer, 22).is_err());
+        }
+    }
+
+    #[test]
+    fn sha256_layers_domain_separated() {
+        // Same property must hold for the Sha256 suite — the bench
+        // benchmarks use it, and we want byte-stable outputs that
+        // can't be confused across layers.
+        let bits_b = <Sha256Hash as HashSuite<Fr>>::h_bits(0, b"x", 27);
+        let bits_a = <Sha256Hash as HashSuite<Fr>>::h_shard(0, b"x", 27);
+        let bits_s = <Sha256Hash as HashSuite<Fr>>::h_slot(0, b"x", 27);
+        assert_ne!(bits_b, bits_a);
+        assert_ne!(bits_b, bits_s);
+        assert_ne!(bits_a, bits_s);
     }
 }

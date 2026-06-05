@@ -62,7 +62,7 @@ fn run_zk_path() {
     let updates: Vec<(Vec<u8>, Vec<u8>)> = (0..6)
         .map(|i| (format!("alice-{i}").into_bytes(), format!("pk-{i}").into_bytes()))
         .collect();
-    let next = server.publish(&updates).expect("publish zk");
+    let next = server.publish_two_layer(&updates).expect("publish_two_layer zk");
     println!("  published epoch {}.", next.epoch);
 
     // (1) Each per-shard leaf must carry a sigma proof under hiding SRS.
@@ -130,7 +130,7 @@ fn run_non_zk_path() {
     let updates: Vec<(Vec<u8>, Vec<u8>)> = (0..6)
         .map(|i| (format!("bob-{i}").into_bytes(), format!("pk-{i}").into_bytes()))
         .collect();
-    let next = server.publish(&updates).expect("publish non-zk");
+    let next = server.publish_two_layer(&updates).expect("publish_two_layer non-zk");
 
     for (i, shard_commit) in next.per_shard.iter().enumerate() {
         assert!(

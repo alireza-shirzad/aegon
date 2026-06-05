@@ -788,29 +788,6 @@ pub(crate) fn key_value(label: &[u8]) -> Vec<u8> {
     k
 }
 
-/// `aegon:routing:` prefix for the `CanonicalSerialize`d `LabelRouting`.
-pub(crate) fn key_routing(label: &[u8]) -> Vec<u8> {
-    let mut k = b"aegon:routing:".to_vec();
-    k.extend_from_slice(label);
-    k
-}
-
-/// `aegon:slot:{shard_id}:{slot_idx}` for occupancy + reverse-index.
-/// The presence of this key means "shard `shard_id`'s slot `slot_idx`
-/// is occupied"; the value is the label that owns the slot, so a
-/// fresh shard can reconstruct its `(index_poly, value_poly)` by
-/// pairing `slot:` entries with their `value:` counterparts.
-pub(crate) fn key_slot(shard_id: u32, slot_idx: usize) -> Vec<u8> {
-    format!("aegon:slot:{shard_id}:{slot_idx}").into_bytes()
-}
-
-/// `aegon:labels` — SET-typed key of every label ever published.
-/// Used by recovery to enumerate `(label, routing, value)` triples
-/// without relying on `SCAN MATCH` against binary keys.
-pub(crate) fn key_labels_set() -> &'static [u8] {
-    b"aegon:labels"
-}
-
 /// `aegon:coord:state` — one key, serialized `(epoch, r_index, r_value)`.
 pub(crate) fn key_coord_state() -> &'static [u8] {
     b"aegon:coord:state"
@@ -858,4 +835,14 @@ pub(crate) fn key_label_placement(label: &[u8]) -> Vec<u8> {
     let mut k = b"aegon:label_placement:".to_vec();
     k.extend_from_slice(label);
     k
+}
+
+/// `aegon:coord:shard_fullness` — single key holding the two-layer
+/// routing's per-shard fullness map. Wire format is documented on
+/// `ShardedAegon::try_recover_shard_full_proofs`. Size is
+/// `O(N_shards)` and never grows with the label count; this is the
+/// only label-count-independent state the two-layer refactor added
+/// to the coord-side keyspace.
+pub(crate) fn key_shard_fullness() -> &'static [u8] {
+    b"aegon:coord:shard_fullness"
 }

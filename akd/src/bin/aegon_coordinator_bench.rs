@@ -236,10 +236,10 @@ fn main() -> ExitCode {
                 })
                 .collect();
             let t = Instant::now();
-            match server.publish(&updates) {
+            match server.publish_two_layer(&updates) {
                 Ok(_commit) => {},
                 Err(e) => {
-                    eprintln!("error: publish failed (batch={batch_size}, sample={sample_idx}): {e}");
+                    eprintln!("error: publish_two_layer failed (batch={batch_size}, sample={sample_idx}): {e}");
                     return ExitCode::from(1);
                 },
             }

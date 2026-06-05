@@ -31,8 +31,8 @@ use crate::{
 };
 
 use crate::aegon::{
-    optimal_kzh_k, EcVrfHash, ShardedAegon, ShardedAegonConfig, ShardedConsistencyProof,
-    ShardedEpochCommitment, ShardedLookupProof, ShardedVerifierContext, VrfProver,
+    optimal_kzh_k, EcVrfHash, ShardedAegon, ShardedAegonConfig, ShardedConsistencyProofTwoLayer,
+    ShardedEpochCommitment, ShardedLookupProofTwoLayer, ShardedVerifierContext, VrfProver,
 };
 use akd_core::configuration::Configuration;
 use akd_core::verify::history::HistoryParams;
@@ -191,7 +191,7 @@ where
         let commitment = {
             let mut aegon = self.aegon.lock().await;
             aegon
-                .publish(&aegon_updates)
+                .publish_two_layer(&aegon_updates)
                 .map_err(|e| AkdError::Directory(DirectoryError::Publish(format!("aegon publish: {e}"))))?
         };
 
@@ -228,7 +228,7 @@ where
         // here. With `DbSource::None`, the DB-side value is the
         // empty vector anyway.
         let (_db_value, proof) = aegon
-            .lookup(&akd_label.0)
+            .lookup_two_layer(&akd_label.0)
             .map_err(|e| AkdError::Directory(DirectoryError::Publish(format!("aegon lookup: {e}"))))?;
         let commitment = aegon.current_commitment();
         drop(aegon);
@@ -369,10 +369,10 @@ where
         &self,
         akd_label: &AkdLabel,
         s0: u64,
-    ) -> Result<ShardedConsistencyProof<DirectoryE, DirectoryPcs>, AkdError> {
+    ) -> Result<ShardedConsistencyProofTwoLayer<DirectoryE, DirectoryPcs>, AkdError> {
         let aegon = self.aegon.lock().await;
         aegon
-            .consistency_proof(&akd_label.0, s0)
+            .consistency_proof_two_layer(&akd_label.0, s0)
             .map_err(|e| AkdError::Directory(DirectoryError::Publish(format!("aegon consistency: {e}"))))
     }
 
@@ -512,12 +512,12 @@ pub(crate) fn get_marker_version(version: u64) -> u64 {
 #[derive(CanonicalSerialize, CanonicalDeserialize)]
 struct LookupPayload {
     commitment: ShardedEpochCommitment<DirectoryE, DirectoryPcs>,
-    proof: ShardedLookupProof<DirectoryE, DirectoryPcs>,
+    proof: ShardedLookupProofTwoLayer<DirectoryE, DirectoryPcs>,
 }
 
 fn encode_lookup_payload(
     commitment: &ShardedEpochCommitment<DirectoryE, DirectoryPcs>,
-    proof: &ShardedLookupProof<DirectoryE, DirectoryPcs>,
+    proof: &ShardedLookupProofTwoLayer<DirectoryE, DirectoryPcs>,
 ) -> Vec<u8> {
     let payload = LookupPayload {
         commitment: commitment.clone(),
@@ -535,7 +535,7 @@ pub(crate) fn decode_lookup_payload(
 ) -> Result<
     (
         ShardedEpochCommitment<DirectoryE, DirectoryPcs>,
-        ShardedLookupProof<DirectoryE, DirectoryPcs>,
+        ShardedLookupProofTwoLayer<DirectoryE, DirectoryPcs>,
     ),
     AkdError,
 > {

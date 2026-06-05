@@ -18,8 +18,9 @@
 //! consistency proof should accept or reject.
 
 use akd::aegon::{
-    verify_sharded_consistency, verify_sharded_invariance, verify_sharded_lookup, AuditState,
-    Sha256Hash, ShardedAegon, ShardedAegonConfig, ShardedEpochCommitment, ShardedVerifierContext,
+    verify_sharded_consistency_two_layer, verify_sharded_invariance, verify_sharded_lookup_two_layer,
+    AuditState, Sha256Hash, ShardedAegon, ShardedAegonConfig, ShardedEpochCommitment,
+    ShardedVerifierContext,
 };
 use ark_bn254::Bn254;
 use ark_ec::pairing::Pairing;
@@ -72,7 +73,7 @@ fn audit_one_transition(
     for (idx, new_value) in updates {
         entries.push((truth[*idx].label.clone(), new_value.as_bytes().to_vec()));
     }
-    let commit = server.publish(&entries).expect("publish");
+    let commit = server.publish_two_layer(&entries).expect("publish_two_layer");
     for (name, value) in sign_ups {
         truth.push(UserRecord {
             label: name.as_bytes().to_vec(),
@@ -96,15 +97,15 @@ fn audit_one_transition(
 }
 
 fn user_lookup(server: &Sharded, ctx: &ShardedCtx, user: &UserRecord, commit: &Commit) {
-    let (_db_value, proof) = server.lookup(&user.label).expect("lookup");
-    let ok = verify_sharded_lookup::<Bn254, Pcs, Sha256Hash>(
+    let (_db_value, proof) = server.lookup_two_layer(&user.label).expect("lookup_two_layer");
+    let ok = verify_sharded_lookup_two_layer::<Bn254, Pcs, Sha256Hash>(
         ctx,
         commit,
         &user.label,
         &user.value,
         &proof,
     )
-    .expect("verify_sharded_lookup");
+    .expect("verify_sharded_lookup_two_layer");
     assert!(ok, "honest lookup must verify for {:?}", user.label);
 }
 
@@ -121,21 +122,16 @@ fn user_consistency(
         s0.epoch,
         s1.epoch
     );
-    // Pin ctr0 from a fresh lookup — this is the security-critical
-    // step that prevents a server from substituting a different trail
-    // length on the consistency proof.
-    let (_db_value, lookup) = server.lookup(&user.label).expect("lookup-for-ctr0");
-    let expected_ctr0 = lookup.ctr0;
-    let proof = server.consistency_proof(&user.label, s0.epoch).expect("consistency_proof");
-    let result = verify_sharded_consistency::<Bn254, Pcs, Sha256Hash>(
-        ctx,
-        s0,
-        s1,
-        &user.label,
-        expected_ctr0,
-        &proof,
+    // Two-layer consistency proof: the slot+ctr trail is bundled in
+    // the proof's `route` + `slots` vectors, so the verifier doesn't
+    // need an externally-pinned ctr0.
+    let proof = server
+        .consistency_proof_two_layer(&user.label, s0.epoch)
+        .expect("consistency_proof_two_layer");
+    let result = verify_sharded_consistency_two_layer::<Bn254, Pcs, Sha256Hash>(
+        ctx, s0, s1, &user.label, &proof,
     )
-    .expect("verify_sharded_consistency");
+    .expect("verify_sharded_consistency_two_layer");
 
     let value_changed = user.last_change_epoch > s0.epoch;
     if value_changed {
