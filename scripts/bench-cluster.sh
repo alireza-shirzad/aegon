@@ -1532,6 +1532,11 @@ MIGRATION_CHUNK_SIZES="${MIGRATION_CHUNK_SIZES:-16384,65536,262144,1048576}"
 MIGRATION_TARGET_FILL_PERCENT="${MIGRATION_TARGET_FILL_PERCENT:-90}"
 MIGRATION_MILESTONE_FILLS="${MIGRATION_MILESTONE_FILLS:-1,5,10,30,60,90}"
 MIGRATION_TRUE_LOG_CAP="${MIGRATION_TRUE_LOG_CAP:-$(derive_true_log_cap)}"
+# Default to single-batch-per-K: one publish per K against the
+# cleared empty dictionary, ranked by throughput. Set
+# MIGRATION_SINGLE_BATCH=0 to force the full climb to
+# MIGRATION_TARGET_FILL_PERCENT instead.
+MIGRATION_SINGLE_BATCH="${MIGRATION_SINGLE_BATCH:-1}"
 # Regime tag — drives the output filename prefix so multiple
 # regimes' results land in the same dir without colliding. Default
 # falls back to "n${N_SHARDS}" so a missing env var still uniquely
@@ -1601,9 +1606,19 @@ cmd_migration_bench() {
   local local_tar="$LOCAL_MIGRATION_BENCH_DIR/${LOCAL_OUT_NAME_PREFIX:-}${MIGRATION_REGIME}.tar"
   : > "$local_log"
 
+  local mode_flag=""
+  local mode_summary=""
+  if [[ "$MIGRATION_SINGLE_BATCH" == "1" ]]; then
+    mode_flag="--single-batch-per-k"
+    mode_summary="sweep=single-batch-per-K"
+  else
+    mode_flag=""
+    mode_summary="target_fill=${MIGRATION_TARGET_FILL_PERCENT}%"
+  fi
+
   local unit="aegon-migration-bench"
   local me; me="$(whoami)"
-  log "[$cname] starting aegon_migration_bench as systemd unit '$unit' (distributed, K=$MIGRATION_CHUNK_SIZES, target_fill=${MIGRATION_TARGET_FILL_PERCENT}%)"
+  log "[$cname] starting aegon_migration_bench as systemd unit '$unit' (distributed, K=$MIGRATION_CHUNK_SIZES, $mode_summary)"
   remote "$cname" "
     sudo systemctl reset-failed $unit 2>/dev/null || true
     sudo systemctl stop $unit 2>/dev/null || true
@@ -1635,6 +1650,7 @@ cmd_migration_bench() {
           --prefill-seed $PREFILL_SEED \
           --db-path $COORD_DB_PATH \
           --private \
+          $mode_flag \
           --out-template $remote_out_dir/${MIGRATION_REGIME}_K{K}.json > $remote_log 2>&1
       '
     echo LAUNCHED
@@ -1720,35 +1736,82 @@ cmd_migration_bench() {
       || log "WARN: tar -x $local_tar failed"
   fi
 
-  # Pick best K by minimum total elapsed_ms — same logic as
-  # scripts/migration-bench.sh::pick_best_k. Pure-bash JSON probe;
-  # the per-K JSON's "total.elapsed_ms" is unique within the file.
-  local best_k="" best_ms=""
+  # OOM / non-zero-exit handling: the remote bench writes one
+  # atomic JSON per K (temp file + rename) as it goes, so anything
+  # that completed before a crash is durable on the coord and
+  # already in $LOCAL_MIGRATION_BENCH_DIR via the tar fetch above.
+  # The systemd unit's ExecMainStatus translates: 0 = clean,
+  # 137 = SIGKILL (almost always the OOM-killer firing on the
+  # K whose batch wouldn't fit in coord RAM), 143 = SIGTERM,
+  # anything else = a real bench error. Always run inventory +
+  # picker against whatever K's actually finished.
+  if (( poll_rc != 0 )); then
+    case "$poll_rc" in
+      137) log "[$cname] WARN: aegon_migration_bench OOM-killed (SIGKILL, code 137) — almost certainly the kernel OOM-killer on the next K. K's that completed before this point are durable on disk." ;;
+      143) log "[$cname] WARN: aegon_migration_bench killed by SIGTERM (code 143) — manual kill or external timeout." ;;
+      *)   log "[$cname] WARN: aegon_migration_bench exited with status $poll_rc — see $local_log for the failing K's error." ;;
+    esac
+  fi
+
+  # Full per-K inventory parsed off the JSONs on disk. Always
+  # logged, including post-crash, so the run record shows exactly
+  # which K's were measured even when the binary's own end-of-run
+  # summary line never got to print.
+  shopt -s nullglob
+  local inv_files=( "$LOCAL_MIGRATION_BENCH_DIR/${MIGRATION_REGIME}_K"*.json )
+  shopt -u nullglob
+  if (( ${#inv_files[@]} == 0 )); then
+    log "  inventory: no per-K JSONs found for regime=$MIGRATION_REGIME"
+  else
+    log "  K-sweep inventory for regime=$MIGRATION_REGIME:"
+    for f in "${inv_files[@]}"; do
+      local k ms tp
+      k="$(grep -oE '"chunk_size":[[:space:]]*[0-9]+' "$f" | head -1 | grep -oE '[0-9]+')"
+      ms="$(grep -A2 '"total":' "$f" | grep -oE '"elapsed_ms":[[:space:]]*[0-9.]+' | head -1 | grep -oE '[0-9.]+')"
+      tp="$(grep -A3 '"total":' "$f" | grep -oE '"throughput_users_per_sec":[[:space:]]*[0-9.]+' | head -1 | grep -oE '[0-9.]+')"
+      if [[ -z "$k" || -z "$tp" || -z "$ms" ]]; then
+        log "    warn: could not parse $f"
+        continue
+      fi
+      printf "%s\t    K=%-8s elapsed=%8.1f s   throughput=%8.0f users/sec\n" \
+        "$k" "$k" "$(awk "BEGIN { print $ms/1000 }")" "$tp"
+    done | sort -n | cut -f2- | while IFS= read -r line; do log "$line"; done
+  fi
+
+  # Pick best K by max throughput_users_per_sec. Throughput is the
+  # universally correct metric (single-batch mode publishes a
+  # different number of users per K so elapsed scales with K;
+  # full-climb mode has the same target_count across K's so
+  # throughput and 1/elapsed agree).
+  local best_k="" best_tp=""
   shopt -s nullglob
   for f in "$LOCAL_MIGRATION_BENCH_DIR/${MIGRATION_REGIME}_K"*.json; do
-    local k ms
+    local k tp
     k="$(grep -oE '"chunk_size":[[:space:]]*[0-9]+' "$f" | head -1 | grep -oE '[0-9]+')"
-    ms="$(grep -A2 '"total":' "$f" | grep -oE '"elapsed_ms":[[:space:]]*[0-9.]+' | head -1 | grep -oE '[0-9.]+')"
-    if [[ -z "$k" || -z "$ms" ]]; then
-      log "  warn: could not parse k/elapsed_ms from $f, skipping"
+    tp="$(grep -A3 '"total":' "$f" | grep -oE '"throughput_users_per_sec":[[:space:]]*[0-9.]+' | head -1 | grep -oE '[0-9.]+')"
+    if [[ -z "$k" || -z "$tp" ]]; then
+      log "  warn: could not parse k/throughput from $f, skipping"
       continue
     fi
-    if [[ -z "$best_ms" ]] || awk "BEGIN { exit !($ms < $best_ms) }"; then
+    if [[ -z "$best_tp" ]] || awk "BEGIN { exit !($tp > $best_tp) }"; then
       best_k="$k"
-      best_ms="$ms"
+      best_tp="$tp"
     fi
   done
   shopt -u nullglob
   if [[ -n "$best_k" ]]; then
     echo "$best_k" > "$LOCAL_MIGRATION_BENCH_DIR/${MIGRATION_REGIME}_best_k.txt"
-    log "  picked K=$best_k (total elapsed=${best_ms} ms) for regime=$MIGRATION_REGIME"
+    log "  picked K=$best_k (throughput=${best_tp} users/sec) for regime=$MIGRATION_REGIME"
     log "  wrote $LOCAL_MIGRATION_BENCH_DIR/${MIGRATION_REGIME}_best_k.txt"
   else
     log "  warn: no per-K JSONs found, not writing best_k.txt"
   fi
 
-  if (( poll_rc != 0 )); then
-    log "[$cname] aegon_migration_bench exited with status $poll_rc"
+  # NB: a crash where 0 K's completed leaves no best_k.txt — the
+  # downstream publish-bench's read_best_k_or_default falls back
+  # to its built-in default in that case. Only treat the run as a
+  # hard failure if there's truly nothing to pick from.
+  if (( poll_rc != 0 )) && [[ -z "$best_k" ]]; then
     return "$poll_rc"
   fi
   log "migration-bench complete: $LOCAL_MIGRATION_BENCH_DIR/${MIGRATION_REGIME}_K*.json"

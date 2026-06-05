@@ -343,7 +343,13 @@ struct Args {
     /// (`--throughput-lookup-kind`) for `--throughput-window-secs`
     /// seconds; the achieved QPS at each level + p50/p90/p99 latency
     /// land in the JSON's `concurrency_sweep` block.
-    #[arg(long, value_delimiter = ',', default_value = "")]
+    // No `default_value` here: clap eagerly parses the default
+    // string into `Vec<usize>` via `value_delimiter`, and an empty
+    // default ("") trips "cannot parse integer from empty string"
+    // before main even runs. With no default an omitted flag leaves
+    // the Vec empty — and the runtime check at line 1364 already
+    // gates the whole concurrency-sweep block on `.is_empty()`.
+    #[arg(long, value_delimiter = ',')]
     throughput_concurrencies: Vec<usize>,
 
     /// Measurement window per concurrency level, in seconds.

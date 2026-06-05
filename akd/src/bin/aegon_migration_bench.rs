@@ -88,9 +88,20 @@ struct Args {
 
     /// Target fill (% of true capacity) to climb to. The migration
     /// ends when `current_count >= target_fill_percent / 100 *
-    /// 2^true_log_capacity`.
+    /// 2^true_log_capacity`. Ignored in `--single-batch-per-k` mode.
     #[arg(long, default_value_t = 90)]
     target_fill_percent: u32,
+
+    /// Skip the full climb: for each K, publish exactly one batch of
+    /// K updates against the freshly-cleared empty dictionary and
+    /// measure that publish's wall-clock. Picks the best K by
+    /// throughput. Cheap relative to climbing to e.g. 90% fill (one
+    /// publish per K instead of ~10⁶/K). The assumption is that K
+    /// ordering doesn't flip much across fill levels — if you suspect
+    /// it does for your regime, run with `--target-fill-percent` set
+    /// to the fill range you actually care about instead.
+    #[arg(long, default_value_t = false)]
+    single_batch_per_k: bool,
 
     /// Comma-separated list of chunk sizes to sweep. Each value is a
     /// distinct climb (epoch 0 → target fill) with that constant
@@ -306,8 +317,20 @@ fn run_one_climb(
                 .map_err(|e| format!("mkdir -p '{}': {e}", parent.display()))?;
         }
     }
-    std::fs::write(out_path, json.as_bytes())
-        .map_err(|e| format!("write '{}': {e}", out_path.display()))?;
+    // Atomic write: a mid-write OOM-kill on the next K (or a
+    // crash in this process for any other reason) would otherwise
+    // leave a half-written file that downstream pick_best_k logic
+    // can't parse. Write to a sibling temp file then rename — on
+    // POSIX, rename(2) is atomic w.r.t. crashes.
+    let tmp_path = {
+        let mut p = out_path.to_path_buf().into_os_string();
+        p.push(".tmp");
+        std::path::PathBuf::from(p)
+    };
+    std::fs::write(&tmp_path, json.as_bytes())
+        .map_err(|e| format!("write '{}': {e}", tmp_path.display()))?;
+    std::fs::rename(&tmp_path, out_path)
+        .map_err(|e| format!("rename '{}' -> '{}': {e}", tmp_path.display(), out_path.display()))?;
     eprintln!("[migration-bench K={chunk_size}] wrote {}", out_path.display());
 
     Ok(ClimbResult {
@@ -376,53 +399,75 @@ fn main() -> ExitCode {
 
     // ---- compute the climb plan ------------------------------------
     let true_capacity: u64 = 1u64 << args.true_log_capacity;
-    let target_count: u64 =
-        ((true_capacity as u128) * (args.target_fill_percent as u128) / 100u128) as u64;
-    if target_count == 0 {
-        eprintln!(
-            "error: target_count is 0 (target_fill_percent={} * 2^{} / 100); use a larger fill",
-            args.target_fill_percent, args.true_log_capacity,
-        );
-        return ExitCode::from(2);
-    }
+    // In single-batch mode, target_count + milestones are computed
+    // per-K inside the loop (target_count = chunk_size). In climb
+    // mode, both are shared across K's and computed once.
+    let climb_target_count: u64 = if args.single_batch_per_k {
+        0
+    } else {
+        ((true_capacity as u128) * (args.target_fill_percent as u128) / 100u128) as u64
+    };
+    let climb_milestone_targets: Vec<(u32, u64)> = if args.single_batch_per_k {
+        Vec::new()
+    } else {
+        if climb_target_count == 0 {
+            eprintln!(
+                "error: target_count is 0 (target_fill_percent={} * 2^{} / 100); use a larger fill",
+                args.target_fill_percent, args.true_log_capacity,
+            );
+            return ExitCode::from(2);
+        }
+        let mut milestones: Vec<u32> = args
+            .milestone_fills
+            .iter()
+            .copied()
+            .filter(|p| *p > 0 && *p <= args.target_fill_percent)
+            .collect();
+        milestones.sort();
+        milestones.dedup();
+        if milestones.is_empty() {
+            eprintln!(
+                "error: no milestone_fills survive the target_fill_percent={} filter",
+                args.target_fill_percent
+            );
+            return ExitCode::from(2);
+        }
+        milestones
+            .iter()
+            .map(|p| {
+                (
+                    *p,
+                    ((true_capacity as u128) * (*p as u128) / 100u128) as u64,
+                )
+            })
+            .collect()
+    };
 
-    let mut milestones: Vec<u32> = args
-        .milestone_fills
-        .iter()
-        .copied()
-        .filter(|p| *p > 0 && *p <= args.target_fill_percent)
-        .collect();
-    milestones.sort();
-    milestones.dedup();
-    if milestones.is_empty() {
+    if args.single_batch_per_k {
         eprintln!(
-            "error: no milestone_fills survive the target_fill_percent={} filter",
-            args.target_fill_percent
+            "[migration-bench] mode={} shard_log_capacity={} true_log_capacity={} kzh_k={} \
+             n_shards={} sweep=single-batch-per-K chunk_sizes={:?}",
+            if local_mode { "local" } else { "distributed" },
+            args.shard_log_capacity,
+            args.true_log_capacity,
+            k,
+            args.n_shards,
+            args.chunk_sizes,
         );
-        return ExitCode::from(2);
+    } else {
+        eprintln!(
+            "[migration-bench] mode={} shard_log_capacity={} true_log_capacity={} kzh_k={} \
+             n_shards={} target_fill={}% target_count={} chunk_sizes={:?}",
+            if local_mode { "local" } else { "distributed" },
+            args.shard_log_capacity,
+            args.true_log_capacity,
+            k,
+            args.n_shards,
+            args.target_fill_percent,
+            climb_target_count,
+            args.chunk_sizes,
+        );
     }
-    let milestone_targets: Vec<(u32, u64)> = milestones
-        .iter()
-        .map(|p| {
-            (
-                *p,
-                ((true_capacity as u128) * (*p as u128) / 100u128) as u64,
-            )
-        })
-        .collect();
-
-    eprintln!(
-        "[migration-bench] mode={} shard_log_capacity={} true_log_capacity={} kzh_k={} \
-         n_shards={} target_fill={}% target_count={} chunk_sizes={:?}",
-        if local_mode { "local" } else { "distributed" },
-        args.shard_log_capacity,
-        args.true_log_capacity,
-        k,
-        args.n_shards,
-        args.target_fill_percent,
-        target_count,
-        args.chunk_sizes,
-    );
 
     // ---- setup -----------------------------------------------------
     let setup_t0 = Instant::now();
@@ -462,6 +507,16 @@ fn main() -> ExitCode {
                 return ExitCode::from(1);
             },
         };
+        // single-batch mode: each K publishes exactly chunk_size
+        // users (one publish) to the cleared empty dictionary. The
+        // "milestone" we emit is a single 100% marker, so the JSON
+        // shape is unchanged but the climb is one batch.
+        let (target_count, milestone_targets): (u64, Vec<(u32, u64)>) = if args.single_batch_per_k
+        {
+            (chunk_size, vec![(100, chunk_size)])
+        } else {
+            (climb_target_count, climb_milestone_targets.clone())
+        };
         eprintln!(
             "[migration-bench K={chunk_size}] starting climb to target_count={target_count}"
         );
@@ -500,9 +555,14 @@ fn main() -> ExitCode {
             r.throughput,
         );
     }
+    // Rank by throughput (users/sec) — correct in both modes. In
+    // climb mode every K hits the same target_count, so throughput
+    // and 1/elapsed give the same ordering; in single-batch mode
+    // each K publishes its own K users, so elapsed scales with K
+    // and the only meaningful ordering is throughput.
     if let Some(best) = results
         .iter()
-        .min_by(|a, b| a.elapsed_ms.partial_cmp(&b.elapsed_ms).unwrap())
+        .max_by(|a, b| a.throughput.partial_cmp(&b.throughput).unwrap())
     {
         eprintln!(
             "[migration-bench] best K={} (elapsed={:.1}s, throughput={:.0} users/sec)",
