@@ -24,11 +24,11 @@
 #
 #   regime  | shard_log_cap | true_log_cap | publish batch sizes
 #   --------|---------------|--------------|---------------------------
-#   small   | 21            | 20           | 2,4,8,16,32,64
+#   small   | 22            | 20           | 2,4,8,16,32,64
 #
 # Fill percentages (vs. true capacity): 1, 30, 60, 90 — set
 # FILL_PERCENTS to override. True capacity for any regime is the
-# shard polynomial size divided by `OVER_PROVISIONING_FACTOR` (= 2);
+# shard polynomial size divided by `OVER_PROVISIONING_FACTOR` (= 4);
 # see `akd/src/aegon/config.rs`.
 #
 # The medium (2-shard) and large (128-shard) regimes both run on a
@@ -116,7 +116,7 @@ run_regime() {
 }
 
 if [[ "${SKIP_SMALL:-0}" != "1" ]]; then
-  run_regime "small"  21 20 "2,4,8,16,32,64"
+  run_regime "small"  22 20 "2,4,8,16,32,64"
 else
   log "small: skipped via SKIP_SMALL=1"
 fi

@@ -26,34 +26,37 @@ use super::types::AegonPcs;
 
 /// Over-provisioning factor `α`: the ratio between the underlying
 /// polynomial's hypercube size (`2^shard_log_capacity`) and the
-/// dictionary's *true* user-facing capacity. With `α = 2`, a shard's
-/// polynomial holds 2× as many slots as the dictionary will ever
-/// store entries (load factor ≤ 0.5) — expected within-shard probe
-/// trails stay ≤ 2 slots at peak fill, which keeps the per-publish
-/// KZH-k opening count bounded.
+/// dictionary's *true* user-facing capacity. With `α = 4`, a shard's
+/// polynomial holds 4× as many slots as the dictionary will ever
+/// store entries (load factor ≤ 0.25) — open-addressing probe lengths
+/// stay short at peak fill, which keeps the per-publish KZH-k opening
+/// count bounded.
 ///
-/// In the two-layer routing model, individual shards can run hotter
-/// than the legacy single-layer dictionary did (the [H_shard] layer
-/// spills to the next shard on fullness, so the per-shard `α` doesn't
-/// have to absorb cross-shard imbalance). 2× over-provisioning is the
-/// `α = 0.5` sweet spot from the two-layer rule of thumb:
+/// Standing regime sizes (all use 4× over-provisioning):
 ///
-/// ```text
-/// shard_log_capacity = ⌈log₂ N⌉ + 1 − log_n_shards     // α = 0.5
-/// ```
+/// | regime | true dict   | total dict (= true × 4) | n_shards | per-shard log cap |
+/// |--------|-------------|-------------------------|----------|-------------------|
+/// | small  | 2²⁰ entries | 2²² slots               | 1        | 22                |
+/// | medium | 2²⁶ entries | 2²⁸ slots               | 2        | 27                |
+/// | large  | 2³² entries | 2³⁴ slots               | 128      | 27                |
+///
+/// In the two-layer routing model, `H_shard` spreads the total
+/// `OVER_PROVISIONING_FACTOR × 2^true_log_capacity` slots across
+/// `2^log_n_shards` shards, so each shard's polynomial has
+/// `log_n_shards` fewer variables than the single-shard equivalent.
+/// See [`shard_log_capacity_for_two_layer`] for the multi-shard form.
 ///
 /// All sizing computations in the benches and the cluster scripts go
 /// through this constant (or [`LOG2_OVER_PROVISIONING_FACTOR`]) so a
-/// single edit retunes the whole system. See
-/// [`shard_log_capacity_for_two_layer`] for the multi-shard form.
-pub const OVER_PROVISIONING_FACTOR: usize = 2;
+/// single edit retunes the whole system.
+pub const OVER_PROVISIONING_FACTOR: usize = 4;
 
 /// `log2(OVER_PROVISIONING_FACTOR)`. Defined separately as a
 /// compile-time constant so we can do `shard_log_capacity =
 /// true_log_capacity + LOG2_OVER_PROVISIONING_FACTOR` without runtime
 /// `ilog2` calls. The `const _:` assertion below keeps the two in
 /// sync at compile time.
-pub const LOG2_OVER_PROVISIONING_FACTOR: usize = 1;
+pub const LOG2_OVER_PROVISIONING_FACTOR: usize = 2;
 
 const _: () = {
     assert!(
@@ -83,6 +86,7 @@ pub const fn true_log_capacity_from_shard(shard_log_capacity: usize) -> usize {
 ///
 /// ```text
 /// shard_log_capacity = true_log_capacity + LOG2_OVER_PROVISIONING_FACTOR − log_n_shards
+///                    = true_log_capacity + 2 − log_n_shards               // at OPF = 4
 /// ```
 ///
 /// This is the natural multi-shard extension of
@@ -99,16 +103,15 @@ pub const fn true_log_capacity_from_shard(shard_log_capacity: usize) -> usize {
 /// zero-variable shard polynomial; the builder rejects that anyway
 /// (`shard_log_capacity ≥ 1`).
 ///
-/// # Example
+/// # Examples
 ///
-/// At N = 2³² (~4 B users) on a 256-shard cluster:
+/// Standing regimes (all OPF = 4):
 ///
 /// ```text
-/// shard_log_capacity_for_two_layer(32, 8) = 32 + 1 − 8 = 25
+/// shard_log_capacity_for_two_layer(20, 0) = 20 + 2 − 0 = 22   // small   (1 shard)
+/// shard_log_capacity_for_two_layer(26, 1) = 26 + 2 − 1 = 27   // medium  (2 shards)
+/// shard_log_capacity_for_two_layer(32, 7) = 32 + 2 − 7 = 27   // large   (128 shards)
 /// ```
-///
-/// — i.e. each shard's polynomial holds 2²⁵ ≈ 33 M slots, and the
-/// SRS is sized for one shard, not the whole dictionary.
 pub const fn shard_log_capacity_for_two_layer(
     true_log_capacity: usize,
     log_n_shards: usize,

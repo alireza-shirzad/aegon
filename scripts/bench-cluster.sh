@@ -26,8 +26,8 @@
 #   PROJECT             GCP project ID                (no default; required)
 #   ZONE                GCE zone                      (us-central1-f)
 #   N_SHARDS            number of shards (power of 2) (128)
-#   SHARD_LOG_CAPACITY  log_2 slots per shard         (26)
-#   KZH_K               KZH-k block parameter         (8 — optimal_kzh_k(26))
+#   SHARD_LOG_CAPACITY  log_2 slots per shard         (27)
+#   KZH_K               KZH-k block parameter         (9 — optimal_kzh_k(27))
 #   TOTAL_PRELOAD_LOG2  log_2 of total prefilled users (8 → 2^8=256 split across shards)
 #   BATCH_SIZES         comma-separated sweep sizes   (2,4,8,...,16384)
 #   SAMPLES_PER_BATCH   timed publishes per batch     (1)
@@ -36,18 +36,14 @@
 #   SHARD_MACHINE_TYPE  GCE machine type for shards   (n2-standard-16 — 64 GB RAM)
 #   COORD_MACHINE_TYPE  GCE machine type coordinator  (defaults to SHARD_MACHINE_TYPE = n2-standard-16)
 #
-# At the defaults above (N_SHARDS=128, SHARD_LOG_CAPACITY=26, KZH_K=8,
+# At the defaults above (N_SHARDS=128, SHARD_LOG_CAPACITY=27, KZH_K=9,
 # PUBLISH_TRUE_LOG_CAP=32):
-#   * Each shard owns one 2^26-slot polynomial (α=2 over-provisioning of
+#   * Each shard owns one 2^27-slot polynomial (α=4 over-provisioning of
 #     a 2^25-entry per-shard slice — total dictionary 2^32 entries).
-#     The two-layer routing model lets the per-shard load factor run
-#     hotter (0.5 vs the legacy 0.25) because cross-shard imbalance is
-#     absorbed by H_shard's full-shard spill, not by extra polynomial
-#     slots.
-#   * Per-shard KZH-k SRS at log_cap=26 / kzh_k=8: ~4.3 GiB on disk,
+#   * Per-shard KZH-k SRS at log_cap=27 / kzh_k=9: ~8.6 GiB on disk,
 #     same in RAM during gen. Per-shard peak memory at the 90% fill
 #     stage (~30 M entries/shard, the heaviest workload) lands around
-#     ~25-30 GiB — comfortable on 64 GiB.
+#     ~50-55 GiB — fits in 64 GiB with margin.
 #   * 128 × n2-standard-16 ≈ $100/hr on-demand; ~$30/hr with 3-year
 #     committed-use. Tear down promptly when not benching.
 #   * Previous defaults (32 shards × log_cap=29) exceeded n2-standard-16
@@ -71,8 +67,8 @@ set -euo pipefail
 PROJECT="${PROJECT:-}"
 ZONE="${ZONE:-us-central1-f}"
 N_SHARDS="${N_SHARDS:-128}"
-SHARD_LOG_CAPACITY="${SHARD_LOG_CAPACITY:-26}"
-KZH_K="${KZH_K:-8}"
+SHARD_LOG_CAPACITY="${SHARD_LOG_CAPACITY:-27}"
+KZH_K="${KZH_K:-9}"
 # Default: 2^8 = 256 users preloaded total, evenly split across shards.
 # This is the "light preload" baseline used by the 2^34-capacity bench.
 TOTAL_PRELOAD_LOG2="${TOTAL_PRELOAD_LOG2:-8}"
@@ -1276,10 +1272,10 @@ PUBLISH_SAMPLES_PER_BATCH="${PUBLISH_SAMPLES_PER_BATCH:-3}"
 # True (non-over-provisioned) total log capacity, derived from the
 # cluster geometry:
 #   total_log_slots = SHARD_LOG_CAPACITY + log2(N_SHARDS)
-#   true_log_capacity = total_log_slots - LOG2_OVER_PROVISIONING_FACTOR(=1)
+#   true_log_capacity = total_log_slots - LOG2_OVER_PROVISIONING_FACTOR(=2)
 #
 # This is the inverse of the two-layer sizing rule
-#   shard_log_capacity = true_log_capacity + 1 − log_n_shards     (α = 0.5)
+#   shard_log_capacity = true_log_capacity + 2 − log_n_shards     (OPF = 4)
 # implemented as `shard_log_capacity_for_two_layer` in akd/src/aegon/config.rs.
 #
 # Auto-deriving avoids a class of latent bugs we hit before, where a
@@ -1293,7 +1289,7 @@ derive_true_log_cap() {
 import math
 n_shards = ${N_SHARDS}
 shard_log_cap = ${SHARD_LOG_CAPACITY}
-log2_alpha = 1  # mirrors LOG2_OVER_PROVISIONING_FACTOR in akd/src/aegon/config.rs
+log2_alpha = 2  # mirrors LOG2_OVER_PROVISIONING_FACTOR in akd/src/aegon/config.rs
 log2_n_shards = int(math.log2(n_shards))
 print(shard_log_cap + log2_n_shards - log2_alpha)
 "

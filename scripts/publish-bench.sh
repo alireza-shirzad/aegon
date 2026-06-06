@@ -10,11 +10,11 @@
 # which write JSONs in the same schema.
 #
 # Regime sizing matches `setup-bench.sh` and the project standard.
-# Sized by `shard_log_capacity_for_two_layer` (α = 0.5):
+# Sized by `shard_log_capacity_for_two_layer` (OPF = 4):
 #
 #   regime  | shard_log_cap | true_log_cap | kzh_k | n_shards | batch sizes
 #   --------|---------------|--------------|-------|----------|---------------------------
-#   small   | 21            | 20           | auto  | 1        | 2,4,8,16,32,64
+#   small   | 22            | 20           | auto  | 1        | 2,4,8,16,32,64
 #
 # Fill percentages (vs. true capacity): 0, 30, 60, 90 — all four
 # walked in one process, with the in-process shard rebuilt fresh
@@ -34,7 +34,7 @@
 #                    cluster path) and falls back to 16384 if absent.
 #
 # True capacity for any regime is the shard polynomial size divided
-# by `OVER_PROVISIONING_FACTOR` (= 2); see `akd/src/aegon/config.rs`.
+# by `OVER_PROVISIONING_FACTOR` (= 4); see `akd/src/aegon/config.rs`.
 
 set -euo pipefail
 
@@ -101,7 +101,7 @@ run_one() {
 }
 
 if [[ "${SKIP_SMALL:-0}" != "1" ]]; then
-  run_one "small"  21 20 "2,4,8,16,32,64"
+  run_one "small"  22 20 "2,4,8,16,32,64"
 else
   log "small: skipped via SKIP_SMALL=1"
 fi

@@ -423,12 +423,25 @@ impl VrfProver {
     /// shard. The coordinator only needs `shard_ctr > 0` when the
     /// targeted shard has reported full; in steady state `shard_ctr =
     /// 0` is sufficient.
+    ///
+    /// **Short-circuit for `num_vars == 0` (single-shard deployments)**:
+    /// the layer-1 routing decision is structurally fixed (shard 0 is
+    /// the only shard), the recovered bit vector is necessarily empty,
+    /// and the VRF proof carries no information any verifier can act
+    /// on. We skip the ECVRF prove call entirely and return a
+    /// zero-filled proof. The matching [`VrfVerifier::verify_h_shard`]
+    /// also skips verification in this case. Soundness is unaffected:
+    /// the only valid shard_id in any path is 0, regardless of what
+    /// the proof bytes are.
     pub fn prove_h_shard(
         &self,
         shard_ctr: u64,
         label: &[u8],
         num_vars: usize,
     ) -> (Vec<bool>, [u8; VRF_PROOF_BYTES]) {
+        if num_vars == 0 {
+            return (Vec::new(), [0u8; VRF_PROOF_BYTES]);
+        }
         self.prove_with_tag(b"aegon.h_shard", shard_ctr, label, num_vars)
     }
 
@@ -530,6 +543,12 @@ impl VrfVerifier {
     /// bits. The verifier consumes the same `shard_ctr` the server
     /// used to land on a non-full shard — the shard_ctr is part of the
     /// public lookup proof.
+    ///
+    /// **Short-circuit for `num_vars == 0` (single-shard deployments)**:
+    /// returns `Ok(vec![])` without inspecting `proof_bytes`. See
+    /// [`VrfProver::prove_h_shard`] for the soundness argument — at
+    /// `log_n_shards = 0` there is no routing decision to attest to,
+    /// so there is nothing to verify.
     pub fn verify_h_shard(
         &self,
         shard_ctr: u64,
@@ -537,6 +556,9 @@ impl VrfVerifier {
         proof_bytes: &[u8],
         num_vars: usize,
     ) -> Result<Vec<bool>, VrfVerifyError> {
+        if num_vars == 0 {
+            return Ok(Vec::new());
+        }
         self.verify_with_tag(b"aegon.h_shard", shard_ctr, label, proof_bytes, num_vars)
     }
 
@@ -610,11 +632,19 @@ impl EcVrfHash {
     }
 
     /// Two-layer entry: prove + bits for the shard-routing hash.
+    ///
+    /// **Short-circuit for `num_vars == 0`**: mirrors the instance
+    /// method [`VrfProver::prove_h_shard`] — skip the ECVRF prove and
+    /// return a zero-filled proof. Single-shard deployments have no
+    /// routing decision to attest to.
     pub fn prove_h_shard(
         shard_ctr: u64,
         label: &[u8],
         num_vars: usize,
     ) -> (Vec<bool>, [u8; VRF_PROOF_BYTES]) {
+        if num_vars == 0 {
+            return (Vec::new(), [0u8; VRF_PROOF_BYTES]);
+        }
         Self::prove_with_tag(b"aegon.h_shard", shard_ctr, label, num_vars)
     }
 

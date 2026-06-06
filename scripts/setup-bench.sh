@@ -8,14 +8,14 @@
 #
 #   regime    | true dict   | shard polynomial | shard_log_cap | kzh_k | n_shards
 #   ----------|-------------|------------------|---------------|-------|----------
-#   small     | 2^20 entries| 2^21 slots/shard | 21            | auto  | 1
-#   medium    | 2^26 entries| 2^26 slots/shard | 26 per shard  | 8     | 2
-#   large     | 2^32 entries| 2^26 slots/shard | 26 per shard  | 8     | 128
+#   small     | 2^20 entries| 2^22 slots/shard | 22            | auto  | 1
+#   medium    | 2^26 entries| 2^27 slots/shard | 27 per shard  | 9     | 2
+#   large     | 2^32 entries| 2^27 slots/shard | 27 per shard  | 9     | 128
 #
 # `auto` = optimal_kzh_k(shard_log_capacity). See akd::aegon::presets.
 # The user-facing capacity for each regime is the shard polynomial size
-# divided by `OVER_PROVISIONING_FACTOR` (= 2; the two-layer α = 0.5
-# tuning); see `akd/src/aegon/config.rs`.
+# divided by `OVER_PROVISIONING_FACTOR` (= 4); see
+# `akd/src/aegon/config.rs`.
 #
 # What runs where:
 #
@@ -69,19 +69,19 @@ run_one() {
 }
 
 if [[ "${SKIP_SMALL:-0}" != "1" ]]; then
-  run_one "small" 21 ""
+  run_one "small" 22 ""
 else
   log "small: skipped via SKIP_SMALL=1"
 fi
 
 if [[ "${SKIP_PER_SHARD:-0}" != "1" ]]; then
   # Per-shard size measurement at the shared medium/large config
-  # (shard_log_cap=26, kzh_k=8). Time on a single-machine run is
+  # (shard_log_cap=27, kzh_k=9). Time on a single-machine run is
   # meaningless — the real measurement is distributed across the
   # cluster — but the pk/vk sizes are identical to one shard of
   # either the medium or large cluster, so this file feeds the
   # "key sizes" plot for both regimes.
-  run_one "per-shard" 26 "--kzh-k 8"
+  run_one "per-shard" 27 "--kzh-k 9"
 else
   log "per-shard: skipped via SKIP_PER_SHARD=1"
 fi

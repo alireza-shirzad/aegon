@@ -12,16 +12,16 @@
 # `bench-cluster.sh` for the existing `publish-bench` / `lookup-bench`
 # pattern to copy).
 #
-# Regime sizing matches `setup-bench.sh` and the publish bench. The
-# two-layer rule (α = 0.5, see `shard_log_capacity_for_two_layer` in
-# `akd/src/aegon/config.rs`) drops `shard_log_cap` by one bit vs. the
-# old single-shard α = 0.25:
+# Regime sizing matches `setup-bench.sh` and the publish bench. All
+# regimes use 4× over-provisioning (load factor 0.25 at peak fill),
+# computed via `shard_log_capacity_for_two_layer(true_log_cap,
+# log_n_shards)` in `akd/src/aegon/config.rs`:
 #
 #   regime  | shard_log_cap | true_log_cap | n_shards | K sweep
 #   --------|---------------|--------------|----------|-------------------------
-#   small   | 21            | 20           | 1        | 1024,4096,16384,65536
-#   medium  | 26            | 26           | 2        | 4096,16384,65536,262144
-#   large   | 26            | 32           | 128      | 16384,65536,262144,1048576
+#   small   | 22            | 20           | 1        | 1024,4096,16384,65536
+#   medium  | 27            | 26           | 2        | 4096,16384,65536,262144
+#   large   | 27            | 32           | 128      | 16384,65536,262144,1048576
 #
 # Architecture: ONE `aegon_migration_bench` invocation per regime.
 # The binary holds a single in-process `ShardedAegon` across the
@@ -217,7 +217,7 @@ if [[ "${SKIP_SMALL:-0}" != "1" ]]; then
   # under default RAM (the KZH-k commit's intermediate state for a
   # 1M-update batch on a 2^22 polynomial overflows ~60 GB). Override
   # via K_SWEEP if you want to chase the plateau on a bigger box.
-  run_regime "small" 21 20 "1024,4096,16384,65536,131072,262144,524288"
+  run_regime "small" 22 20 "1024,4096,16384,65536,131072,262144,524288"
 else
   log "small: skipped via SKIP_SMALL=1"
 fi
