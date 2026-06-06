@@ -26,22 +26,34 @@ use super::types::AegonPcs;
 
 /// Over-provisioning factor `α`: the ratio between the underlying
 /// polynomial's hypercube size (`2^shard_log_capacity`) and the
-/// dictionary's *true* user-facing capacity. With `α = 4`, a shard's
-/// polynomial holds 4× as many slots as the dictionary will ever
-/// store entries — open-addressing probe lengths degrade once the
-/// load factor exceeds `1/α`, so we provision four slots per user.
+/// dictionary's *true* user-facing capacity. With `α = 2`, a shard's
+/// polynomial holds 2× as many slots as the dictionary will ever
+/// store entries (load factor ≤ 0.5) — expected within-shard probe
+/// trails stay ≤ 2 slots at peak fill, which keeps the per-publish
+/// KZH-k opening count bounded.
+///
+/// In the two-layer routing model, individual shards can run hotter
+/// than the legacy single-layer dictionary did (the [H_shard] layer
+/// spills to the next shard on fullness, so the per-shard `α` doesn't
+/// have to absorb cross-shard imbalance). 2× over-provisioning is the
+/// `α = 0.5` sweet spot from the two-layer rule of thumb:
+///
+/// ```text
+/// shard_log_capacity = ⌈log₂ N⌉ + 1 − log_n_shards     // α = 0.5
+/// ```
 ///
 /// All sizing computations in the benches and the cluster scripts go
 /// through this constant (or [`LOG2_OVER_PROVISIONING_FACTOR`]) so a
-/// single edit retunes the whole system.
-pub const OVER_PROVISIONING_FACTOR: usize = 4;
+/// single edit retunes the whole system. See
+/// [`shard_log_capacity_for_two_layer`] for the multi-shard form.
+pub const OVER_PROVISIONING_FACTOR: usize = 2;
 
 /// `log2(OVER_PROVISIONING_FACTOR)`. Defined separately as a
 /// compile-time constant so we can do `shard_log_capacity =
 /// true_log_capacity + LOG2_OVER_PROVISIONING_FACTOR` without runtime
 /// `ilog2` calls. The `const _:` assertion below keeps the two in
 /// sync at compile time.
-pub const LOG2_OVER_PROVISIONING_FACTOR: usize = 2;
+pub const LOG2_OVER_PROVISIONING_FACTOR: usize = 1;
 
 const _: () = {
     assert!(
@@ -63,6 +75,47 @@ pub const fn shard_log_capacity_from_true(true_log_capacity: usize) -> usize {
 /// LOG2_OVER_PROVISIONING_FACTOR` is degenerate but we don't panic).
 pub const fn true_log_capacity_from_shard(shard_log_capacity: usize) -> usize {
     shard_log_capacity.saturating_sub(LOG2_OVER_PROVISIONING_FACTOR)
+}
+
+/// Two-layer sizing rule: pick `shard_log_capacity` given the
+/// dictionary's *true* log capacity and the number of shards
+/// (`log_n_shards = log₂(N_shards)`).
+///
+/// ```text
+/// shard_log_capacity = true_log_capacity + LOG2_OVER_PROVISIONING_FACTOR − log_n_shards
+/// ```
+///
+/// This is the natural multi-shard extension of
+/// [`shard_log_capacity_from_true`]: total polynomial slots stay at
+/// `OVER_PROVISIONING_FACTOR × 2^true_log_capacity` (load factor
+/// `1/OVER_PROVISIONING_FACTOR`), but the slots are spread across
+/// `2^log_n_shards` shards instead of concentrated in one. Each
+/// shard's polynomial therefore has `log_n_shards` fewer variables,
+/// which is the only way to keep per-shard SRS and per-publish commit
+/// work bounded as N grows.
+///
+/// Saturates at 1 — a `log_n_shards` larger than `true_log_capacity +
+/// LOG2_OVER_PROVISIONING_FACTOR` would produce a degenerate
+/// zero-variable shard polynomial; the builder rejects that anyway
+/// (`shard_log_capacity ≥ 1`).
+///
+/// # Example
+///
+/// At N = 2³² (~4 B users) on a 256-shard cluster:
+///
+/// ```text
+/// shard_log_capacity_for_two_layer(32, 8) = 32 + 1 − 8 = 25
+/// ```
+///
+/// — i.e. each shard's polynomial holds 2²⁵ ≈ 33 M slots, and the
+/// SRS is sized for one shard, not the whole dictionary.
+pub const fn shard_log_capacity_for_two_layer(
+    true_log_capacity: usize,
+    log_n_shards: usize,
+) -> usize {
+    let total = true_log_capacity + LOG2_OVER_PROVISIONING_FACTOR;
+    let v = total.saturating_sub(log_n_shards);
+    if v == 0 { 1 } else { v }
 }
 
 /// Server-side configuration. Built once, consumed by `Aegon::setup`
