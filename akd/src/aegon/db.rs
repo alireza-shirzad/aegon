@@ -584,27 +584,28 @@ impl RocksDb {
         // Multiple concurrent L0→L1 subcompactions so a single large
         // batch doesn't sequentialize compaction work on one core.
         opts.set_max_subcompactions(4);
-        // Bigger memtable → fewer L0 flushes per publish. At K=65536
-        // the per-shard payload can run ~200 MB (the value_history
-        // LPush+LTrim pairs dominate); 1 GB memtables fit a couple of
-        // publishes each so flush + L0 compaction has slack.
-        opts.set_write_buffer_size(1024 * 1024 * 1024);
+        // Bigger memtable → fewer L0 flushes per publish. 256 MB +
+        // 4 buffers = 1 GB total memtable budget. The bumped-tuning
+        // experiment (1 GB × 8 = 8 GB budget) tried to absorb the
+        // K=524k per-shard write burst, but combined with Stage B's
+        // peak per-finalize op-vec footprint it pushed the n2-standard
+        // shard VMs (64 GB) into OOM at fill=30%. The pre-Stage-A
+        // tuning (this) is the run5-validated config that ran to 90%
+        // cleanly.
+        opts.set_write_buffer_size(256 * 1024 * 1024);
         // More concurrent memtables = the writer doesn't block while a
-        // flush is in flight. With 8 we tolerate 8 GB of in-flight
-        // memtable data, more than enough to absorb publish bursts
-        // while background compaction catches up.
-        opts.set_max_write_buffer_number(8);
+        // flush is in flight. 4 buffers ⇒ tolerate ~1 GB of in-flight
+        // memtable data without back-pressure on the writer.
+        opts.set_max_write_buffer_number(4);
         // Bigger SST files at every level = fewer files overall and
-        // less metadata churn during compactions. 256 MB matches the
-        // memtable size so each flush makes ~4 SSTs.
-        opts.set_target_file_size_base(256 * 1024 * 1024);
-        // Raise the L0 stall + stop thresholds. At the sustained write
-        // rate of the per-shard refactor we'd otherwise hit the
-        // default 20/36 thresholds within ~20 publishes and trigger
-        // 100-300 s stalls. 80/120 gives background compaction enough
-        // headroom for hours of climb without throttling.
-        opts.set_level_zero_slowdown_writes_trigger(80);
-        opts.set_level_zero_stop_writes_trigger(120);
+        // less metadata churn during compactions. 128 MB matches the
+        // pre-Stage-A run5 config.
+        opts.set_target_file_size_base(128 * 1024 * 1024);
+        // L0 stall + stop thresholds. Default trips at 20/36; 40/60
+        // gives background compaction enough headroom for hours of
+        // climb at K=65536 (run5-validated).
+        opts.set_level_zero_slowdown_writes_trigger(40);
+        opts.set_level_zero_stop_writes_trigger(60);
         // No LRU cap on open SSTs — at 128 MB/file the full database
         // tops out at ~few thousand files even at 90% fill, so we
         // can afford to keep file descriptors for everything.
