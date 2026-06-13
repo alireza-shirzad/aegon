@@ -34,7 +34,10 @@ use super::config::VerifierContext;
 use super::error::AegonError;
 use super::hash::{HashSuite, Sha256Hash};
 use super::server::Aegon;
-use super::db::{key_shard_state, Db, DbOp, DbSource, RedisDb};
+use super::db::{
+    key_history_openings_local, key_label_placement, key_shard_state, key_value, key_value_history,
+    Db, DbOp, DbSource, RedisDb,
+};
 use super::server::AegonCheckpoint;
 use super::sharded::ShardWrite;
 use super::types::{AegonPcs, EpochCommitment, HistoryOpenings, Label, Value};
@@ -48,7 +51,11 @@ pub mod proto {
 use proto::shard_service_client::ShardServiceClient;
 use proto::shard_service_server::{ShardService, ShardServiceServer};
 use proto::{
-    CommitmentResponse, Empty, FindLabelSlotRequest, FindLabelSlotResponse, OpenResponse,
+    ApplyPersistenceOpsRequest, ApplyPersistenceOpsResponse, CommitmentResponse, Empty,
+    FetchHistoryOpeningsRequest, FetchHistoryOpeningsResponse, FetchLabelPlacementRequest,
+    FetchLabelPlacementResponse, FetchValueHistoryRequest, FetchValueHistoryResponse,
+    FetchValueRequest, FetchValueResponse, FinalizePublishPersistRequest,
+    FinalizePublishPersistResponse, FindLabelSlotRequest, FindLabelSlotResponse, OpenResponse,
     PublishBatchRequest, PublishBatchResponse, PublishPhase1Request, PublishPhase1Response,
     PublishPhase2Request, PublishPhase2Response, ReconfigurePrefillRequest,
     ReconfigurePrefillResponse, SlotEpochRequest, SlotOccupiedResponse, SlotRequest,
@@ -238,6 +245,101 @@ where
             "find_label_slot not supported via this transport — wire up the FindLabelSlot RPC"
                 .into(),
         ))
+    }
+
+    // ---------- per-shard durable state (post-refactor) ----------
+    //
+    // Defaults are deliberately no-op (or empty-result) so the
+    // in-process `Aegon`-backed `ShardHandle` impl can keep using the
+    // legacy "no DB on the shard" path without forcing every test to
+    // wire up a per-shard DB. The cluster transport
+    // (`GrpcShardClient`) overrides these to make the RPCs.
+
+    /// Apply a pre-formed `Vec<DbOp>` (encoded via
+    /// [`super::db::DbOp::encode_batch`]) to this shard's local DB
+    /// atomically. Used by the coord at publish persist time.
+    ///
+    /// Default impl is a no-op so the in-process `Aegon`-backed shard
+    /// (which has no DB of its own) accepts the call silently — tests
+    /// using `DbSource::None` already hold the values out-of-band.
+    ///
+    /// Takes `&self` (not `&mut self`) so the coord can call it from a
+    /// `&self` context like `persist_publish_to_db`. The remote impl
+    /// goes through an `AsyncMutex<ShardServiceClient>`; the in-process
+    /// default is a no-op.
+    fn apply_persistence_ops(
+        &self,
+        _ops_bytes: &[u8],
+    ) -> Result<(), AegonError> {
+        Ok(())
+    }
+
+    /// Read the raw value bytes for `label` from this shard's DB.
+    /// Returns `Ok(None)` when the shard has no DB (in-process tests)
+    /// or when the label is absent.
+    fn fetch_value(
+        &self,
+        _label: &super::types::Label,
+    ) -> Result<Option<Vec<u8>>, AegonError> {
+        Ok(None)
+    }
+
+    /// Read the value-history sliding window for `label` from this
+    /// shard's DB. Returns `Ok(empty)` when the shard has no DB or the
+    /// label has no history yet.
+    fn fetch_value_history(
+        &self,
+        _label: &super::types::Label,
+    ) -> Result<Vec<Vec<u8>>, AegonError> {
+        Ok(Vec::new())
+    }
+
+    /// Read the `StoredLabelPlacement<E,P>` bytes for `label` from
+    /// this shard's DB. `Ok(None)` when missing.
+    fn fetch_label_placement(
+        &self,
+        _label: &super::types::Label,
+    ) -> Result<Option<Vec<u8>>, AegonError> {
+        Ok(None)
+    }
+
+    /// Read the `HistoryOpenings<E,P>` bytes for `epoch` from this
+    /// shard's DB. `Ok(None)` when missing.
+    fn fetch_history_openings(
+        &self,
+        _epoch: u64,
+    ) -> Result<Option<Vec<u8>>, AegonError> {
+        Ok(None)
+    }
+
+    /// Stage-B finalize: ship only the cross-shard merkle anchors and
+    /// let the shard consume its `pending_finalize` stash to build +
+    /// write the dictionary-content ops locally. Replaces
+    /// `apply_persistence_ops` for everything except `coord:*` keys.
+    ///
+    /// Inputs are all `Vec<u8>` so the in-process and remote impls
+    /// share a single ShardHandle signature; payload encodings are:
+    ///   * `prev_shard_commit_bytes` / `post_shard_commit_bytes`:
+    ///     canonical-serialized `EpochCommitment<E, P>`. Empty
+    ///     `prev_shard_commit_bytes` => no prior commit (epoch 0).
+    ///   * `prev_merkle_path_bytes` / `post_merkle_path_bytes`:
+    ///     canonical-serialized `Vec<EpochDigest>`. Empty when the
+    ///     corresponding commit is empty.
+    ///
+    /// Default impl is a no-op (mirrors `apply_persistence_ops`'s
+    /// default) so the in-process `Aegon`-backed shard with no DB
+    /// keeps working — `pending_finalize` is then never consumed.
+    #[allow(clippy::too_many_arguments)]
+    fn finalize_publish_persist(
+        &self,
+        _epoch: u64,
+        _shard_id: u32,
+        _prev_shard_commit_bytes: &[u8],
+        _prev_merkle_path_bytes: &[u8],
+        _post_shard_commit_bytes: &[u8],
+        _post_merkle_path_bytes: &[u8],
+    ) -> Result<(), AegonError> {
+        Ok(())
     }
 }
 
@@ -642,13 +744,13 @@ where
         + std::ops::Add<Output = P::Commitment>
         + std::ops::Sub<Output = P::Commitment>
         + std::ops::Mul<E::ScalarField, Output = P::Commitment>,
-    P::Proof: CanonicalSerialize + Send + Sync + 'static,
+    P::Proof: CanonicalSerialize + CanonicalDeserialize + Clone + Send + Sync + 'static,
     P::State: Send + Sync + 'static,
     P::Polynomial: Send + Sync + 'static,
     P::Point: Send + Sync + 'static,
     P::Evaluation: Send + Sync + 'static,
     H: HashSuite<E::ScalarField> + Send + Sync + 'static,
-    EpochCommitment<E, P>: CanonicalSerialize + Send + Sync + 'static,
+    EpochCommitment<E, P>: CanonicalSerialize + CanonicalDeserialize + Send + Sync + 'static,
     HistoryOpenings<E, P>: CanonicalSerialize + Send + Sync + 'static,
     AegonCheckpoint<E, P>: CanonicalSerialize + Send + Sync + 'static,
 {
@@ -927,6 +1029,162 @@ where
                 slot_ctr: 0,
             })),
         }
+    }
+
+    // ---------- per-shard durable state (post-refactor) ----------
+    //
+    // Each shard owns the dictionary content for the labels routed to
+    // it. Coord ships ops via ApplyPersistenceOps at the end of every
+    // publish; lookups read back via the four Fetch* RPCs.
+
+    async fn apply_persistence_ops(
+        &self,
+        req: Request<ApplyPersistenceOpsRequest>,
+    ) -> Result<Response<ApplyPersistenceOpsResponse>, Status> {
+        let ops_bytes = req.into_inner().ops_bytes;
+        let ops = DbOp::decode_batch(&ops_bytes).map_err(err_to_status)?;
+        let db = self.db.as_ref().ok_or_else(|| {
+            Status::failed_precondition(
+                "shard has no DB configured — start aegon_shard_server with --db-path",
+            )
+        })?;
+        db.write_atomic(&ops).map_err(err_to_status)?;
+        Ok(Response::new(ApplyPersistenceOpsResponse {}))
+    }
+
+    async fn fetch_value(
+        &self,
+        req: Request<FetchValueRequest>,
+    ) -> Result<Response<FetchValueResponse>, Status> {
+        let label = req.into_inner().label;
+        let db = self.db.as_ref().ok_or_else(|| {
+            Status::failed_precondition("shard has no DB configured for FetchValue")
+        })?;
+        let v = db.get(&key_value(&label)).map_err(err_to_status)?;
+        Ok(Response::new(match v {
+            Some(value) => FetchValueResponse { found: true, value },
+            None => FetchValueResponse {
+                found: false,
+                value: Vec::new(),
+            },
+        }))
+    }
+
+    async fn fetch_value_history(
+        &self,
+        req: Request<FetchValueHistoryRequest>,
+    ) -> Result<Response<FetchValueHistoryResponse>, Status> {
+        let label = req.into_inner().label;
+        let db = self.db.as_ref().ok_or_else(|| {
+            Status::failed_precondition("shard has no DB configured for FetchValueHistory")
+        })?;
+        let entries = db
+            .lrange(&key_value_history(&label), 0, -1)
+            .map_err(err_to_status)?;
+        Ok(Response::new(FetchValueHistoryResponse { entries }))
+    }
+
+    async fn fetch_label_placement(
+        &self,
+        req: Request<FetchLabelPlacementRequest>,
+    ) -> Result<Response<FetchLabelPlacementResponse>, Status> {
+        let label = req.into_inner().label;
+        let db = self.db.as_ref().ok_or_else(|| {
+            Status::failed_precondition("shard has no DB configured for FetchLabelPlacement")
+        })?;
+        let placement_bytes = db
+            .get(&key_label_placement(&label))
+            .map_err(err_to_status)?;
+        Ok(Response::new(match placement_bytes {
+            Some(bytes) => FetchLabelPlacementResponse {
+                found: true,
+                placement_bytes: bytes,
+            },
+            None => FetchLabelPlacementResponse {
+                found: false,
+                placement_bytes: Vec::new(),
+            },
+        }))
+    }
+
+    async fn fetch_history_openings(
+        &self,
+        req: Request<FetchHistoryOpeningsRequest>,
+    ) -> Result<Response<FetchHistoryOpeningsResponse>, Status> {
+        let epoch = req.into_inner().epoch;
+        let db = self.db.as_ref().ok_or_else(|| {
+            Status::failed_precondition("shard has no DB configured for FetchHistoryOpenings")
+        })?;
+        let bytes = db
+            .get(&key_history_openings_local(epoch))
+            .map_err(err_to_status)?;
+        Ok(Response::new(match bytes {
+            Some(openings_bytes) => FetchHistoryOpeningsResponse {
+                found: true,
+                openings_bytes,
+            },
+            None => FetchHistoryOpeningsResponse {
+                found: false,
+                openings_bytes: Vec::new(),
+            },
+        }))
+    }
+
+    async fn finalize_publish_persist(
+        &self,
+        req: Request<FinalizePublishPersistRequest>,
+    ) -> Result<Response<FinalizePublishPersistResponse>, Status> {
+        let FinalizePublishPersistRequest {
+            epoch,
+            shard_id,
+            prev_shard_commit,
+            prev_merkle_path,
+            post_shard_commit,
+            post_merkle_path,
+        } = req.into_inner();
+
+        // Decode cross-shard merkle anchors. Empty prev_shard_commit
+        // means "no prior epoch" (genesis publish — epoch == 0); the
+        // shard skips value_history writes in that case.
+        let prev_commit_opt: Option<EpochCommitment<E, P>> = if prev_shard_commit.is_empty() {
+            None
+        } else {
+            Some(decode(&prev_shard_commit).map_err(err_to_status)?)
+        };
+        let prev_path: Vec<super::sharded::EpochDigest> = if prev_merkle_path.is_empty() {
+            Vec::new()
+        } else {
+            decode(&prev_merkle_path).map_err(err_to_status)?
+        };
+        let post_commit: EpochCommitment<E, P> =
+            decode(&post_shard_commit).map_err(err_to_status)?;
+        let post_path: Vec<super::sharded::EpochDigest> =
+            decode(&post_merkle_path).map_err(err_to_status)?;
+
+        let db = self.db.as_ref().ok_or_else(|| {
+            Status::failed_precondition(
+                "shard has no DB configured for FinalizePublishPersist — start aegon_shard_server with --db-path",
+            )
+        })?;
+
+        // Build the ops locally from the shard's pending_finalize stash
+        // and write them atomically. `build_finalize_ops` consumes
+        // `pending_finalize` (errors if absent or epoch mismatch).
+        let mut aegon = self.aegon.write().await;
+        let ops = aegon
+            .build_finalize_ops(
+                shard_id,
+                epoch,
+                prev_commit_opt,
+                prev_path,
+                post_commit,
+                post_path,
+            )
+            .map_err(err_to_status)?;
+        drop(aegon);
+
+        db.write_atomic(&ops).map_err(err_to_status)?;
+        Ok(Response::new(FinalizePublishPersistResponse {}))
     }
 }
 
@@ -1515,6 +1773,127 @@ where
         }
         let slot_bits: Vec<bool> = decode(&inner.slot_bits)?;
         Ok(Some((slot_bits, inner.slot_ctr)))
+    }
+
+    fn apply_persistence_ops(&self, ops_bytes: &[u8]) -> Result<(), AegonError> {
+        let req = ApplyPersistenceOpsRequest {
+            ops_bytes: ops_bytes.to_vec(),
+        };
+        let _resp = self.runtime.block_on(async {
+            self.client
+                .lock()
+                .await
+                .apply_persistence_ops(req)
+                .await
+                .map_err(status_to_err)
+        })?;
+        Ok(())
+    }
+
+    fn fetch_value(
+        &self,
+        label: &super::types::Label,
+    ) -> Result<Option<Vec<u8>>, AegonError> {
+        let req = FetchValueRequest {
+            label: label.clone(),
+        };
+        let resp = self.runtime.block_on(async {
+            self.client
+                .lock()
+                .await
+                .fetch_value(req)
+                .await
+                .map_err(status_to_err)
+        })?;
+        let inner = resp.into_inner();
+        Ok(if inner.found { Some(inner.value) } else { None })
+    }
+
+    fn fetch_value_history(
+        &self,
+        label: &super::types::Label,
+    ) -> Result<Vec<Vec<u8>>, AegonError> {
+        let req = FetchValueHistoryRequest {
+            label: label.clone(),
+        };
+        let resp = self.runtime.block_on(async {
+            self.client
+                .lock()
+                .await
+                .fetch_value_history(req)
+                .await
+                .map_err(status_to_err)
+        })?;
+        Ok(resp.into_inner().entries)
+    }
+
+    fn fetch_label_placement(
+        &self,
+        label: &super::types::Label,
+    ) -> Result<Option<Vec<u8>>, AegonError> {
+        let req = FetchLabelPlacementRequest {
+            label: label.clone(),
+        };
+        let resp = self.runtime.block_on(async {
+            self.client
+                .lock()
+                .await
+                .fetch_label_placement(req)
+                .await
+                .map_err(status_to_err)
+        })?;
+        let inner = resp.into_inner();
+        Ok(if inner.found {
+            Some(inner.placement_bytes)
+        } else {
+            None
+        })
+    }
+
+    fn fetch_history_openings(&self, epoch: u64) -> Result<Option<Vec<u8>>, AegonError> {
+        let req = FetchHistoryOpeningsRequest { epoch };
+        let resp = self.runtime.block_on(async {
+            self.client
+                .lock()
+                .await
+                .fetch_history_openings(req)
+                .await
+                .map_err(status_to_err)
+        })?;
+        let inner = resp.into_inner();
+        Ok(if inner.found {
+            Some(inner.openings_bytes)
+        } else {
+            None
+        })
+    }
+
+    fn finalize_publish_persist(
+        &self,
+        epoch: u64,
+        shard_id: u32,
+        prev_shard_commit_bytes: &[u8],
+        prev_merkle_path_bytes: &[u8],
+        post_shard_commit_bytes: &[u8],
+        post_merkle_path_bytes: &[u8],
+    ) -> Result<(), AegonError> {
+        let req = FinalizePublishPersistRequest {
+            epoch,
+            shard_id,
+            prev_shard_commit: prev_shard_commit_bytes.to_vec(),
+            prev_merkle_path: prev_merkle_path_bytes.to_vec(),
+            post_shard_commit: post_shard_commit_bytes.to_vec(),
+            post_merkle_path: post_merkle_path_bytes.to_vec(),
+        };
+        let _resp = self.runtime.block_on(async {
+            self.client
+                .lock()
+                .await
+                .finalize_publish_persist(req)
+                .await
+                .map_err(status_to_err)
+        })?;
+        Ok(())
     }
 }
 

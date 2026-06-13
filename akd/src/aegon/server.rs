@@ -242,6 +242,18 @@ where
     // publish() wrapper sets and consumes this in one call.
     pending: Option<PendingPublish<E, P>>,
 
+    // Set at the end of `publish_phase_2`, consumed by
+    // `apply_publish_finalize`. Holds everything the shard needs to
+    // build user-facing persistence entries (`StoredValueHistoryEntry`,
+    // `StoredLabelPlacement`, raw `value:` writes) locally — original
+    // (label, value) pairs, the §6.4 history entries, the value-change
+    // entries, and the per-label placements. The coord only ships the
+    // missing piece (this shard's slot in the cross-shard Merkle tree)
+    // when it triggers finalize. None when no publish is in flight or
+    // when the shard has no DB attached (the in-memory `Aegon`
+    // testing path).
+    pending_finalize: Option<PendingFinalize<E, P>>,
+
     // Snapshot of the initial post-setup state (zero polynomials, the
     // commitments of those zero polynomials, and the epoch-0
     // EpochSnapshot). Stashed at `init_with_arc` so `clear_dictionary`
@@ -353,6 +365,39 @@ struct PendingPublish<E: Pairing, P: AegonPcs<E>> {
     /// slot's entry can be paired by `slot_bits` with the matching
     /// shard-write to recover the post-update value bytes.
     value_change_slots: Vec<Vec<bool>>,
+    /// Raw `(Label, Value)` pairs from this batch — cached so the
+    /// shard can build user-facing persistence entries
+    /// (`StoredValueHistoryEntry`, `StoredLabelPlacement`, raw
+    /// `value:` writes) locally during the finalize step that the
+    /// coord triggers after phase 2. Without this cache the value
+    /// bytes would have to be re-shipped from the coord, doubling the
+    /// per-publish bandwidth.
+    cached_updates: Vec<(super::types::Label, super::types::Value)>,
+    /// Per-label placement records emitted by `publish_batch`/`phase
+    /// 1`. Carried through phase 2 so the finalize step can pair each
+    /// label with its slot for the user-facing writes.
+    cached_placements: Vec<ShardPlacement>,
+}
+
+/// State the shard stashes after `publish_phase_2` so it can serve a
+/// follow-up `apply_publish_finalize` from the coord without
+/// re-receiving the per-label proof bytes over the wire. Cleared at
+/// the end of finalize, or implicitly dropped on `clear_dictionary`.
+struct PendingFinalize<E: Pairing, P: AegonPcs<E>> {
+    /// Epoch number this finalize call corresponds to.
+    epoch: u64,
+    /// `(label, value)` pairs from `publish_batch`, restricted to
+    /// labels this shard actually placed.
+    updates: Vec<(super::types::Label, super::types::Value)>,
+    /// Per-label placement records emitted by `publish_batch`.
+    placements: Vec<ShardPlacement>,
+    /// §6.4 history-opening entries produced by `publish_phase_2`.
+    /// One entry per new placement.
+    history_entries: Vec<crate::aegon::types::HistoryOpeningEntry<E, P>>,
+    /// Value-change entries produced by `publish_phase_2`. One entry
+    /// per slot whose value changed (new placements + value-only
+    /// updates).
+    value_changes: Vec<crate::aegon::types::ValueChangeEntry<E, P>>,
 }
 
 impl<E, P, H> Aegon<E, P, H>
@@ -572,6 +617,7 @@ where
             epoch_history,
             retain_epoch_polys: true,
             pending: None,
+            pending_finalize: None,
             setup_baseline,
             _phantom: PhantomData,
         })
@@ -816,6 +862,7 @@ where
             epoch_history,
             retain_epoch_polys: true,
             pending: None,
+            pending_finalize: None,
             setup_baseline,
             _phantom: PhantomData,
         })
@@ -1438,6 +1485,13 @@ where
             delta_value_state,
             new_label_slots,
             value_change_slots,
+            // Caller (e.g. `publish_batch`) fills these in after
+            // `publish_phase_1_at_slots` returns. Callers that bypass
+            // `publish_batch` (e.g. tests using
+            // `publish_phase_1_at_slots` directly) leave them empty,
+            // which means the finalize step is a no-op for that flow.
+            cached_updates: Vec::new(),
+            cached_placements: Vec::new(),
         });
         log_rss_ctx("phase1.exit", &format!("epoch={}", _rss_epoch));
         if super::instrument::publish_profile_enabled() {
@@ -1567,6 +1621,20 @@ where
         // the legacy call site would.
         let (index_commitment, value_commitment) = self.publish_phase_1_at_slots(&writes)?;
 
+        // Cache (label, value) + per-label placements on `self.pending`
+        // so the finalize step (triggered by the coord after phase 2)
+        // can build user-facing persistence entries locally without
+        // re-shipping the raw bytes from the coord. Stash only the
+        // accepted prefix — labels past `placed_count` were re-routed
+        // past this shard and aren't ours to persist.
+        if let Some(pending) = self.pending.as_mut() {
+            pending.cached_updates = batch[..placed_count]
+                .iter()
+                .map(|(l, v)| (l.clone(), v.clone()))
+                .collect();
+            pending.cached_placements = placements.clone();
+        }
+
         let fullness_proof = if full {
             // Placeholder: empty bytes. When the real fullness-proof
             // protocol lands, replace this with the soundness proof
@@ -1619,6 +1687,8 @@ where
             delta_value_state,
             new_label_slots,
             value_change_slots,
+            cached_updates,
+            cached_placements,
         } = pending;
 
         // Build the placement_idx map up-front — we need it both for
@@ -2064,10 +2134,22 @@ where
             );
         }
 
-        let history = HistoryOpenings {
-            entries: new_label_entries,
+        // Stash everything needed for a follow-up local finalize. The
+        // coord will trigger `apply_publish_finalize` with only the
+        // missing piece (this shard's slot in the cross-shard Merkle
+        // tree); the shard never has to re-receive the per-label
+        // proof bytes over the wire.
+        //
+        // We MOVE entries / value_changes into the stash (no clone)
+        // because `publish_phase_2` no longer returns
+        // `HistoryOpenings` — the coord doesn't need it post-refactor.
+        self.pending_finalize = Some(PendingFinalize {
+            epoch: self.epoch + 1, // phase 2 finalize bumps epoch below
+            updates: cached_updates,
+            placements: cached_placements,
+            history_entries: new_label_entries,
             value_changes: value_change_entries,
-        };
+        });
 
         // Finalize the new epoch. `self.*` already holds the new
         // commitments / states / polynomials (mutated in place during
@@ -2128,7 +2210,211 @@ where
             );
         }
 
+        // Post-refactor: history is built + persisted on the shard
+        // during `apply_publish_finalize`. The coord-facing return
+        // type still includes `HistoryOpenings` for callers that
+        // haven't migrated to the new finalize path, but we return an
+        // empty bundle — the real entries live in
+        // `self.pending_finalize` and are consumed locally.
+        let history = HistoryOpenings {
+            entries: Vec::new(),
+            value_changes: Vec::new(),
+        };
         Ok((self.current_commitment(), history))
+    }
+
+    /// Stage-B finalize: consume `pending_finalize` and build the full
+    /// set of dictionary-content DbOps for this shard's local DB.
+    ///
+    /// Replaces the legacy coord-built op stream (steps 1, 5, 6, 7 of
+    /// `Sharded::persist_publish_to_db`) by relocating that work to the
+    /// shard. The coord supplies only the cross-shard merkle anchors
+    /// it alone knows; everything else (per-label values, slot bits,
+    /// opening proofs) was already captured in `pending_finalize` at
+    /// the end of `publish_phase_2`.
+    ///
+    /// Returns a `Vec<DbOp>` to be applied atomically by the caller
+    /// (typically the gRPC server handler) against this shard's DB.
+    /// `pending_finalize` is consumed (taken) regardless of success;
+    /// the only repeatable failures are user-data shape errors that a
+    /// retry wouldn't fix.
+    #[allow(clippy::too_many_arguments)]
+    pub fn build_finalize_ops(
+        &mut self,
+        shard_id: u32,
+        expected_epoch: u64,
+        prev_shard_commit: Option<EpochCommitment<E, P>>,
+        prev_merkle_path: Vec<super::sharded::EpochDigest>,
+        post_shard_commit: EpochCommitment<E, P>,
+        post_merkle_path: Vec<super::sharded::EpochDigest>,
+    ) -> Result<Vec<super::db::DbOp>, AegonError>
+    where
+        P::Proof: Clone,
+    {
+        use super::db::{
+            key_history_openings_local, key_label_placement, key_value, key_value_history, DbOp,
+        };
+        use super::sharded::{StoredLabelPlacement, StoredValueHistoryEntry, HISTORY_WINDOW};
+
+        let pending = self.pending_finalize.take().ok_or_else(|| {
+            AegonError::Database(
+                "build_finalize_ops: no pending_finalize — publish_phase_2 must run first"
+                    .to_string(),
+            )
+        })?;
+
+        if pending.epoch != expected_epoch {
+            return Err(AegonError::Database(format!(
+                "build_finalize_ops: pending epoch {} != expected {}",
+                pending.epoch, expected_epoch,
+            )));
+        }
+
+        let mut ops: Vec<DbOp> = Vec::with_capacity(
+            pending.updates.len()
+                + pending.value_changes.len() * 2
+                + pending.history_entries.len()
+                + 1,
+        );
+
+        // 1. value:{label} — one Set per update.
+        for (label, value) in &pending.updates {
+            ops.push(DbOp::Set {
+                key: key_value(label),
+                value: value.clone(),
+            });
+        }
+
+        // 2. openings:{epoch} — §6.4 history witnesses bundle. Only
+        // written if at least one new placement landed on this shard;
+        // value-only batches skip this key (matches the legacy
+        // coord-side filter on `!h.entries.is_empty()`).
+        //
+        // Serialize entries + value_changes by reference rather than
+        // building a fresh `HistoryOpenings` struct (would require
+        // cloning, and `P::Proof: Clone` isn't in the impl's bounds).
+        // The derived `CanonicalSerialize` for `HistoryOpenings` writes
+        // the two Vecs back-to-back in field order, so this matches.
+        if !pending.history_entries.is_empty() {
+            let mut bytes = Vec::new();
+            pending
+                .history_entries
+                .serialize_compressed(&mut bytes)
+                .map_err(|e| {
+                    AegonError::Database(format!("serialize history openings.entries: {e}"))
+                })?;
+            pending
+                .value_changes
+                .serialize_compressed(&mut bytes)
+                .map_err(|e| {
+                    AegonError::Database(format!("serialize history openings.value_changes: {e}"))
+                })?;
+            ops.push(DbOp::Set {
+                key: key_history_openings_local(pending.epoch),
+                value: bytes,
+            });
+        }
+
+        // slot_bits → label map for step 3 (value_history). Built from
+        // `placements`, which the coord populated with EVERY placement
+        // in this batch (new + value-only), so both paths resolve.
+        let mut slot_to_label: HashMap<Vec<bool>, &Label> =
+            HashMap::with_capacity(pending.placements.len());
+        for p in &pending.placements {
+            slot_to_label.insert(p.slot_bits.clone(), &p.label);
+        }
+        // label → raw value bytes for step 3.
+        let mut label_to_value: HashMap<&[u8], &[u8]> =
+            HashMap::with_capacity(pending.updates.len());
+        for (label, value) in &pending.updates {
+            label_to_value.insert(label.as_slice(), value.as_slice());
+        }
+
+        // 3. value_history:{label} — LPush + LTrim per value_change.
+        // Skipped on epoch 0 (no prev commit to anchor against),
+        // matching the legacy `prev_commit.is_some()` guard.
+        if prev_shard_commit.is_some() {
+            let prev_leaf = prev_shard_commit
+                .as_ref()
+                .expect("checked above")
+                .clone();
+            for vc in &pending.value_changes {
+                let label = slot_to_label.get(&vc.slot_bits).ok_or_else(|| {
+                    AegonError::Database(format!(
+                        "internal: value_change at slot {:?} has no matching label in this publish",
+                        vc.slot_bits
+                    ))
+                })?;
+                let value_bytes = label_to_value
+                    .get(label.as_slice())
+                    .copied()
+                    .unwrap_or(&[]);
+                let entry = StoredValueHistoryEntry::<E, P> {
+                    epoch: pending.epoch,
+                    shard_id,
+                    slot_bits: vc.slot_bits.clone(),
+                    value_bytes: value_bytes.to_vec(),
+                    rand_value_pre_eval: vc.rand_value_pre_eval,
+                    rand_value_pre_proof: vc.rand_value_pre_proof.clone(),
+                    rand_value_post_eval: vc.rand_value_post_eval,
+                    rand_value_post_proof: vc.rand_value_post_proof.clone(),
+                    value_post_eval: vc.value_post_eval,
+                    value_post_proof: vc.value_post_proof.clone(),
+                    prev_shard_commit: prev_leaf.clone(),
+                    prev_merkle_path: prev_merkle_path.clone(),
+                    post_shard_commit: post_shard_commit.clone(),
+                    post_merkle_path: post_merkle_path.clone(),
+                };
+                let mut entry_bytes = Vec::new();
+                entry
+                    .serialize_uncompressed(&mut entry_bytes)
+                    .map_err(|e| {
+                        AegonError::Database(format!("serialize value history entry: {e}"))
+                    })?;
+                let history_key = key_value_history(label);
+                ops.push(DbOp::LPush {
+                    key: history_key.clone(),
+                    member: entry_bytes,
+                });
+                ops.push(DbOp::LTrim {
+                    key: history_key,
+                    start: 0,
+                    stop: (HISTORY_WINDOW as isize) - 1,
+                });
+            }
+        }
+
+        // 4. label_placement:{label} — Set per new placement. One
+        // history_entries entry per new placement (same indexing
+        // invariant the coord previously relied on). slot_bits maps
+        // each §6.4 entry back to its label via `cached_placements`.
+        for entry in &pending.history_entries {
+            let label = slot_to_label.get(&entry.slot_bits).ok_or_else(|| {
+                AegonError::Database(format!(
+                    "internal: §6.4 entry at slot {:?} has no matching placement",
+                    entry.slot_bits
+                ))
+            })?;
+            let stored = StoredLabelPlacement::<E, P> {
+                epoch: pending.epoch,
+                shard_id,
+                slot_bits: entry.slot_bits.clone(),
+                rand_index_eval: entry.rand_index_post_eval,
+                rand_index_proof: entry.rand_index_post_proof.clone(),
+                placement_shard_commit: post_shard_commit.clone(),
+                placement_merkle_path: post_merkle_path.clone(),
+            };
+            let mut bytes = Vec::new();
+            stored
+                .serialize_uncompressed(&mut bytes)
+                .map_err(|e| AegonError::Database(format!("serialize label placement: {e}")))?;
+            ops.push(DbOp::Set {
+                key: key_label_placement(label),
+                value: bytes,
+            });
+        }
+
+        Ok(ops)
     }
 
     /// Find the first free slot for `label` via local-only open addressing.

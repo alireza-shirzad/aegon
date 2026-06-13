@@ -70,11 +70,23 @@ export KZH_K="${KZH_K:-9}"
 # Medium batch sizes; large uses 4096..131072.
 export PUBLISH_BATCH_SIZES="${PUBLISH_BATCH_SIZES:-64,128,256,512,1024,2048}"
 export LOOKUP_PUBLISH_BATCH_SIZES="${LOOKUP_PUBLISH_BATCH_SIZES:-${PUBLISH_BATCH_SIZES}}"
-# Warmup batch sized to medium-regime sweet spot. We empirically tested
-# batch=65536 in v9 expecting MSM amortization; it was ~2x SLOWER per
-# entry (3.9 ms vs 1.9 ms at batch=16384). Likely the KZH-k FK
-# acceleration tables overflow L3 at the bigger batch, so per-entry cost
-# spikes from cache misses. v6's 16384 stays in cache.
+# Warmup batch size. Reads bench-results/migration/medium_best_k.txt
+# (written by aegon_migration_bench's K-sweep) when present, falling
+# back to 16384 — the historical empirical sweet spot from v6 on
+# n2-standard-16 shards (v9 tested batch=65536 expecting MSM
+# amortization; it was ~2x SLOWER per entry because the KZH-k FK
+# acceleration tables overflowed L3 at the bigger batch). If you ran
+# migration-bench at the current cluster hardware, the file's K is
+# likely better tuned than the historical default; override via env
+# if you want to force a specific value.
+_MED_BEST_K_FILE="$REPO_ROOT/bench-results/migration/medium_best_k.txt"
+if [[ -z "${PUBLISH_WARMUP_BATCH_SIZE:-}" && -r "$_MED_BEST_K_FILE" ]]; then
+  _MED_BEST_K="$(tr -dc '0-9' < "$_MED_BEST_K_FILE")"
+  if [[ -n "$_MED_BEST_K" ]]; then
+    PUBLISH_WARMUP_BATCH_SIZE="$_MED_BEST_K"
+    log "PUBLISH_WARMUP_BATCH_SIZE not set; using migration-best K=$_MED_BEST_K from $_MED_BEST_K_FILE"
+  fi
+fi
 export PUBLISH_WARMUP_BATCH_SIZE="${PUBLISH_WARMUP_BATCH_SIZE:-16384}"
 # 4 masking servers so the throughput-sweep curve shows a real climb
 # phase. One masking server (120 pkg/s ceiling at nv=27, k=9) is
@@ -130,9 +142,64 @@ fi
 # --fill-percents internally, climbing each fill via real publish
 # (no shortcut) and running lookups + audit + publish-batch-sweep
 # at every level. The warmup work is paid exactly once per fill.
+#
+# Wrap with a background watchdog loop (per-shard RSS + free mem + OOM
+# count every 60s) and a postmortem fetch (last 2MB of each shard's
+# /tmp/aegon-shard.log + last 500 lines of dmesg -T) so we can diagnose
+# OOMs / panics that happened on a non-bench VM before `down` wipes the
+# evidence.
+WATCHDOG_LOG="$RESULTS_DIR/medium-watchdog.log"
+POSTMORTEM_DIR="$RESULTS_DIR/medium-postmortem-$(date +%Y%m%dT%H%M%S)"
+WATCHDOG_PID=""
 if [[ "${SKIP_LOOKUP_BENCH:-0}" != "1" ]]; then
+  : > "$WATCHDOG_LOG"
+  log "starting watchdog loop (per-shard probe every 60s) -> $WATCHDOG_LOG"
+  (
+    while true; do
+      echo "===== $(date -Is) =====" >> "$WATCHDOG_LOG"
+      PROJECT="$PROJECT" N_SHARDS="$N_SHARDS" \
+        "$REPO_ROOT/scripts/bench-cluster.sh" watchdog >> "$WATCHDOG_LOG" 2>&1 || true
+      sleep 60
+    done
+  ) &
+  WATCHDOG_PID=$!
+  log "watchdog PID=$WATCHDOG_PID"
+
   run_phase "medium-lookup-bench" "$REPO_ROOT/scripts/bench-cluster.sh" lookup-bench \
-    || log "WARN: lookup-bench failed; tearing down anyway"
+    || log "WARN: lookup-bench failed; fetching postmortems before teardown"
+
+  # Stop watchdog before its next iteration spams the log.
+  if [[ -n "$WATCHDOG_PID" ]]; then
+    kill "$WATCHDOG_PID" 2>/dev/null || true
+    wait "$WATCHDOG_PID" 2>/dev/null || true
+    log "watchdog stopped (PID=$WATCHDOG_PID)"
+  fi
+
+  # ALWAYS fetch shard/coord postmortems before `down` — this is the
+  # only chance to recover the shard's stderr (panic traces, etc.) and
+  # the kernel ring buffer (OOM-killer signatures). Fails-soft so a
+  # dead VM doesn't block teardown.
+  mkdir -p "$POSTMORTEM_DIR"
+  log "fetching postmortems -> $POSTMORTEM_DIR"
+  ZONE="${ZONE:-us-central1-f}"
+  for ((i = 0; i < N_SHARDS; i++)); do
+    sname="aegon-bench-shard-$i"
+    (
+      timeout 120 gcloud compute ssh "$sname" --project="$PROJECT" --zone="$ZONE" \
+        --tunnel-through-iap --quiet \
+        --command="echo '=== /tmp/aegon-shard.log (last 2MB) ==='; tail -c 2000000 /tmp/aegon-shard.log 2>/dev/null; echo; echo '=== dmesg -T (last 500 lines) ==='; sudo dmesg -T 2>/dev/null | tail -n 500; echo; echo '=== free -m ==='; free -m; echo; echo '=== ps aux | grep aegon ==='; ps aux | grep -i aegon | grep -v grep" \
+        > "$POSTMORTEM_DIR/shard-$i.log" 2>&1
+    ) || log "WARN: shard-$i postmortem fetch failed"
+  done
+  for cname in aegon-bench-coord aegon-bench-client; do
+    (
+      timeout 120 gcloud compute ssh "$cname" --project="$PROJECT" --zone="$ZONE" \
+        --tunnel-through-iap --quiet \
+        --command="echo '=== dmesg -T (last 500 lines) ==='; sudo dmesg -T 2>/dev/null | tail -n 500; echo; echo '=== free -m ==='; free -m; echo; echo '=== ps aux | grep aegon ==='; ps aux | grep -i aegon | grep -v grep; echo; echo '=== journalctl -u aegon-lookup-bench --no-pager | tail -n 200 ==='; sudo journalctl -u aegon-lookup-bench --no-pager 2>/dev/null | tail -n 200" \
+        > "$POSTMORTEM_DIR/$cname.log" 2>&1
+    ) || log "WARN: $cname postmortem fetch failed"
+  done
+  log "postmortems saved to $POSTMORTEM_DIR"
 fi
 
 # --- Phase 7: down ---

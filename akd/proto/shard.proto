@@ -97,6 +97,57 @@ service ShardService {
   // `Aegon::find_label_slot`. The shard's index polynomial is the
   // sole source of truth — no DB roundtrip.
   rpc FindLabelSlot(FindLabelSlotRequest) returns (FindLabelSlotResponse);
+
+  // -------- Per-shard durable state (DB-anchored, post-refactor) --------
+  // Each shard now owns the durable storage for the labels that route
+  // to it. The coord ships pre-formed DbOps via ApplyPersistenceOps at
+  // the end of every publish, and reads back via the four Fetch* RPCs
+  // at lookup time. Coord retains only `coord:state` (epoch + FS
+  // scalars) and `coord:epoch_commit:{epoch}` (the global root) in its
+  // own DB — no per-label dictionary content.
+
+  // Apply a pre-formed list of DbOps to this shard's local DB
+  // atomically. Used by the coord at publish persist time to push the
+  // labels routed to this shard (value, value_history, label_placement,
+  // and the per-epoch history_openings bundle).
+  rpc ApplyPersistenceOps(ApplyPersistenceOpsRequest)
+      returns (ApplyPersistenceOpsResponse);
+
+  // Read the raw value bytes for `label` from this shard's DB. Coord
+  // calls this on the destination shard during `lookup_two_layer`.
+  rpc FetchValue(FetchValueRequest) returns (FetchValueResponse);
+
+  // Read the value-history sliding window for `label` from this
+  // shard's DB. Returns the list in LPush order (newest first), which
+  // matches the on-coord LPush/LTrim semantics from before the move.
+  rpc FetchValueHistory(FetchValueHistoryRequest)
+      returns (FetchValueHistoryResponse);
+
+  // Read the `StoredLabelPlacement<E,P>` blob for `label` from this
+  // shard's DB.
+  rpc FetchLabelPlacement(FetchLabelPlacementRequest)
+      returns (FetchLabelPlacementResponse);
+
+  // Read this shard's `HistoryOpenings<E,P>` bundle for the given
+  // epoch from its DB. Key on the shard is `openings:{epoch}` (no
+  // shard_id suffix, since each shard's keyspace is already local).
+  rpc FetchHistoryOpenings(FetchHistoryOpeningsRequest)
+      returns (FetchHistoryOpeningsResponse);
+
+  // Stage-B finalize entry point: instead of the coord pre-building
+  // every dictionary-content DbOp and shipping the full ~200 MB blob
+  // via ApplyPersistenceOps, the coord ships ONLY the cross-shard
+  // merkle anchors it alone knows (this shard's prev/post commit and
+  // its slot's path through the per-epoch cross-shard merkle tree).
+  // The shard then consumes its post-phase-2 `pending_finalize` stash
+  // — built locally in `publish_phase_2` from the per-label proofs the
+  // shard already computed — to produce the value/value_history/
+  // label_placement/openings ops, and writes them atomically.
+  //
+  // Wire savings at K=16384, n_shards=2 (medium cluster): ~200 MB →
+  // tens of bytes per shard per publish.
+  rpc FinalizePublishPersist(FinalizePublishPersistRequest)
+      returns (FinalizePublishPersistResponse);
 }
 
 message ReconfigurePrefillRequest {
@@ -238,3 +289,88 @@ message GetVerifierContextResponse {
 }
 
 message Empty {}
+
+// -------- Per-shard durable state messages --------
+
+message ApplyPersistenceOpsRequest {
+  // Canonical-serialized `Vec<DbOp>`. Encoding mirrors the in-process
+  // `aegon::db::DbOp` enum: { Set { key, value }, SAdd { key, member },
+  // LPush { key, member }, LTrim { key, start, stop } }. Coord builds
+  // the list locally and ships it; shard decodes and runs
+  // `db.write_atomic(&ops)`.
+  bytes ops_bytes = 1;
+}
+
+message ApplyPersistenceOpsResponse {}
+
+message FetchValueRequest {
+  // Raw label bytes.
+  bytes label = 1;
+}
+
+message FetchValueResponse {
+  // Empty when the label is not in this shard's DB (the coord treats
+  // that case as a routing/lookup error per the original `db.get`
+  // semantics).
+  bool found = 1;
+  bytes value = 2;
+}
+
+message FetchValueHistoryRequest {
+  bytes label = 1;
+}
+
+message FetchValueHistoryResponse {
+  // List head-first (newest entry at index 0), matching the on-disk
+  // order from the LPush + LTrim Redis semantics.
+  repeated bytes entries = 1;
+}
+
+message FetchLabelPlacementRequest {
+  bytes label = 1;
+}
+
+message FetchLabelPlacementResponse {
+  bool found = 1;
+  // Canonical-serialized `StoredLabelPlacement<E,P>` (uncompressed,
+  // same format as the prior coord-side write).
+  bytes placement_bytes = 2;
+}
+
+message FetchHistoryOpeningsRequest {
+  uint64 epoch = 1;
+}
+
+message FetchHistoryOpeningsResponse {
+  bool found = 1;
+  // Canonical-serialized `HistoryOpenings<E,P>` (compressed, same
+  // format as the prior coord-side write).
+  bytes openings_bytes = 2;
+}
+
+message FinalizePublishPersistRequest {
+  // Sanity-check epoch — must match the `pending_finalize.epoch` on
+  // the shard. Mismatch is a protocol error (the shard rejects
+  // without modifying its DB).
+  uint64 epoch = 1;
+  // Shard id, copied into the stored entries' `shard_id` field so
+  // verifiers can identify the owning shard. The shard process
+  // itself doesn't track its own id — the coord knows it from its
+  // routing table.
+  uint32 shard_id = 2;
+  // Canonical-serialized `EpochCommitment<E, P>` at epoch (epoch-1).
+  // Empty bytes when `epoch == 0` (no prior commit to anchor against;
+  // value_history writes are skipped on the genesis publish).
+  bytes prev_shard_commit = 3;
+  // Canonical-serialized `Vec<EpochDigest>` — this shard's path from
+  // leaf to root in the cross-shard merkle tree at epoch (epoch-1).
+  // Empty when `prev_shard_commit` is empty.
+  bytes prev_merkle_path = 4;
+  // Canonical-serialized `EpochCommitment<E, P>` at this epoch.
+  bytes post_shard_commit = 5;
+  // Canonical-serialized `Vec<EpochDigest>` — this shard's path
+  // through the post-publish cross-shard merkle tree.
+  bytes post_merkle_path = 6;
+}
+
+message FinalizePublishPersistResponse {}

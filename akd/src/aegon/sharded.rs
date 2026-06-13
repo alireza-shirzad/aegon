@@ -36,8 +36,8 @@ use sha2::{Digest, Sha256};
 use super::audit::verify_chain;
 use super::config::{AegonConfig, VerifierContext};
 use super::db::{
-    key_coord_state, key_epoch_commit, key_history_openings, key_label_placement,
-    key_shard_fullness, key_value, key_value_history, Db, DbOp,
+    key_coord_state, key_epoch_commit, key_history_openings, key_history_openings_local,
+    key_label_placement, key_shard_fullness, key_value, key_value_history, Db, DbOp,
     DbSource, RedisDb,
 };
 use super::error::AegonError;
@@ -467,17 +467,6 @@ pub struct ShardWrite<F: Field> {
     /// `H_F(value)` — the value polynomial is overwritten every
     /// epoch the label appears, so there's no analogous "skip" mode.
     pub h_value: F,
-}
-
-/// Record of one **newly-placed** label in a publish. Returned by
-/// `publish_two_layer` so the post-publish DB durability barrier can
-/// emit a fresh `aegon:label_placement:` record for each first-time
-/// placement. (Value-only updates reuse a prior epoch's record.)
-#[derive(Clone, Debug)]
-pub(crate) struct NewPlacement {
-    pub(crate) label: Label,
-    pub(crate) shard_id: u32,
-    pub(crate) slot_idx: usize,
 }
 
 /// Coordinator state recovered from the DB on restart. Built by
@@ -1904,44 +1893,19 @@ where
         // Phase 2 + finalize: unchanged.
         let (new_r_index, new_r_value) =
             self.derive_chain_scalars(&new_index_commits, &new_value_commits);
-        let (per_shard_commits, per_shard_history) =
+        let (per_shard_commits, _per_shard_history) =
             self.run_phase_2(new_r_index, new_r_value)?;
         let sharded_commit =
             self.finalize_epoch(per_shard_commits, new_r_index, new_r_value);
 
-        // Build the placement metadata `persist_publish_to_db` needs:
-        //   - `all_placements`: one (shard_id, ShardPlacement) per
-        //     accepted label across all shards. Used to drive the
-        //     value_history slot->label map without any
-        //     `aegon:routing:` reads.
-        //   - `new_placements`: subset of the above where
-        //     `was_new == true`. Used to drive `aegon:label_placement:`
-        //     writes (step 7) and the §6.4 shard_slot_to_entry
-        //     bookkeeping.
-        let mut all_placements: Vec<(u32, super::server::ShardPlacement)> = Vec::new();
-        let mut new_placements: Vec<NewPlacement> = Vec::new();
-        for (shard_id, outcome_opt) in shard_outcomes.iter().enumerate() {
-            let Some(outcome) = outcome_opt else { continue };
-            for p in &outcome.placements {
-                if p.was_new {
-                    let slot_idx = bool_index_to_usize_dims(&p.slot_bits, &self.shard_dims);
-                    new_placements.push(NewPlacement {
-                        label: p.label.clone(),
-                        shard_id: shard_id as u32,
-                        slot_idx,
-                    });
-                }
-                all_placements.push((shard_id as u32, p.clone()));
-            }
-        }
-
-        self.persist_publish_to_db(
-            updates,
-            &new_placements,
-            &all_placements,
-            &sharded_commit,
-            &per_shard_history,
-        )?;
+        // Stage-B refactor: the coord no longer enumerates per-shard
+        // placements or history here — every shard already stashed
+        // everything it needs in its `pending_finalize` during
+        // `publish_phase_2`, and will consume that stash inside
+        // `finalize_publish_persist`. `_per_shard_history` is
+        // intentionally empty post-refactor (publish_phase_2 returns
+        // an empty `HistoryOpenings`).
+        self.persist_publish_to_db(&sharded_commit)?;
 
         // Persist the (possibly updated) per-shard fullness map.
         if let Some(db) = &self.db {
@@ -2126,49 +2090,23 @@ where
     )]
     fn persist_publish_to_db(
         &self,
-        updates: &[(Label, Value)],
-        new_placements: &[NewPlacement],
-        all_placements: &[(u32, super::server::ShardPlacement)],
         sharded_commit: &ShardedEpochCommitment<E, P>,
-        per_shard_history: &[HistoryOpenings<E, P>],
     ) -> Result<(), AegonError> {
-        let Some(db) = &self.db else { return Ok(()) };
         let prof = super::instrument::publish_profile_enabled();
         let _persist_t_total = std::time::Instant::now();
 
-        // Pre-size: 1 op per update (value SET) + 2 global ops
-        // (coord:state SET + coord:epoch_commit:{epoch} SET) + 1 op
-        // per non-empty shard's §6.4 history bundle.
-        let non_empty_histories = per_shard_history.iter().filter(|h| !h.entries.is_empty()).count();
-        let mut ops: Vec<DbOp> = Vec::with_capacity(
-            updates.len() + 2 + non_empty_histories,
-        );
+        // Stage-B refactor: coord ships ONLY the cross-shard merkle
+        // anchors it alone knows. Every per-label DB op (value,
+        // value_history, label_placement, openings) is built and
+        // written by the owning shard from its post-phase-2
+        // `pending_finalize` stash. The coord's own DB still holds
+        // exactly two keys: `coord:state` (epoch + FS scalars) and
+        // `coord:epoch_commit:{epoch}` (the global sharded root).
+        let n_shards = self.shards.len();
+        let mut coord_ops: Vec<DbOp> = Vec::with_capacity(2);
 
-        // 1. value:{label} for every update.
+        // 1. coord:state — one key, contains (epoch, r_index, r_value).
         let _step1_t = std::time::Instant::now();
-        for (label, value) in updates {
-            ops.push(DbOp::Set {
-                key: key_value(label),
-                value: value.clone(),
-            });
-        }
-
-        if prof {
-            eprintln!(
-                "[pub-profile] persist.step1_value_set: {:.3} ms (ops={})",
-                _step1_t.elapsed().as_secs_f64() * 1000.0,
-                updates.len(),
-            );
-        }
-
-        // Step 2 (routing/slot keyspaces) is gone with the two-layer
-        // routing migration. `lookup_two_layer` derives the
-        // destination shard from `H_shard(shard_ctr, label)` and the
-        // intra-shard slot from `H_slot(slot_ctr, label)` — neither
-        // path needs a per-label routing record.
-
-        // 3. coord:state — one key, contains (epoch, r_index, r_value).
-        let _step3_t = std::time::Instant::now();
         let mut state_bytes = Vec::new();
         self.epoch
             .serialize_compressed(&mut state_bytes)
@@ -2179,287 +2117,139 @@ where
         self.r_value
             .serialize_compressed(&mut state_bytes)
             .map_err(|e| AegonError::Database(format!("serialize r_value: {e}")))?;
-        ops.push(DbOp::Set {
+        coord_ops.push(DbOp::Set {
             key: key_coord_state().to_vec(),
             value: state_bytes,
         });
 
         if prof {
             eprintln!(
-                "[pub-profile] persist.step3_coord_state_serialize: {:.3} ms",
-                _step3_t.elapsed().as_secs_f64() * 1000.0,
+                "[pub-profile] persist.step1_coord_state_serialize: {:.3} ms",
+                _step1_t.elapsed().as_secs_f64() * 1000.0,
             );
         }
 
-        // 4. coord:epoch_commit:{epoch} — the externally-published commitment.
-        let _step4_t = std::time::Instant::now();
+        // 2. coord:epoch_commit:{epoch} — the externally-published commitment.
+        let _step2_t = std::time::Instant::now();
         let mut commit_bytes = Vec::new();
         sharded_commit
             .serialize_compressed(&mut commit_bytes)
             .map_err(|e| AegonError::Database(format!("serialize epoch commit: {e}")))?;
-        ops.push(DbOp::Set {
+        coord_ops.push(DbOp::Set {
             key: key_epoch_commit(sharded_commit.epoch),
             value: commit_bytes,
         });
 
         if prof {
             eprintln!(
-                "[pub-profile] persist.step4_epoch_commit_serialize: {:.3} ms",
-                _step4_t.elapsed().as_secs_f64() * 1000.0,
+                "[pub-profile] persist.step2_epoch_commit_serialize: {:.3} ms",
+                _step2_t.elapsed().as_secs_f64() * 1000.0,
             );
         }
 
-        // 5. openings:{epoch}:{shard_id} — §6.4 history witnesses. One
-        // key per shard whose batch carried at least one brand-new
-        // label. Shards that did only value-updates produced an empty
-        // `HistoryOpenings.entries`; persisting an empty bundle would
-        // just waste a DB write, so those are skipped here. The
-        // value_changes side may still be non-empty for those shards
-        // (handled separately below as user-facing per-label history).
-        let _step5_t = std::time::Instant::now();
-        // Parallel: serialize each shard's HistoryOpenings on its own
-        // rayon worker. At batch=16K the per-shard payload is ~410 ms
-        // of compressed-serialize work, so going parallel cuts wall
-        // time roughly in half for n_shards=2 and scales linearly.
-        let step5_ops: Vec<DbOp> = per_shard_history
-            .par_iter()
-            .enumerate()
-            .filter(|(_, h)| !h.entries.is_empty())
-            .map(|(shard_id, history)| -> Result<DbOp, AegonError> {
-                let mut history_bytes = Vec::new();
-                history
-                    .serialize_compressed(&mut history_bytes)
-                    .map_err(|e| AegonError::Database(format!("serialize history openings: {e}")))?;
-                Ok(DbOp::Set {
-                    key: key_history_openings(sharded_commit.epoch, shard_id as u32),
-                    value: history_bytes,
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        ops.extend(step5_ops);
-
+        // 3. Coord-side write — at most ~10 KB total per publish.
+        let _coord_write_t = std::time::Instant::now();
+        if let Some(db) = &self.db {
+            db.write_atomic(&coord_ops)?;
+        }
         if prof {
             eprintln!(
-                "[pub-profile] persist.step5_history_openings_serialize_compressed: {:.3} ms (shards_with_history={})",
-                _step5_t.elapsed().as_secs_f64() * 1000.0,
-                per_shard_history.iter().filter(|h| !h.entries.is_empty()).count(),
+                "[pub-profile] persist.step3_coord_write: {:.3} ms (ops={})",
+                _coord_write_t.elapsed().as_secs_f64() * 1000.0,
+                coord_ops.len(),
             );
         }
 
-        let _step6_t = std::time::Instant::now();
-        // 6. value_history:{label} — user-facing value-history sliding
-        // window. For every slot whose value changed this publish
-        // (across all shards), build a `StoredValueHistoryEntry` and
-        // LPUSH it onto that label's list, then LTRIM to keep at most
-        // `HISTORY_WINDOW` entries. Both ops sit inside the same
-        // MULTI/EXEC, so a concurrent reader sees either the full
-        // pre-publish or the full post-publish list — never a torn
-        // state.
-        //
-        // Mapping value_changes back to the label that owned the slot.
-        // For brand-new placements in this batch, the trail is in
-        // `new_placements`. For value-only updates (existing labels),
-        // the trail is in the DB (or `self.routing` for the no-DB
-        // test path). We pre-build a `(shard_id, slot_bits) -> label`
-        // map so the inner loop is O(1).
-        let prev_commit = if sharded_commit.epoch == 0 {
+        // 4. Per-shard finalize. Encode this shard's slot in the
+        // cross-shard merkle tree (prev + post) and ship via
+        // FinalizePublishPersist. Tens-of-bytes payload per shard;
+        // each shard builds its own value/value_history/label_placement/
+        // openings ops locally from `pending_finalize`. Parallel
+        // dispatch — the wall-clock is bounded by the slowest shard's
+        // DB write, not the sum.
+        let _step4_t = std::time::Instant::now();
+        let prev_sharded: Option<ShardedEpochCommitment<E, P>> = if sharded_commit.epoch == 0 {
             None
         } else {
-            self.epoch_commits.get((sharded_commit.epoch - 1) as usize).cloned()
+            self.epoch_commits
+                .get((sharded_commit.epoch - 1) as usize)
+                .cloned()
         };
-        // The shard's `publish_batch` returned a placement record for
-        // EVERY label (new + update), so we build the (shard_id,
-        // slot_bits) → label map in a single linear pass over
-        // `all_placements`.
-        let mut slot_to_label: std::collections::HashMap<(u32, Vec<bool>), Label> =
-            std::collections::HashMap::with_capacity(updates.len());
-        for (shard_id, p) in all_placements {
-            slot_to_label.insert((*shard_id, p.slot_bits.clone()), p.label.clone());
-        }
-        // Also build a (label -> value bytes) map so each entry can
-        // carry the raw value_bytes the user later hashes against
-        // value_post_eval. Updates list is already that map — just
-        // address it by label.
-        let mut label_to_value: std::collections::HashMap<&[u8], &[u8]> =
-            std::collections::HashMap::with_capacity(updates.len());
-        for (label, value) in updates {
-            label_to_value.insert(label.as_slice(), value.as_slice());
-        }
-        // Parallel: flatten all (shard_id, vc) pairs and serialize
-        // their value-history entries on rayon. At batch=16K the
-        // serialize_uncompressed wall is ~400 ms even though each
-        // entry is only ~25 µs — the loop is dominated by serializing
-        // ~25 G1 points per entry. par_iter gets the work down to
-        // ~50 ms on a 4-vCPU coord.
-        let step6_inputs: Vec<(usize, &ValueChangeEntry<E, P>)> = per_shard_history
-            .iter()
-            .enumerate()
-            .filter(|(_, h)| !h.value_changes.is_empty() && prev_commit.is_some())
-            .flat_map(|(shard_id, h)| {
-                h.value_changes.iter().map(move |vc| (shard_id, vc))
-            })
-            .collect();
-        let step6_ops: Vec<DbOp> = step6_inputs
-            .par_iter()
-            .map(|(shard_id, vc)| -> Result<[DbOp; 2], AegonError> {
-                let prev_sharded = prev_commit
-                    .as_ref()
-                    .expect("filter above ensures prev_commit is Some");
-                let prev_leaf = prev_sharded.per_shard[*shard_id].clone();
-                let prev_merkle_path = prev_sharded.merkle_path(*shard_id).to_vec();
-                let post_leaf = sharded_commit.per_shard[*shard_id].clone();
-                let post_merkle_path = sharded_commit.merkle_path(*shard_id).to_vec();
-                let Some(label) = slot_to_label.get(&(*shard_id as u32, vc.slot_bits.clone())) else {
-                    return Err(AegonError::Database(format!(
-                        "internal: value_change at shard {shard_id} slot {:?} has no matching label in this publish's updates",
-                        vc.slot_bits
-                    )));
-                };
-                let value_bytes = label_to_value.get(label.as_slice()).copied().unwrap_or(&[]);
-                let entry = StoredValueHistoryEntry::<E, P> {
-                    epoch: sharded_commit.epoch,
-                    shard_id: *shard_id as u32,
-                    slot_bits: vc.slot_bits.clone(),
-                    value_bytes: value_bytes.to_vec(),
-                    rand_value_pre_eval: vc.rand_value_pre_eval,
-                    rand_value_pre_proof: vc.rand_value_pre_proof.clone(),
-                    rand_value_post_eval: vc.rand_value_post_eval,
-                    rand_value_post_proof: vc.rand_value_post_proof.clone(),
-                    value_post_eval: vc.value_post_eval,
-                    value_post_proof: vc.value_post_proof.clone(),
-                    prev_shard_commit: prev_leaf,
-                    prev_merkle_path,
-                    post_shard_commit: post_leaf,
-                    post_merkle_path,
-                };
-                let mut entry_bytes = Vec::new();
-                // Uncompressed on purpose: each entry is ~30 G1Affine
-                // points, and compressed reads pay a Tonelli-Shanks
-                // sqrt per point on the lookup_history path
-                // (~25 µs/point ≈ 1 ms/entry, dominating that RPC).
-                // Uncompressed roughly doubles per-entry DB bytes
-                // (~15 KB → ~30 KB at production proof shapes) but
-                // cuts deserialize cost ~10×. The gRPC wire to the
-                // client still uses compressed encoding — only DB
-                // storage changes. See the matching
-                // `deserialize_uncompressed_unchecked` in
-                // `lookup_history`.
-                entry
-                    .serialize_uncompressed(&mut entry_bytes)
-                    .map_err(|e| AegonError::Database(format!("serialize value history entry: {e}")))?;
-                let history_key = key_value_history(label);
-                Ok([
-                    DbOp::LPush {
-                        key: history_key.clone(),
-                        member: entry_bytes,
-                    },
-                    DbOp::LTrim {
-                        key: history_key,
-                        start: 0,
-                        stop: (HISTORY_WINDOW as isize) - 1,
-                    },
-                ])
-            })
-            .collect::<Result<Vec<[DbOp; 2]>, _>>()?
-            .into_iter()
-            .flatten()
-            .collect();
-        ops.extend(step6_ops);
 
-        if prof {
-            eprintln!(
-                "[pub-profile] persist.step6_value_history_serialize_uncompressed: {:.3} ms",
-                _step6_t.elapsed().as_secs_f64() * 1000.0,
-            );
-        }
-
-        let _step7_t = std::time::Instant::now();
-        // 7. label_placement:{label} — exactly one record per
-        // newly-placed label. Asymmetric with value_history: labels
-        // are placed once and never mutate, so we use a single Set
-        // (not LPush/LTrim) and we extract the openings from the
-        // §6.4 `entries` bundle (already produced by
-        // publish_phase_2) rather than building fresh openings —
-        // every placement already paid for a `rand_index_post` open
-        // in the §6.4 path. We just lift it into the user-facing
-        // placement record + add the anchoring shard commit/path.
-        //
-        // Pre-build a `(shard_id, slot_idx) -> &HistoryOpeningEntry`
-        // map once — the inner lookup is then O(1). The naive
-        // alternative (linear scan over `per_shard_history[shard_id].entries`
-        // per placement, recomputing `bool_index_to_usize_dims`) is
-        // O(placements^2) per shard and dominated publish time at
-        // batch=16384 (~6.5 s of 8.7 s persist).
-        let mut shard_slot_to_entry: HashMap<
-            (u32, usize),
-            &HistoryOpeningEntry<E, P>,
-        > = HashMap::with_capacity(new_placements.len());
-        for (shard_id, history) in per_shard_history.iter().enumerate() {
-            for entry in &history.entries {
-                let slot_idx = bool_index_to_usize_dims(&entry.slot_bits, &self.shard_dims);
-                shard_slot_to_entry.insert((shard_id as u32, slot_idx), entry);
-            }
-        }
-        let step7_ops: Vec<DbOp> = new_placements
-            .par_iter()
-            .map(|placement| -> Result<DbOp, AegonError> {
-                let shard_id = placement.shard_id;
-                let entry = shard_slot_to_entry
-                    .get(&(shard_id, placement.slot_idx))
-                    .copied()
-                    .ok_or_else(|| {
-                        AegonError::Database(format!(
-                            "internal: no §6.4 history entry for placement at shard {shard_id} slot_idx {}",
-                            placement.slot_idx
-                        ))
+        // Pre-encode the post-side bytes per shard (small) on a single
+        // pass; the prev-side too. Parallel across shards from there.
+        let encoded: Vec<(Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>)> = (0..n_shards)
+            .map(|shard_id| -> Result<(Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>), AegonError> {
+                let (prev_commit_bytes, prev_path_bytes) = match &prev_sharded {
+                    Some(prev) => {
+                        let prev_leaf = &prev.per_shard[shard_id];
+                        let prev_path = prev.merkle_path(shard_id).to_vec();
+                        let mut cb = Vec::new();
+                        prev_leaf.serialize_uncompressed(&mut cb).map_err(|e| {
+                            AegonError::Database(format!("serialize prev shard commit: {e}"))
+                        })?;
+                        let mut pb = Vec::new();
+                        prev_path.serialize_uncompressed(&mut pb).map_err(|e| {
+                            AegonError::Database(format!("serialize prev merkle path: {e}"))
+                        })?;
+                        (cb, pb)
+                    }
+                    None => (Vec::new(), Vec::new()),
+                };
+                let post_leaf = &sharded_commit.per_shard[shard_id];
+                let post_path = sharded_commit.merkle_path(shard_id).to_vec();
+                let mut post_commit_bytes = Vec::new();
+                post_leaf
+                    .serialize_uncompressed(&mut post_commit_bytes)
+                    .map_err(|e| {
+                        AegonError::Database(format!("serialize post shard commit: {e}"))
                     })?;
-                let post_leaf = sharded_commit.per_shard[shard_id as usize].clone();
-                let post_merkle_path = sharded_commit.merkle_path(shard_id as usize).to_vec();
-                let stored = StoredLabelPlacement::<E, P> {
-                    epoch: sharded_commit.epoch,
-                    shard_id,
-                    slot_bits: entry.slot_bits.clone(),
-                    rand_index_eval: entry.rand_index_post_eval,
-                    rand_index_proof: entry.rand_index_post_proof.clone(),
-                    placement_shard_commit: post_leaf,
-                    placement_merkle_path: post_merkle_path,
-                };
-                let mut bytes = Vec::new();
-                // Same uncompressed-on-disk rationale as the value-
-                // history side: trades ~2× bytes for ~10× faster reads.
-                stored
-                    .serialize_uncompressed(&mut bytes)
-                    .map_err(|e| AegonError::Database(format!("serialize label placement: {e}")))?;
-                Ok(DbOp::Set {
-                    key: key_label_placement(&placement.label),
-                    value: bytes,
-                })
+                let mut post_path_bytes = Vec::new();
+                post_path
+                    .serialize_uncompressed(&mut post_path_bytes)
+                    .map_err(|e| {
+                        AegonError::Database(format!("serialize post merkle path: {e}"))
+                    })?;
+                Ok((prev_commit_bytes, prev_path_bytes, post_commit_bytes, post_path_bytes))
             })
             .collect::<Result<Vec<_>, _>>()?;
-        ops.extend(step7_ops);
+
+        // Parallel dispatch via rayon — the slow part inside the shard
+        // is the local RocksDB write (~100 ms at K=16K under stalls);
+        // serializing per-shard payloads in parallel keeps the coord
+        // off the critical path.
+        encoded
+            .par_iter()
+            .enumerate()
+            .try_for_each(|(shard_id, (prev_c, prev_p, post_c, post_p))| -> Result<(), AegonError> {
+                self.shards[shard_id]
+                    .finalize_publish_persist(
+                        sharded_commit.epoch,
+                        shard_id as u32,
+                        prev_c,
+                        prev_p,
+                        post_c,
+                        post_p,
+                    )
+                    .map_err(|e| {
+                        AegonError::Database(format!(
+                            "shard {shard_id} finalize_publish_persist failed: {e}"
+                        ))
+                    })
+            })?;
 
         if prof {
             eprintln!(
-                "[pub-profile] persist.step7_label_placement_serialize_uncompressed: {:.3} ms (placements={})",
-                _step7_t.elapsed().as_secs_f64() * 1000.0,
-                new_placements.len(),
-            );
-        }
-
-        let _write_t = std::time::Instant::now();
-        let r = db.write_atomic(&ops);
-        if prof {
-            eprintln!(
-                "[pub-profile] persist.db_write_atomic: {:.3} ms (ops={})",
-                _write_t.elapsed().as_secs_f64() * 1000.0,
-                ops.len(),
+                "[pub-profile] persist.step4_finalize_persist_dispatch: {:.3} ms (n_shards={})",
+                _step4_t.elapsed().as_secs_f64() * 1000.0,
+                n_shards,
             );
             eprintln!(
                 "[pub-profile] PERSIST_TOTAL: {:.3} ms",
                 _persist_t_total.elapsed().as_secs_f64() * 1000.0,
             );
         }
-        r
+        Ok(())
     }
     /// Second half of the split lookup design: open `value_poly` at a
     /// cached `(shard, slot)` and return just the value-side proof.
@@ -2519,22 +2309,19 @@ where
         &self,
         label: &Label,
     ) -> Result<ShardedValueHistory<E, P>, AegonError> {
-        let Some(db) = &self.db else {
-            return Ok(ShardedValueHistory {
-                label: label.clone(),
-                entries: Vec::new(),
-                freshness: None,
-            });
-        };
-        // Fetch the whole window in one round-trip. HISTORY_WINDOW is
-        // small enough that LRANGE 0 -1 would also be fine — we cap
-        // explicitly so a stale list that's somehow longer than the
-        // window doesn't surprise the client.
-        let raw_entries = db.lrange(
-            &key_value_history(label),
-            0,
-            (HISTORY_WINDOW as isize) - 1,
-        )?;
+        // Post-refactor: value_history lives on the owning shard's DB.
+        // Route via H_shard to find the destination, then fetch the
+        // whole list. In-process shards return Ok(empty) via the
+        // default trait impl, preserving the prior empty-history
+        // behaviour for `DbSource::None`.
+        let (dest_shard_id, _) = self.route_label_to_shard(label, 0)?;
+        let mut raw_entries =
+            self.shards[dest_shard_id].fetch_value_history(label)?;
+        // Mirror the previous LRANGE 0..HISTORY_WINDOW-1 cap so an
+        // overlong list doesn't surprise the client.
+        if raw_entries.len() > HISTORY_WINDOW {
+            raw_entries.truncate(HISTORY_WINDOW);
+        }
         // Parallel across the history window (up to HISTORY_WINDOW
         // entries). Each entry is decoded then sent to its owning
         // shard for remasking — three masking-server calls per entry,
@@ -2655,14 +2442,13 @@ where
         &self,
         label: &Label,
     ) -> Result<ShardedLabelHistory<E, P>, AegonError> {
-        let Some(db) = &self.db else {
-            return Ok(ShardedLabelHistory {
-                label: label.clone(),
-                placement: None,
-                freshness: None,
-            });
-        };
-        let raw = db.get(&key_label_placement(label))?;
+        // Post-refactor: label_placement lives on the owning shard's
+        // DB. Route via H_shard to find the destination, then fetch.
+        // In-process shards return Ok(None) via the default trait
+        // impl, preserving the prior "no placement" behaviour for
+        // `DbSource::None`.
+        let (dest_shard_id, _) = self.route_label_to_shard(label, 0)?;
+        let raw = self.shards[dest_shard_id].fetch_label_placement(label)?;
         let Some(bytes) = raw else {
             return Ok(ShardedLabelHistory {
                 label: label.clone(),
@@ -2868,12 +2654,14 @@ where
     ) -> Result<(Value, ShardedLookupProofTwoLayer<E, P>), AegonError> {
         let (slot, label_proof) = self.lookup_label_two_layer(label)?;
         let value_proof = self.lookup_value(&slot)?;
-        let value: Value = match &self.db {
-            Some(db) => db.get(&key_value(label))?.ok_or_else(|| {
-                AegonError::Database(format!(
-                    "label {label:?} routed but missing from KV store"
-                ))
-            })?,
+        // Post-refactor: raw value bytes live on the owning shard's DB
+        // (`slot.shard_id`). In-process shards return Ok(None) via the
+        // default trait impl, preserving the prior empty-Value behavior
+        // for `DbSource::None` tests.
+        let value: Value = match self.shards[slot.shard_id as usize]
+            .fetch_value(label)?
+        {
+            Some(v) => v,
             None => Vec::new(),
         };
         Ok((

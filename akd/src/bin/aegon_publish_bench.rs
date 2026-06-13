@@ -231,11 +231,10 @@ fn main() -> ExitCode {
         );
         return ExitCode::from(2);
     }
-    let local_mode = args.endpoints.is_empty() && args.n_shards == 1;
-    if !local_mode && args.endpoints.is_empty() {
-        eprintln!("error: --n-shards > 1 requires --endpoints");
-        return ExitCode::from(2);
-    }
+    // local_mode iff no endpoints given. In-process supports
+    // n_shards>1 by spinning up multiple in-process shards — useful
+    // for local medium-regime smoke runs.
+    let local_mode = args.endpoints.is_empty();
     if !local_mode && args.endpoints.len() != args.n_shards {
         eprintln!(
             "error: --endpoints length ({}) must equal --n-shards ({})",
@@ -246,7 +245,7 @@ fn main() -> ExitCode {
     }
 
     let k = args.kzh_k.unwrap_or_else(|| optimal_kzh_k(args.shard_log_capacity));
-    let log_n_shards = if local_mode { 0 } else {
+    let log_n_shards = {
         let n = args.n_shards;
         if !n.is_power_of_two() {
             eprintln!("error: --n-shards must be a power of two (got {n})");

@@ -68,8 +68,8 @@ pub enum DbSource {
 /// `RedisDb`, one WriteBatch inside `RocksDb`.
 /// New variants get added as the schema grows; the impl pipelines
 /// them into a single round-trip.
-#[derive(Debug)]
-pub(crate) enum DbOp {
+#[derive(Debug, Clone)]
+pub enum DbOp {
     /// `SET key value` — overwrite if present.
     Set { key: Vec<u8>, value: Vec<u8> },
     /// `SADD key member` — add `member` to the set at `key`.
@@ -84,6 +84,201 @@ pub(crate) enum DbOp {
     /// discarding the rest. Negative indices count from the tail.
     /// Paired with `LPush` to bound the value-history list length.
     LTrim { key: Vec<u8>, start: isize, stop: isize },
+}
+
+// Wire encoding for shipping a `Vec<DbOp>` over the shard's
+// ApplyPersistenceOps gRPC. Plain length-prefixed bytes; no proto
+// schema for the DbOp enum itself so it stays a crate-internal type
+// while still crossing the wire.
+//
+// Layout:
+//   u32_le n_ops
+//   for each op:
+//     u8 tag                          (0=Set, 1=SAdd, 2=LPush, 3=LTrim)
+//     u32_le key_len, key bytes
+//     for Set/SAdd/LPush: u32_le val_len, val bytes
+//     for LTrim: i64_le start, i64_le stop
+impl DbOp {
+    /// Encode a `Vec<DbOp>` into bytes for the
+    /// `ShardService::ApplyPersistenceOps` RPC. See file-level wire
+    /// comment for the layout.
+    pub fn encode_batch(ops: &[DbOp]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(64 + ops.len() * 48);
+        out.extend_from_slice(&(ops.len() as u32).to_le_bytes());
+        for op in ops {
+            match op {
+                DbOp::Set { key, value } => {
+                    out.push(0);
+                    out.extend_from_slice(&(key.len() as u32).to_le_bytes());
+                    out.extend_from_slice(key);
+                    out.extend_from_slice(&(value.len() as u32).to_le_bytes());
+                    out.extend_from_slice(value);
+                },
+                DbOp::SAdd { key, member } => {
+                    out.push(1);
+                    out.extend_from_slice(&(key.len() as u32).to_le_bytes());
+                    out.extend_from_slice(key);
+                    out.extend_from_slice(&(member.len() as u32).to_le_bytes());
+                    out.extend_from_slice(member);
+                },
+                DbOp::LPush { key, member } => {
+                    out.push(2);
+                    out.extend_from_slice(&(key.len() as u32).to_le_bytes());
+                    out.extend_from_slice(key);
+                    out.extend_from_slice(&(member.len() as u32).to_le_bytes());
+                    out.extend_from_slice(member);
+                },
+                DbOp::LTrim { key, start, stop } => {
+                    out.push(3);
+                    out.extend_from_slice(&(key.len() as u32).to_le_bytes());
+                    out.extend_from_slice(key);
+                    out.extend_from_slice(&(*start as i64).to_le_bytes());
+                    out.extend_from_slice(&(*stop as i64).to_le_bytes());
+                },
+            }
+        }
+        out
+    }
+
+    /// Reverse of `encode_batch`. Returns `AegonError::Database` on
+    /// any framing inconsistency (short read, unknown tag, etc.).
+    pub fn decode_batch(bytes: &[u8]) -> Result<Vec<DbOp>, AegonError> {
+        let mut cur = 0usize;
+        let n = read_u32_le(&mut cur, bytes)? as usize;
+        let mut ops = Vec::with_capacity(n);
+        for i in 0..n {
+            if cur >= bytes.len() {
+                return Err(AegonError::Database(format!(
+                    "DbOp::decode_batch: missing tag for op {i}"
+                )));
+            }
+            let tag = bytes[cur];
+            cur += 1;
+            let key_len = read_u32_le(&mut cur, bytes)? as usize;
+            let key = take_slice(&mut cur, key_len, bytes)?.to_vec();
+            ops.push(match tag {
+                0 => {
+                    let v_len = read_u32_le(&mut cur, bytes)? as usize;
+                    let value = take_slice(&mut cur, v_len, bytes)?.to_vec();
+                    DbOp::Set { key, value }
+                },
+                1 => {
+                    let m_len = read_u32_le(&mut cur, bytes)? as usize;
+                    let member = take_slice(&mut cur, m_len, bytes)?.to_vec();
+                    DbOp::SAdd { key, member }
+                },
+                2 => {
+                    let m_len = read_u32_le(&mut cur, bytes)? as usize;
+                    let member = take_slice(&mut cur, m_len, bytes)?.to_vec();
+                    DbOp::LPush { key, member }
+                },
+                3 => {
+                    let start = read_i64_le(&mut cur, bytes)? as isize;
+                    let stop = read_i64_le(&mut cur, bytes)? as isize;
+                    DbOp::LTrim { key, start, stop }
+                },
+                t => {
+                    return Err(AegonError::Database(format!(
+                        "DbOp::decode_batch: unknown tag {t} at op {i}"
+                    )))
+                },
+            });
+        }
+        if cur != bytes.len() {
+            return Err(AegonError::Database(format!(
+                "DbOp::decode_batch: {} trailing bytes after {} ops",
+                bytes.len() - cur,
+                n
+            )));
+        }
+        Ok(ops)
+    }
+}
+
+fn take_slice<'a>(cur: &mut usize, n: usize, bytes: &'a [u8]) -> Result<&'a [u8], AegonError> {
+    if *cur + n > bytes.len() {
+        return Err(AegonError::Database(format!(
+            "DbOp::decode_batch: short read at offset {} (need {} bytes, have {})",
+            *cur,
+            n,
+            bytes.len() - *cur
+        )));
+    }
+    let s = &bytes[*cur..*cur + n];
+    *cur += n;
+    Ok(s)
+}
+
+fn read_u32_le(cur: &mut usize, bytes: &[u8]) -> Result<u32, AegonError> {
+    let s = take_slice(cur, 4, bytes)?;
+    Ok(u32::from_le_bytes([s[0], s[1], s[2], s[3]]))
+}
+
+fn read_i64_le(cur: &mut usize, bytes: &[u8]) -> Result<i64, AegonError> {
+    let s = take_slice(cur, 8, bytes)?;
+    Ok(i64::from_le_bytes([
+        s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7],
+    ]))
+}
+
+#[cfg(test)]
+mod dbop_wire_tests {
+    use super::DbOp;
+    #[test]
+    fn roundtrip_mixed_batch() {
+        let ops = vec![
+            DbOp::Set { key: b"k1".to_vec(), value: b"v1".to_vec() },
+            DbOp::SAdd { key: b"set:a".to_vec(), member: b"member".to_vec() },
+            DbOp::LPush { key: b"list:b".to_vec(), member: b"entry".to_vec() },
+            DbOp::LTrim { key: b"list:b".to_vec(), start: 0, stop: 7 },
+            // Empty key / value edges.
+            DbOp::Set { key: vec![], value: vec![] },
+            DbOp::Set { key: b"big".to_vec(), value: vec![0xAB; 1024] },
+        ];
+        let bytes = DbOp::encode_batch(&ops);
+        let back = DbOp::decode_batch(&bytes).expect("decode roundtrip");
+        assert_eq!(back.len(), ops.len());
+        for (a, b) in ops.iter().zip(back.iter()) {
+            match (a, b) {
+                (DbOp::Set { key: k1, value: v1 }, DbOp::Set { key: k2, value: v2 }) => {
+                    assert_eq!(k1, k2);
+                    assert_eq!(v1, v2);
+                },
+                (DbOp::SAdd { key: k1, member: m1 }, DbOp::SAdd { key: k2, member: m2 }) => {
+                    assert_eq!(k1, k2);
+                    assert_eq!(m1, m2);
+                },
+                (DbOp::LPush { key: k1, member: m1 }, DbOp::LPush { key: k2, member: m2 }) => {
+                    assert_eq!(k1, k2);
+                    assert_eq!(m1, m2);
+                },
+                (
+                    DbOp::LTrim { key: k1, start: s1, stop: t1 },
+                    DbOp::LTrim { key: k2, start: s2, stop: t2 },
+                ) => {
+                    assert_eq!(k1, k2);
+                    assert_eq!(s1, s2);
+                    assert_eq!(t1, t2);
+                },
+                _ => panic!("variant mismatch"),
+            }
+        }
+    }
+
+    #[test]
+    fn rejects_short_input() {
+        assert!(DbOp::decode_batch(&[]).is_err());
+        // Claims 1 op but no body.
+        let bad = [1u8, 0, 0, 0];
+        assert!(DbOp::decode_batch(&bad).is_err());
+    }
+
+    #[test]
+    fn rejects_unknown_tag() {
+        // 1 op, tag=99
+        let bad = [1u8, 0, 0, 0, 99u8, 0, 0, 0, 0];
+        assert!(DbOp::decode_batch(&bad).is_err());
+    }
 }
 
 // TODO(rocksdb-caching): when we add a `RocksDb` impl of this trait
@@ -389,25 +584,27 @@ impl RocksDb {
         // Multiple concurrent L0→L1 subcompactions so a single large
         // batch doesn't sequentialize compaction work on one core.
         opts.set_max_subcompactions(4);
-        // Bigger memtable → fewer L0 flushes per publish. 256 MB
-        // holds ~200 K small ops (estimated 1 KB each post-LZ4) — a
-        // couple of publishes at batch=16384 before any flush.
-        opts.set_write_buffer_size(256 * 1024 * 1024);
-        // More concurrent memtables = the writer doesn't block while
-        // a flush is in flight.
-        opts.set_max_write_buffer_number(4);
+        // Bigger memtable → fewer L0 flushes per publish. At K=65536
+        // the per-shard payload can run ~200 MB (the value_history
+        // LPush+LTrim pairs dominate); 1 GB memtables fit a couple of
+        // publishes each so flush + L0 compaction has slack.
+        opts.set_write_buffer_size(1024 * 1024 * 1024);
+        // More concurrent memtables = the writer doesn't block while a
+        // flush is in flight. With 8 we tolerate 8 GB of in-flight
+        // memtable data, more than enough to absorb publish bursts
+        // while background compaction catches up.
+        opts.set_max_write_buffer_number(8);
         // Bigger SST files at every level = fewer files overall and
-        // less metadata churn during compactions. 128 MB is the
-        // recommended midpoint for SSD workloads.
-        opts.set_target_file_size_base(128 * 1024 * 1024);
-        // Raise the L0 stall + stop thresholds. Default trips
-        // slowdown at 20 / stop at 36 SST files in L0; on this
-        // workload we'd saturate that within a handful of publishes
-        // and trigger 60-120 s stalls. With the bigger memtable we
-        // also see fewer L0 files per unit work, so push the ceilings
-        // up to give background compaction more breathing room.
-        opts.set_level_zero_slowdown_writes_trigger(40);
-        opts.set_level_zero_stop_writes_trigger(60);
+        // less metadata churn during compactions. 256 MB matches the
+        // memtable size so each flush makes ~4 SSTs.
+        opts.set_target_file_size_base(256 * 1024 * 1024);
+        // Raise the L0 stall + stop thresholds. At the sustained write
+        // rate of the per-shard refactor we'd otherwise hit the
+        // default 20/36 thresholds within ~20 publishes and trigger
+        // 100-300 s stalls. 80/120 gives background compaction enough
+        // headroom for hours of climb without throttling.
+        opts.set_level_zero_slowdown_writes_trigger(80);
+        opts.set_level_zero_stop_writes_trigger(120);
         // No LRU cap on open SSTs — at 128 MB/file the full database
         // tops out at ~few thousand files even at 90% fill, so we
         // can afford to keep file descriptors for everything.
@@ -808,8 +1005,21 @@ pub(crate) fn key_shard_state(shard_id: u32) -> Vec<u8> {
 /// for every brand-new label `shard_id` placed during the transition
 /// into `epoch`. Serialized `HistoryOpenings<E, P>` bytes. Absent when
 /// the publish carried no new labels for that shard.
+///
+/// Legacy coord-side key. Post per-shard-DB refactor the same payload
+/// lives at [`key_history_openings_local`] inside the owning shard's
+/// own DB.
 pub(crate) fn key_history_openings(epoch: u64, shard_id: u32) -> Vec<u8> {
     format!("aegon:openings:{epoch}:{shard_id}").into_bytes()
+}
+
+/// `aegon:openings:{epoch}` — per-shard-local variant of
+/// [`key_history_openings`]. Each shard's DB is already shard-local,
+/// so the `{shard_id}` suffix is redundant. Used by
+/// `ShardServer::fetch_history_openings` and by the shard write side
+/// of the coord-built ops batch.
+pub(crate) fn key_history_openings_local(epoch: u64) -> Vec<u8> {
+    format!("aegon:openings:{epoch}").into_bytes()
 }
 
 /// `aegon:value_history:{label}` — LIST-typed key storing the last

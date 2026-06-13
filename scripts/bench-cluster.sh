@@ -130,17 +130,29 @@ MASKING_TAG="aegon-bench-masking"
 # never count the RTT we just inserted.
 BENCH_CLIENT_TAG="aegon-bench-client"
 FIREWALL_BENCH_CLIENT_GRPC="aegon-bench-client-grpc"
-# Tag + label applied to every VM the script creates, signalling
-# to the university SOC scanner which research group owns these
-# benchmark VMs. Apply BOTH a network tag (some scanners look at
-# instance tags) and a label (most security policies filter on labels).
+# Tags + labels applied to every VM the script creates. Two distinct
+# markers, both required by the university SOC:
 #
-# Per the latest SOC ask: use "department:cims-jbonneau-mwalfish-9a0c"
-# as the marker. GCP labels are `key=value`, so the literal label is
-# `department=cims-jbonneau-mwalfish-9a0c`. GCP network tags don't
-# accept `=` or `:`, so the tag carries just the value part.
-SCANNER_TAG="cims-jbonneau-mwalfish-9a0c"
-SCANNER_LABEL="department=cims-jbonneau-mwalfish-9a0c"
+#   1. department=cims-jbonneau-mwalfish-9a0c — research-group marker.
+#      Used by their billing/accounting + some security policies.
+#   2. temporary-worker-vm=true — tells the SOC's OS Policy NOT to
+#      install the security agent on these short-lived bench VMs.
+#      Without this, the agent's stale-host alerts flood their
+#      security adapter every time we tear a cluster down (this is
+#      what triggered the SOC complaint that led to the v2 retag).
+#
+# Apply BOTH a network tag (some scanners look at instance tags) and
+# a label (most security policies filter on labels). GCP labels are
+# `key=value`; GCP network tags don't accept `=` or `:`, so the tag
+# carries just the value part.
+DEPARTMENT_TAG="cims-jbonneau-mwalfish-9a0c"
+DEPARTMENT_LABEL="department=cims-jbonneau-mwalfish-9a0c"
+TEMPORARY_WORKER_TAG="temporary-worker-vm"
+TEMPORARY_WORKER_LABEL="temporary-worker-vm=true"
+# Combined comma-separated forms passed to `gcloud compute instances
+# create --tags=$SCANNER_TAGS --labels=$SCANNER_LABELS`.
+SCANNER_TAGS="$DEPARTMENT_TAG,$TEMPORARY_WORKER_TAG"
+SCANNER_LABELS="$DEPARTMENT_LABEL,$TEMPORARY_WORKER_LABEL"
 SHARD_PORT=50051
 # Masking server(s): N_MASKING_SERVERS VMs per cluster. Each holds a
 # queue of pre-built `KZHKMaskingPackage`s; background producers
@@ -177,6 +189,10 @@ ENABLE_MASKING_SERVER="${ENABLE_MASKING_SERVER:-1}"
 # ops, no MULTI/EXEC transaction-size limits. We wipe it between
 # bench invocations so each run starts from a clean keyspace.
 COORD_DB_PATH="/opt/aegon/coord-db"
+# Per-shard local RocksDB directory. Each shard VM gets its own
+# private path; coord and shards never share storage. Wiped on
+# every `start-shards` so a fresh run can't pick up stale state.
+SHARD_DB_PATH="/opt/aegon/shard-db"
 # Per-shard local SRS deployment. Every shard generates its own
 # SRS in parallel during setup-bench, using the same SETUP_SEED so
 # they all converge on the same file (deterministic). The file
@@ -448,8 +464,8 @@ cmd_up() {
       --machine-type="$SHARD_MACHINE_TYPE" \
       --network="$NETWORK" \
       --no-address \
-      --tags="$SHARD_TAG,$SCANNER_TAG" \
-      --labels="$SCANNER_LABEL" \
+      --tags="$SHARD_TAG,$SCANNER_TAGS" \
+      --labels="$SCANNER_LABELS" \
       --image-family="ubuntu-2604-lts-amd64" --image-project="ubuntu-os-cloud" \
       --boot-disk-size=100GB >/dev/null
   done
@@ -471,8 +487,8 @@ cmd_up() {
       --machine-type="$COORD_MACHINE_TYPE" \
       --network="$NETWORK" \
       --no-address \
-      --tags="$COORD_TAG,$SCANNER_TAG" \
-      --labels="$SCANNER_LABEL" \
+      --tags="$COORD_TAG,$SCANNER_TAGS" \
+      --labels="$SCANNER_LABELS" \
       --image-family="ubuntu-2604-lts-amd64" --image-project="ubuntu-os-cloud" \
       --boot-disk-size="$COORD_BOOT_DISK_SIZE" \
       --boot-disk-type="$COORD_BOOT_DISK_TYPE" >/dev/null
@@ -500,8 +516,8 @@ cmd_up() {
           --machine-type="$MASKING_MACHINE_TYPE" \
           --network="$NETWORK" \
           --no-address \
-          --tags="$MASKING_TAG,$SCANNER_TAG" \
-          --labels="$SCANNER_LABEL" \
+          --tags="$MASKING_TAG,$SCANNER_TAGS" \
+          --labels="$SCANNER_LABELS" \
           --image-family="ubuntu-2604-lts-amd64" --image-project="ubuntu-os-cloud" \
           --boot-disk-size=100GB >/dev/null
       ) &
@@ -531,8 +547,8 @@ cmd_up() {
       --machine-type="$BENCH_CLIENT_MACHINE_TYPE" \
       --network="$NETWORK" \
       --no-address \
-      --tags="$BENCH_CLIENT_TAG,$SCANNER_TAG" \
-      --labels="$SCANNER_LABEL" \
+      --tags="$BENCH_CLIENT_TAG,$SCANNER_TAGS" \
+      --labels="$SCANNER_LABELS" \
       --image-family="ubuntu-2604-lts-amd64" --image-project="ubuntu-os-cloud" \
       --boot-disk-size="$BENCH_CLIENT_BOOT_DISK_SIZE" \
       --boot-disk-type="$BENCH_CLIENT_BOOT_DISK_TYPE" >/dev/null
@@ -578,10 +594,13 @@ start_shard() {
   # lived gcloud ssh sessions whose IAP-tunnel teardown latency
   # caused so many false-positive failures.
   #
-  # No --db-url / --db-path: per the shard server's CLI docs
-  # ("currently a no-op" at akd/src/bin/aegon_shard_server.rs:84),
-  # the shard's DB connection is vestigial and skipped at runtime.
-  # All persistent state lives on the coordinator's RocksDB.
+  # --db-path: post per-shard-DB refactor, each shard owns the
+  # durable storage for the labels routed to it (value bytes,
+  # value_history, label_placement, openings). Coord retains only
+  # `coord:state` + `coord:epoch_commit:{epoch}`. The shard DB is
+  # process-local RocksDB at $SHARD_DB_PATH; wiped + recreated on
+  # spawn so a fresh start never picks up stale state from a prior
+  # run with different SRS/parameters.
   #
   # Two short ssh calls per shard, so each session is well under
   # any plausible IAP teardown lag:
@@ -604,8 +623,12 @@ start_shard() {
     if [ ! -f $REMOTE_SRS_PATH ]; then \
       echo \"FAILED: SRS file not present at $REMOTE_SRS_PATH\"; exit 1; \
     fi; \
+    sudo rm -rf $SHARD_DB_PATH && sudo mkdir -p $SHARD_DB_PATH && sudo chown \$(whoami) $SHARD_DB_PATH; \
     mkdir -p \$HOME/aegon-run && \
     cd \$HOME/aegon-run && \
+    AEGON_ROCKSDB_STATS_DUMP_SEC=${AEGON_ROCKSDB_STATS_DUMP_SEC:-60} \
+    AEGON_ROCKSDB_BLOCK_CACHE_GB=${AEGON_ROCKSDB_BLOCK_CACHE_GB:-8} \
+    AEGON_ROCKSDB_PARALLELISM=${AEGON_ROCKSDB_PARALLELISM:-16} \
     nohup $REMOTE_BIN_DIR/aegon_shard_server \
       --bind 0.0.0.0:$SHARD_PORT \
       --srs-path $REMOTE_SRS_PATH \
@@ -614,6 +637,7 @@ start_shard() {
       --shard-id $i \
       --prefill-count 0 \
       --no-retain-epoch-polys \
+      --db-path $SHARD_DB_PATH \
       --private \
       $masking_flag \
       > /tmp/aegon-shard.log 2>&1 < /dev/null & \
@@ -2187,7 +2211,7 @@ cmd_watchdog() {
   local -a pids=()
   for ((i = 0; i < N_SHARDS; i++)); do
     local name; name="$(shard_name "$i")"
-    ( probe_one "$name" "aegon_shard_se" > "$tmpdir/shard-$i" ; echo $? > "$tmpdir/shard-$i.rc" ) &
+    ( probe_one "$name" "aegon_shard_ser" > "$tmpdir/shard-$i" ; echo $? > "$tmpdir/shard-$i.rc" ) &
     pids+=("$!")
   done
   local cname; cname="$(coord_name)"

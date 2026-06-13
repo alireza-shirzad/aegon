@@ -22,7 +22,7 @@ use akd::aegon::distributed_srs::{
 use akd::aegon::server::load_aegon_checkpoint_from_db;
 use akd::aegon::shard_grpc::{ShardServer, ShardServerTlsConfig};
 use akd::aegon::sharded::read_srs_from_file;
-use akd::aegon::{AegonConfig, DbSource, Sha256Hash};
+use akd::aegon::{AegonConfig, DbSource, EcVrfHash};
 use akd_core::aegon_crypto::pcs::kzhk::structs::KZHKConfig;
 use akd_core::aegon_crypto::pcs::kzhk::KZHK;
 use ark_bn254::Bn254;
@@ -33,7 +33,7 @@ use std::marker::PhantomData;
 use tonic::transport::Server;
 
 type Pcs = KZHK<Bn254>;
-type Aegon = akd::aegon::Aegon<Bn254, Pcs, Sha256Hash>;
+type Aegon = akd::aegon::Aegon<Bn254, Pcs, EcVrfHash>;
 
 /// One shard of a sharded-Aegon deployment.
 #[derive(Debug, Parser)]
@@ -453,7 +453,7 @@ async fn main() -> ExitCode {
 
     let has_db = !matches!(db_source, DbSource::None);
     let server = if has_db {
-        match ShardServer::<Bn254, Pcs, Sha256Hash>::new_with_checkpoint(
+        match ShardServer::<Bn254, Pcs, EcVrfHash>::new_with_checkpoint(
             aegon,
             db_source.clone(),
             shard_id,
@@ -465,7 +465,7 @@ async fn main() -> ExitCode {
             },
         }
     } else {
-        ShardServer::<Bn254, Pcs, Sha256Hash>::new(aegon)
+        ShardServer::<Bn254, Pcs, EcVrfHash>::new(aegon)
     };
     let result = if let Some(tls) = tls_config {
         server.serve_with_tls(args.bind, tls).await

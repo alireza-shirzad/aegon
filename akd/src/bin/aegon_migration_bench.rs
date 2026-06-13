@@ -366,11 +366,12 @@ fn main() -> ExitCode {
         );
         return ExitCode::from(2);
     }
-    let local_mode = args.endpoints.is_empty() && args.n_shards == 1;
-    if !local_mode && args.endpoints.is_empty() {
-        eprintln!("error: --n-shards > 1 requires --endpoints");
-        return ExitCode::from(2);
-    }
+    // local_mode iff no endpoints given. In-process supports
+    // n_shards>1 by spinning up multiple in-process shards — useful
+    // for local medium-regime smoke runs on a beefy box, even though
+    // production-scale medium/large normally run distributed via
+    // bench-cluster.sh.
+    let local_mode = args.endpoints.is_empty();
     if !local_mode && args.endpoints.len() != args.n_shards {
         eprintln!(
             "error: --endpoints length ({}) must equal --n-shards ({})",
