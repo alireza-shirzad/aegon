@@ -108,8 +108,8 @@ use akd::aegon::coordinator_grpc::{
     proto::{
         coordinator_service_client::CoordinatorServiceClient, Empty, LookupHistoryRequest,
         LookupHistoryResponse, LookupLabelHistoryRequest, LookupLabelHistoryResponse,
-        LookupLabelRequest, LookupLabelResponse, LookupValueRequest,
-        LookupValueResponse,
+        LookupLabelRequest, LookupLabelResponse, LookupValueRequest, LookupValueResponse,
+        PublishRequest,
     },
     CoordinatorServer,
 };
@@ -117,6 +117,8 @@ use akd::aegon::{
     optimal_kzh_k, verify_sharded_invariance, AuditState, DbSource, EcVrfHash, ShardTransport,
     ShardedAegon, ShardedAegonConfig, SrsSource, VrfProver,
 };
+use akd::aegon::sharded::ShardedValueHistory;
+use ark_serialize::CanonicalDeserialize;
 use ark_ec::pairing::Pairing;
 use akd_core::aegon_crypto::pcs::kzhk::KZHK;
 use ark_bn254::Bn254;
@@ -244,9 +246,31 @@ struct Args {
 
     /// Loopback address to bind the in-process gRPC coordinator on.
     /// The bench's own `CoordinatorClient` connects here. Pick a port
-    /// that's free on the bench host.
+    /// that's free on the bench host. Ignored when `--coord-endpoint`
+    /// is set (the bench then talks to a remote coord instead of
+    /// spinning up a local one).
     #[arg(long, default_value = "127.0.0.1:50190")]
     coordinator_listen: String,
+
+    /// **Remote-coord mode**: when set, the bench skips the
+    /// in-process `ShardedAegon` setup entirely and drives publishes +
+    /// lookups against a remote `aegon_coordinator_server` running on
+    /// the address given here (e.g. `http://aegon-bench-coord:50100`).
+    ///
+    /// This matches the production deployment topology: bench-client
+    /// drives the coord over the network, coord drives shards. The
+    /// in-process modes (default + `--endpoints`) bundle the coord
+    /// state inside the bench binary, which sidesteps the
+    /// bench-client→coord network hop — useful for component-level
+    /// latency measurements, but not for end-to-end realism.
+    ///
+    /// Mutually exclusive with `--endpoints`, `--srs-path`,
+    /// `--setup-seed`, `--db-url`, `--db-path`, `--private` (the
+    /// remote coord owns all that state). Also disables audit /
+    /// throughput-sweep / publish-bench phases for now — they reach
+    /// into in-process state that doesn't exist in this mode.
+    #[arg(long)]
+    coord_endpoint: Option<String>,
 
     /// Comma-separated list of remote `aegon_masking_server` endpoints
     /// (e.g. `http://127.0.0.1:50061,http://127.0.0.1:50062`). When
@@ -406,25 +430,68 @@ fn main() -> ExitCode {
     let args = Args::parse();
 
     // ---- mode + arg validation ----
-    let local_mode = args.endpoints.is_empty();
-    let effective_n_shards = if local_mode { args.n_shards } else { args.endpoints.len() };
-    if !effective_n_shards.is_power_of_two() || effective_n_shards == 0 {
-        eprintln!(
-            "error: n_shards must be a power of two (got {effective_n_shards})"
-        );
-        return ExitCode::from(2);
+    // Three modes:
+    //   * local: in-process shards + in-process coord (no flags)
+    //   * remote-shards: in-process coord, gRPC to shard cluster (--endpoints)
+    //   * remote-coord: gRPC to a remote `aegon_coordinator_server` which
+    //     itself drives the shards (--coord-endpoint). Bench skips all
+    //     in-process state.
+    let remote_coord_mode = args.coord_endpoint.is_some();
+    if remote_coord_mode {
+        let conflicting = [
+            ("--endpoints", !args.endpoints.is_empty()),
+            ("--srs-path", args.srs_path.is_some()),
+            ("--setup-seed", args.setup_seed.is_some()),
+            ("--db-url", args.db_url.is_some()),
+            ("--db-path", args.db_path.is_some()),
+            ("--private", args.private),
+            ("--initial-prefill-count > 0", args.initial_prefill_count > 0),
+            ("--masking-addr", !args.masking_addr.is_empty()),
+        ];
+        for (flag, set) in conflicting {
+            if set {
+                eprintln!(
+                    "error: --coord-endpoint is set; {flag} must be omitted (the remote coord owns that state)"
+                );
+                return ExitCode::from(2);
+            }
+        }
+        if !args.publish_batch_sizes.is_empty() {
+            eprintln!(
+                "warn: --coord-endpoint is set; --publish-batch-sizes is ignored in this mode \
+                 (publish_bench needs in-process state)"
+            );
+        }
     }
-    if !local_mode && args.endpoints.len() != args.n_shards {
-        eprintln!(
-            "error: --endpoints length ({}) must equal --n-shards ({})",
-            args.endpoints.len(),
-            args.n_shards
-        );
-        return ExitCode::from(2);
-    }
-    if args.srs_path.is_none() && args.setup_seed.is_none() {
-        eprintln!("error: provide either --srs-path or --setup-seed");
-        return ExitCode::from(2);
+    let local_mode = !remote_coord_mode && args.endpoints.is_empty();
+    let effective_n_shards = if remote_coord_mode {
+        // Remote coord knows how many shards it's wired to; bench
+        // doesn't need to be told. Use 1 as a benign default so
+        // power-of-two checks below pass without doing anything
+        // meaningful in this mode.
+        1
+    } else if local_mode {
+        args.n_shards
+    } else {
+        args.endpoints.len()
+    };
+    if !remote_coord_mode {
+        if !effective_n_shards.is_power_of_two() || effective_n_shards == 0 {
+            eprintln!("error: n_shards must be a power of two (got {effective_n_shards})");
+            return ExitCode::from(2);
+        }
+        if !local_mode && args.endpoints.len() != args.n_shards {
+            eprintln!(
+                "error: --endpoints length ({}) must equal --n-shards ({})",
+                args.endpoints.len(),
+                args.n_shards
+            );
+            return ExitCode::from(2);
+        }
+        if args.srs_path.is_none() && args.setup_seed.is_none() {
+            eprintln!("error: provide either --srs-path or --setup-seed");
+            return ExitCode::from(2);
+        }
     }
     if !args.preload_counts.is_empty() && !args.fill_percents.is_empty() {
         eprintln!("error: --preload-counts and --fill-percents are mutually exclusive");
@@ -497,89 +564,99 @@ fn main() -> ExitCode {
         }
     }
 
-    // ---- build ShardedAegon -------------------------------------------
-    let mut builder = ShardedAegonConfig::<Bn254, Pcs>::builder()
-        .shard_log_capacity(args.shard_log_capacity)
-        .log_n_shards(log_n_shards)
-        .private(args.private)
-        .kzh_k(k);
-    if local_mode {
-        builder = builder.shards(ShardTransport::InProcess);
+    // ---- build ShardedAegon (or skip it in remote-coord mode) ---------
+    let (state_opt, setup_ms, initial_prefill_ms) = if remote_coord_mode {
+        eprintln!(
+            "bench: mode=remote-coord (skipping in-process ShardedAegon setup; \
+             driving everything through coord at {})",
+            args.coord_endpoint.as_ref().unwrap(),
+        );
+        (None, 0.0, 0.0)
     } else {
-        builder = builder.shards(ShardTransport::Remote {
-            endpoints: args.endpoints.clone(),
-        });
-    }
-    if let Some(path) = &args.srs_path {
-        builder = builder.srs(SrsSource::Path(path.clone()));
-    }
-    if let Some(url) = &args.db_url {
-        builder = builder.db(DbSource::Redis(url.clone()));
-    } else if let Some(path) = &args.db_path {
-        builder = builder.db(DbSource::Rocks(path.clone()));
-    }
-    if !args.masking_addr.is_empty() {
-        eprintln!(
-            "bench: in-process shards will fetch masking packages from {} server(s): {:?}",
-            args.masking_addr.len(),
-            args.masking_addr,
-        );
-        builder = builder.masking_addrs(args.masking_addr.clone());
-    }
-    let cfg = match builder.build() {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("error: config invalid: {e}");
-            return ExitCode::from(2);
-        },
-    };
-
-    eprintln!(
-        "bench: mode={} n_shards={} (shard_log_capacity={}, kzh_k={}, log_n_shards={})",
-        if local_mode { "local" } else { "remote" },
-        effective_n_shards,
-        args.shard_log_capacity,
-        k,
-        log_n_shards
-    );
-    let mut rng = ChaCha20Rng::seed_from_u64(args.setup_seed.unwrap_or(0));
-    let t_setup = Instant::now();
-    let mut state = match Sharded::setup(&mut rng, &cfg) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("error: setup failed: {e}");
-            return ExitCode::from(1);
-        },
-    };
-    state.set_vrf_prover(VrfProver::from_env());
-    let setup_ms = t_setup.elapsed().as_secs_f64() * 1000.0;
-    eprintln!("bench: setup OK in {setup_ms:.1} ms (ECVRF prover attached)");
-
-    // Initial bulk-prefill. Anonymous filler that pads the dict to
-    // a realistic fill level without going through publish — keeps
-    // the lookup-bench's preload climb cheap even at planetary
-    // scale. Must be done before any publish call: `prefill_random`
-    // errors at epoch != 0. Works for both local (in-process) and
-    // distributed (gRPC ReconfigurePrefill) modes.
-    let mut initial_prefill_ms: f64 = 0.0;
-    if args.initial_prefill_count > 0 {
-        eprintln!(
-            "bench: initial prefill of {} anonymous entries (seed_base={})",
-            args.initial_prefill_count, args.prefill_seed
-        );
-        let t = Instant::now();
-        if let Err(e) =
-            state.prefill_random_per_shard(args.initial_prefill_count, args.prefill_seed)
-        {
-            eprintln!("error: initial prefill failed: {e}");
-            return ExitCode::from(1);
+        let mut builder = ShardedAegonConfig::<Bn254, Pcs>::builder()
+            .shard_log_capacity(args.shard_log_capacity)
+            .log_n_shards(log_n_shards)
+            .private(args.private)
+            .kzh_k(k);
+        if local_mode {
+            builder = builder.shards(ShardTransport::InProcess);
+        } else {
+            builder = builder.shards(ShardTransport::Remote {
+                endpoints: args.endpoints.clone(),
+            });
         }
-        initial_prefill_ms = t.elapsed().as_secs_f64() * 1000.0;
+        if let Some(path) = &args.srs_path {
+            builder = builder.srs(SrsSource::Path(path.clone()));
+        }
+        if let Some(url) = &args.db_url {
+            builder = builder.db(DbSource::Redis(url.clone()));
+        } else if let Some(path) = &args.db_path {
+            builder = builder.db(DbSource::Rocks(path.clone()));
+        }
+        if !args.masking_addr.is_empty() {
+            eprintln!(
+                "bench: in-process shards will fetch masking packages from {} server(s): {:?}",
+                args.masking_addr.len(),
+                args.masking_addr,
+            );
+            builder = builder.masking_addrs(args.masking_addr.clone());
+        }
+        let cfg = match builder.build() {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("error: config invalid: {e}");
+                return ExitCode::from(2);
+            },
+        };
+
         eprintln!(
-            "bench: initial prefill done in {:.1} s",
-            initial_prefill_ms / 1000.0
+            "bench: mode={} n_shards={} (shard_log_capacity={}, kzh_k={}, log_n_shards={})",
+            if local_mode { "local" } else { "remote" },
+            effective_n_shards,
+            args.shard_log_capacity,
+            k,
+            log_n_shards
         );
-    }
+        let mut rng = ChaCha20Rng::seed_from_u64(args.setup_seed.unwrap_or(0));
+        let t_setup = Instant::now();
+        let mut state = match Sharded::setup(&mut rng, &cfg) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("error: setup failed: {e}");
+                return ExitCode::from(1);
+            },
+        };
+        state.set_vrf_prover(VrfProver::from_env());
+        let setup_ms = t_setup.elapsed().as_secs_f64() * 1000.0;
+        eprintln!("bench: setup OK in {setup_ms:.1} ms (ECVRF prover attached)");
+
+        // Initial bulk-prefill. Anonymous filler that pads the dict to
+        // a realistic fill level without going through publish — keeps
+        // the lookup-bench's preload climb cheap even at planetary
+        // scale. Must be done before any publish call: `prefill_random`
+        // errors at epoch != 0. Works for both local (in-process) and
+        // distributed (gRPC ReconfigurePrefill) modes.
+        let mut initial_prefill_ms: f64 = 0.0;
+        if args.initial_prefill_count > 0 {
+            eprintln!(
+                "bench: initial prefill of {} anonymous entries (seed_base={})",
+                args.initial_prefill_count, args.prefill_seed
+            );
+            let t = Instant::now();
+            if let Err(e) =
+                state.prefill_random_per_shard(args.initial_prefill_count, args.prefill_seed)
+            {
+                eprintln!("error: initial prefill failed: {e}");
+                return ExitCode::from(1);
+            }
+            initial_prefill_ms = t.elapsed().as_secs_f64() * 1000.0;
+            eprintln!(
+                "bench: initial prefill done in {:.1} s",
+                initial_prefill_ms / 1000.0
+            );
+        }
+        (Some(state), setup_ms, initial_prefill_ms)
+    };
 
     // ---- spawn in-process CoordinatorServer ---------------------------
     // The bench owns the `Arc<RwLock<ShardedAegon>>` and gives a clone
@@ -602,41 +679,48 @@ fn main() -> ExitCode {
     // cluster, so the "client" timings here are network + decode +
     // negligible-verify; for a beefier coord one can flip back to the
     // verifying client.
-    let shared: Arc<AsyncRwLock<Sharded>> = Arc::new(AsyncRwLock::new(state));
-    let listen_addr: std::net::SocketAddr = match args.coordinator_listen.parse() {
-        Ok(a) => a,
-        Err(e) => {
-            eprintln!(
-                "error: invalid --coordinator-listen {:?}: {e}",
-                args.coordinator_listen
-            );
-            return ExitCode::from(2);
-        },
-    };
-    let server_state = Arc::clone(&shared);
-    std::thread::spawn(move || {
-        // Build a dedicated runtime for the server thread. tonic's
-        // `serve` is async; using a fresh runtime keeps it independent
-        // of the bench's main thread state.
-        let rt = match tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-        {
-            Ok(rt) => rt,
+    // Wrap state in an Arc<RwLock<>>. In remote-coord mode `state` is
+    // None and we skip spawning the local server entirely.
+    let shared: Option<Arc<AsyncRwLock<Sharded>>> =
+        state_opt.map(|s| Arc::new(AsyncRwLock::new(s)));
+
+    if let Some(shared_ref) = &shared {
+        let listen_addr: std::net::SocketAddr = match args.coordinator_listen.parse() {
+            Ok(a) => a,
             Err(e) => {
-                eprintln!("error: server tokio runtime: {e}");
-                return;
+                eprintln!(
+                    "error: invalid --coordinator-listen {:?}: {e}",
+                    args.coordinator_listen
+                );
+                return ExitCode::from(2);
             },
         };
-        let server = CoordinatorServer::<Bn254, Pcs, EcVrfHash>::from_shared(server_state);
-        if let Err(e) = rt.block_on(server.serve(listen_addr)) {
-            eprintln!("error: coordinator gRPC server exited: {e}");
-        }
-    });
-    // Give the server a moment to bind. 500ms is generous on loopback;
-    // we could poll a TCP `connect`, but the simple sleep keeps the
-    // bench code small.
-    std::thread::sleep(Duration::from_millis(500));
+        let server_state = Arc::clone(shared_ref);
+        std::thread::spawn(move || {
+            // Build a dedicated runtime for the server thread. tonic's
+            // `serve` is async; using a fresh runtime keeps it independent
+            // of the bench's main thread state.
+            let rt = match tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(e) => {
+                    eprintln!("error: server tokio runtime: {e}");
+                    return;
+                },
+            };
+            let server =
+                CoordinatorServer::<Bn254, Pcs, EcVrfHash>::from_shared(server_state);
+            if let Err(e) = rt.block_on(server.serve(listen_addr)) {
+                eprintln!("error: coordinator gRPC server exited: {e}");
+            }
+        });
+        // Give the server a moment to bind. 500ms is generous on loopback;
+        // we could poll a TCP `connect`, but the simple sleep keeps the
+        // bench code small.
+        std::thread::sleep(Duration::from_millis(500));
+    }
 
     // ---- connect raw tonic gRPC client --------------------------------
     // The client URL must be `http://...`, not the raw `ip:port` form.
@@ -644,7 +728,15 @@ fn main() -> ExitCode {
     // generated client) rather than `CoordinatorClient` so we don't
     // pay for verifier_param. Round-trip + decode is what we time;
     // verification overhead is excluded.
-    let endpoint_url = format!("http://{}", args.coordinator_listen);
+    //
+    // In remote-coord mode the URL is the user-supplied `--coord-endpoint`
+    // (e.g. `http://aegon-bench-coord:50100`); otherwise it's the local
+    // server we just spawned on `--coordinator-listen`.
+    let endpoint_url = if remote_coord_mode {
+        args.coord_endpoint.as_ref().unwrap().clone()
+    } else {
+        format!("http://{}", args.coordinator_listen)
+    };
     eprintln!("bench: client connecting to {endpoint_url} ...");
     // A driver runtime so we can drive async operations on `shared`
     // (publish, server-direct lookups) AND also issue the raw RPCs
@@ -719,16 +811,42 @@ fn main() -> ExitCode {
                 .map(|i| (phone_label(i as u64), rsa_value(i as u64)))
                 .collect();
             let t = Instant::now();
-            // Same rationale as the lookup paths: blocking_write from
-            // the main thread, no driver_rt wrap. `ShardedAegon::publish`
-            // happens to work fine inside `driver_rt.block_on` today
-            // because its shard fan-out goes through rayon (no tokio
-            // CONTEXT on rayon threads), but using blocking_write is
-            // safer against future refactors that might move pieces of
-            // publish onto the sequential path.
-            let res = {
-                let mut s = shared.blocking_write();
-                s.publish_two_layer(&updates)
+            // Two paths:
+            //   * In-process / remote-shards: blocking_write from the main
+            //     thread on the in-process state. Same rationale as the
+            //     lookup paths.
+            //   * Remote-coord: ship the updates to the coord via the new
+            //     Publish RPC. The coord runs `publish_two_layer` server-
+            //     side and ships back the new `ShardedEpochCommitment`.
+            //     We don't deserialize the commit here — we'd need
+            //     verifier_param to do so safely and the bench doesn't
+            //     hold it in this mode. Round-trip + decode-into-bytes
+            //     is what we time.
+            let res: Result<(), akd::aegon::AegonError> = if let Some(s) = &shared {
+                let mut s = s.blocking_write();
+                s.publish_two_layer(&updates).map(|_| ())
+            } else {
+                // Encode updates with arkworks CanonicalSerialize on
+                // Vec<(Vec<u8>, Vec<u8>)> — same wire format the shard
+                // service's PublishBatchRequest.batch_bytes uses, and
+                // what the coord-server's publish handler expects.
+                let mut bytes = Vec::with_capacity(updates.uncompressed_size());
+                if let Err(e) = updates.serialize_uncompressed(&mut bytes) {
+                    eprintln!(
+                        "error: serialize publish updates at level={target}, \
+                         batch {}..{}: {e}",
+                        current_count, batch_end
+                    );
+                    return ExitCode::from(1);
+                }
+                let req = PublishRequest { updates_bytes: bytes };
+                let mut rc = raw_client.clone();
+                match driver_rt.block_on(async move { rc.publish(req).await }) {
+                    Ok(_resp) => Ok(()),
+                    Err(e) => Err(akd::aegon::AegonError::Config(format!(
+                        "remote publish: {e}"
+                    ))),
+                }
             };
             let ms = t.elapsed().as_secs_f64() * 1000.0;
             preload_publish_ms_total += ms;
@@ -781,6 +899,26 @@ fn main() -> ExitCode {
                 % (current_count as u64);
             let label = phone_label(idx);
             let value = rsa_value(idx);
+
+            // Two code paths from here:
+            //
+            //   * In-process / remote-shards (shared.is_some()): existing
+            //     8-call sequence — 4 server-direct in-process calls
+            //     interleaved with 4 raw gRPC client calls. Server-
+            //     direct provides the "lower bound" timing (no network,
+            //     no serialization) plus typed access to the returned
+            //     proofs for uncompressed-size accounting.
+            //
+            //   * Remote-coord (shared.is_none()): the bench has no
+            //     in-process state to call directly. All 4 lookup paths
+            //     go via gRPC only; "server_X_ns" comes from the
+            //     response's `server_processing_micros` field;
+            //     "client_X_ns" is the full elapsed RPC roundtrip. We
+            //     deserialize the value-history response to recover
+            //     `history_entries` + value_bytes_sum for the size
+            //     accounting (the other response fields are already
+            //     byte-encoded so we can use their lengths directly).
+            if let Some(shared) = &shared {
 
             // (a) Server-direct lookup_label. Read lock only — the
             // server-direct path is the lower bound on what any
@@ -1170,6 +1308,260 @@ fn main() -> ExitCode {
                     history_entries,
                 );
             }
+            } else {
+                // ---- remote-coord branch ----
+                //
+                // No in-process state to call directly. All four lookup
+                // RPCs go via gRPC; "server_X_ns" comes from the
+                // server-reported `server_processing_micros` field;
+                // "client_X_ns" is the full elapsed RPC roundtrip
+                // (RTT + (de)serialization + server handler wall time).
+                //
+                // We deserialize ShardedValueHistory from the history
+                // response to recover `history_entries` +
+                // `value_history_value_bytes_sum` for the data/proof
+                // byte split. Everything else is computable from
+                // response byte lengths directly.
+
+                // (1) lookup_label via gRPC.
+                let label_req = LookupLabelRequest { label: label.clone() };
+                let mut rc = raw_client.clone();
+                let t = Instant::now();
+                let label_result =
+                    driver_rt.block_on(async move { rc.lookup_label(label_req).await });
+                let client_label_ns = t.elapsed().as_nanos() as u64;
+                let label_resp = match label_result {
+                    Ok(r) => r.into_inner(),
+                    Err(e) => {
+                        eprintln!(
+                            "error: remote lookup_label({:?}) at level {target}: {e}",
+                            String::from_utf8_lossy(&label)
+                        );
+                        return ExitCode::from(1);
+                    },
+                };
+                let server_label_ns =
+                    label_resp.server_processing_micros.saturating_mul(1000);
+                let slot_bytes = label_resp.slot;
+                let label_proof_bytes = label_resp.proof;
+
+                // (2) lookup_value via gRPC, passing through the slot
+                // bytes we just received from (1).
+                let value_req = LookupValueRequest { slot: slot_bytes.clone() };
+                let mut rc = raw_client.clone();
+                let t = Instant::now();
+                let value_result =
+                    driver_rt.block_on(async move { rc.lookup_value(value_req).await });
+                let client_value_ns = t.elapsed().as_nanos() as u64;
+                let value_resp = match value_result {
+                    Ok(r) => r.into_inner(),
+                    Err(e) => {
+                        eprintln!("error: remote lookup_value at level {target}: {e}");
+                        return ExitCode::from(1);
+                    },
+                };
+                let server_value_ns =
+                    value_resp.server_processing_micros.saturating_mul(1000);
+                let value_proof_bytes = value_resp.proof;
+
+                // (3) lookup_history via gRPC.
+                let history_req = LookupHistoryRequest { label: label.clone() };
+                let mut rc = raw_client.clone();
+                let t = Instant::now();
+                let history_result =
+                    driver_rt.block_on(async move { rc.lookup_history(history_req).await });
+                let client_history_ns = t.elapsed().as_nanos() as u64;
+                let history_resp = match history_result {
+                    Ok(r) => r.into_inner(),
+                    Err(e) => {
+                        eprintln!("error: remote lookup_history at level {target}: {e}");
+                        return ExitCode::from(1);
+                    },
+                };
+                let server_history_ns =
+                    history_resp.server_processing_micros.saturating_mul(1000);
+                let history_bytes = history_resp.history;
+                // Deserialize to recover `entries.len()` +
+                // value_bytes_sum (the only fields we can't derive from
+                // wire-byte lengths alone). Empty bytes means the coord
+                // had no DB / no history for this label — treat as 0
+                // entries.
+                let (history_entries, value_history_value_bytes_sum) =
+                    if history_bytes.is_empty() {
+                        (0usize, 0usize)
+                    } else {
+                        match ShardedValueHistory::<Bn254, Pcs>::deserialize_uncompressed_unchecked(
+                            &history_bytes[..],
+                        ) {
+                            Ok(h) => {
+                                let sum: usize =
+                                    h.entries.iter().map(|e| e.value_bytes.len()).sum();
+                                (h.entries.len(), sum)
+                            },
+                            Err(e) => {
+                                eprintln!(
+                                    "error: deserialize history at level {target}: {e}"
+                                );
+                                return ExitCode::from(1);
+                            },
+                        }
+                    };
+
+                // (4) lookup_label_history via gRPC.
+                let lh_req = LookupLabelHistoryRequest { label: label.clone() };
+                let mut rc = raw_client.clone();
+                let t = Instant::now();
+                let lh_result =
+                    driver_rt.block_on(async move { rc.lookup_label_history(lh_req).await });
+                let client_label_history_ns = t.elapsed().as_nanos() as u64;
+                let lh_resp = match lh_result {
+                    Ok(r) => r.into_inner(),
+                    Err(e) => {
+                        eprintln!(
+                            "error: remote lookup_label_history at level {target}: {e}"
+                        );
+                        return ExitCode::from(1);
+                    },
+                };
+                let server_label_history_ns =
+                    lh_resp.server_processing_micros.saturating_mul(1000);
+                let label_history_bytes = lh_resp.history;
+
+                // Protobuf wire sizes (synthetic responses with the
+                // server_processing_micros field zeroed so the encoded
+                // length only reflects payload — matches what the
+                // in-process branch reports).
+                let label_resp_proto = LookupLabelResponse {
+                    slot: slot_bytes.clone(),
+                    proof: label_proof_bytes.clone(),
+                    server_processing_micros: 0,
+                };
+                let value_resp_proto = LookupValueResponse {
+                    proof: value_proof_bytes.clone(),
+                    value: value.clone(),
+                    server_processing_micros: 0,
+                };
+                let history_resp_proto = LookupHistoryResponse {
+                    history: history_bytes.clone(),
+                    server_processing_micros: 0,
+                };
+                let lh_resp_proto = LookupLabelHistoryResponse {
+                    history: label_history_bytes.clone(),
+                    server_processing_micros: 0,
+                };
+                let label_wire_bytes = label_resp_proto.encoded_len();
+                let value_wire_bytes = value_resp_proto.encoded_len();
+                let history_wire_bytes = history_resp_proto.encoded_len();
+                let label_history_wire_bytes = lh_resp_proto.encoded_len();
+
+                // Per-type data/proof/total triples (same definitions as
+                // the in-process branch).
+                let label_lookup_data_bytes = label.len();
+                let label_lookup_proof_bytes = label_proof_bytes.len();
+                let label_lookup_total_bytes =
+                    label_lookup_data_bytes + label_lookup_proof_bytes;
+                let value_lookup_data_bytes = value.len();
+                let value_lookup_proof_bytes = value_proof_bytes.len();
+                let value_lookup_total_bytes =
+                    value_lookup_data_bytes + value_lookup_proof_bytes;
+                let value_history_lookup_data_bytes = value_history_value_bytes_sum;
+                let value_history_lookup_proof_bytes = history_bytes
+                    .len()
+                    .saturating_sub(value_history_lookup_data_bytes);
+                let value_history_lookup_total_bytes =
+                    value_history_lookup_data_bytes + value_history_lookup_proof_bytes;
+                let label_history_lookup_data_bytes = label.len();
+                let label_history_lookup_proof_bytes = label_history_bytes
+                    .len()
+                    .saturating_sub(label_history_lookup_data_bytes);
+                let label_history_lookup_total_bytes =
+                    label_history_lookup_data_bytes + label_history_lookup_proof_bytes;
+
+                samples_json.push(format!(
+                    concat!(
+                        "        {{\n",
+                        "          \"sample_idx\": {sample_idx},\n",
+                        "          \"label_idx\": {idx},\n",
+                        "          \"server_lookup_label_ns\": {server_label_ns},\n",
+                        "          \"server_lookup_value_ns\": {server_value_ns},\n",
+                        "          \"server_lookup_history_ns\": {server_history_ns},\n",
+                        "          \"server_lookup_label_history_ns\": {server_label_history_ns},\n",
+                        "          \"client_lookup_label_ns\": {client_label_ns},\n",
+                        "          \"client_lookup_value_ns\": {client_value_ns},\n",
+                        "          \"client_lookup_history_ns\": {client_history_ns},\n",
+                        "          \"client_lookup_label_history_ns\": {client_label_history_ns},\n",
+                        "          \"history_entries\": {history_entries},\n",
+                        "          \"label_lookup_data_bytes\": {l_d},\n",
+                        "          \"label_lookup_proof_bytes\": {l_p},\n",
+                        "          \"label_lookup_total_bytes\": {l_t},\n",
+                        "          \"value_lookup_data_bytes\": {v_d},\n",
+                        "          \"value_lookup_proof_bytes\": {v_p},\n",
+                        "          \"value_lookup_total_bytes\": {v_t},\n",
+                        "          \"value_history_lookup_data_bytes\": {vh_d},\n",
+                        "          \"value_history_lookup_proof_bytes\": {vh_p},\n",
+                        "          \"value_history_lookup_total_bytes\": {vh_t},\n",
+                        "          \"label_history_lookup_data_bytes\": {lh_d},\n",
+                        "          \"label_history_lookup_proof_bytes\": {lh_p},\n",
+                        "          \"label_history_lookup_total_bytes\": {lh_t},\n",
+                        "          \"label_slot_bytes\": {slot_b},\n",
+                        "          \"label_response_wire_bytes\": {l_w},\n",
+                        "          \"value_response_wire_bytes\": {v_w},\n",
+                        "          \"history_response_wire_bytes\": {h_w},\n",
+                        "          \"label_history_response_wire_bytes\": {lh_w}\n",
+                        "        }}"
+                    ),
+                    sample_idx = sample_idx,
+                    idx = idx,
+                    server_label_ns = server_label_ns,
+                    server_value_ns = server_value_ns,
+                    server_history_ns = server_history_ns,
+                    server_label_history_ns = server_label_history_ns,
+                    client_label_ns = client_label_ns,
+                    client_value_ns = client_value_ns,
+                    client_history_ns = client_history_ns,
+                    client_label_history_ns = client_label_history_ns,
+                    history_entries = history_entries,
+                    l_d = label_lookup_data_bytes,
+                    l_p = label_lookup_proof_bytes,
+                    l_t = label_lookup_total_bytes,
+                    v_d = value_lookup_data_bytes,
+                    v_p = value_lookup_proof_bytes,
+                    v_t = value_lookup_total_bytes,
+                    vh_d = value_history_lookup_data_bytes,
+                    vh_p = value_history_lookup_proof_bytes,
+                    vh_t = value_history_lookup_total_bytes,
+                    lh_d = label_history_lookup_data_bytes,
+                    lh_p = label_history_lookup_proof_bytes,
+                    lh_t = label_history_lookup_total_bytes,
+                    slot_b = slot_bytes.len(),
+                    l_w = label_wire_bytes,
+                    v_w = value_wire_bytes,
+                    h_w = history_wire_bytes,
+                    lh_w = label_history_wire_bytes,
+                ));
+
+                if sample_idx == 0 || (sample_idx + 1) % 10 == 0 {
+                    eprintln!(
+                        "  sample {}: server[lbl/val/vh/lh]={:.2}/{:.2}/{:.2}/{:.2}ms \
+                         client[lbl/val/vh/lh]={:.2}/{:.2}/{:.2}/{:.2}ms \
+                         totals[lbl/val/vh/lh]={}/{}/{}/{}B (vh_entries={})",
+                        sample_idx,
+                        server_label_ns as f64 / 1e6,
+                        server_value_ns as f64 / 1e6,
+                        server_history_ns as f64 / 1e6,
+                        server_label_history_ns as f64 / 1e6,
+                        client_label_ns as f64 / 1e6,
+                        client_value_ns as f64 / 1e6,
+                        client_history_ns as f64 / 1e6,
+                        client_label_history_ns as f64 / 1e6,
+                        label_lookup_total_bytes,
+                        value_lookup_total_bytes,
+                        value_history_lookup_total_bytes,
+                        label_history_lookup_total_bytes,
+                        history_entries,
+                    );
+                }
+            } // end if let Some(shared)
         }
 
         // ---- per-stage audit bench --------------------------------
@@ -1191,7 +1583,17 @@ fn main() -> ExitCode {
         // `server_fetch_ns` so the auditor + bulletin-board sides are
         // both visible.
         let mut audit_json: Option<String> = None;
-        if args.audit_samples > 0 {
+        // Audit reads the in-process epoch history; not supported in
+        // remote-coord mode (would need an `EpochHistory` RPC to fetch
+        // past `ShardedEpochCommitment`s from the coord). Skip when
+        // shared is None.
+        if args.audit_samples > 0 && shared.is_none() {
+            eprintln!(
+                "  audit: skipped (remote-coord mode has no in-process epoch history)"
+            );
+        }
+        if args.audit_samples > 0 && shared.is_some() {
+            let shared = shared.as_ref().unwrap();
             let current_epoch = shared.blocking_read().current_commitment().epoch;
             if current_epoch < 1 {
                 eprintln!(
@@ -1638,7 +2040,13 @@ fn main() -> ExitCode {
         // accidentally turn its own publish-samples into sample
         // candidates for the next stage.
         let mut publish_bench_json: Option<String> = None;
-        if publish_enabled {
+        if publish_enabled && shared.is_none() {
+            eprintln!(
+                "  publish_bench: skipped (remote-coord mode — would need an in-process \
+                 ShardedAegon to capture commit-class sizes)"
+            );
+        }
+        if publish_enabled && shared.is_some() {
             let mut batch_blocks: Vec<String> = Vec::with_capacity(args.publish_batch_sizes.len());
             for &batch_size in &args.publish_batch_sizes {
                 eprintln!(
@@ -1660,6 +2068,9 @@ fn main() -> ExitCode {
                         .collect();
                     let t = Instant::now();
                     let res = {
+                        // shared is guaranteed Some — guarded by
+                        // `if publish_enabled && shared.is_some()` above.
+                        let shared = shared.as_ref().unwrap();
                         let mut s = shared.blocking_write();
                         s.publish_two_layer(&updates)
                     };

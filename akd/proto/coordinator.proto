@@ -41,6 +41,15 @@ service CoordinatorService {
   rpc LookupLabelHistory(LookupLabelHistoryRequest)
       returns (LookupLabelHistoryResponse);
   rpc CurrentCommitment(Empty) returns (CommitmentResponse);
+
+  // Publish a batch of `(label, value)` updates. The coordinator runs
+  // the full two-layer publish pipeline (H_shard routing → per-shard
+  // phase 1 + 2 fan-out → cross-shard merkle commit → per-shard finalize
+  // RPC) and returns the new `ShardedEpochCommitment`.
+  //
+  // Wire payload at K=65k batch is ~17 MB; the MAX_MSG_BYTES ceiling on
+  // both sides is 8 GiB so even K=524k (~150 MB) fits comfortably.
+  rpc Publish(PublishRequest) returns (PublishResponse);
 }
 
 message LookupLabelRequest {
@@ -140,3 +149,18 @@ message LookupLabelHistoryResponse {
 }
 
 message Empty {}
+
+message PublishRequest {
+  // Canonical-serialized `Vec<(Label, Value)>` (arkworks
+  // CanonicalSerialize on `Vec<(Vec<u8>, Vec<u8>)>` — same wire
+  // format the shard service's `PublishBatchRequest.batch_bytes`
+  // uses).
+  bytes updates_bytes = 1;
+}
+
+message PublishResponse {
+  // Canonical-serialized `ShardedEpochCommitment<E, P>` for the new
+  // epoch (the one this publish just created).
+  bytes commitment = 1;
+  uint64 server_processing_micros = 2;
+}

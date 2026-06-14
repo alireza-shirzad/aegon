@@ -47,7 +47,7 @@ use proto::coordinator_service_server::{CoordinatorService, CoordinatorServiceSe
 use proto::{
     CommitmentResponse, Empty, LookupHistoryRequest, LookupHistoryResponse,
     LookupLabelHistoryRequest, LookupLabelHistoryResponse, LookupLabelRequest, LookupLabelResponse,
-    LookupValueRequest, LookupValueResponse,
+    LookupValueRequest, LookupValueResponse, PublishRequest, PublishResponse,
 };
 use tokio::runtime::Runtime;
 use tokio::sync::Mutex as AsyncMutex;
@@ -352,6 +352,38 @@ where
         }))
     }
 
+    async fn publish(
+        &self,
+        req: Request<PublishRequest>,
+    ) -> Result<Response<PublishResponse>, Status> {
+        let start = Instant::now();
+        let updates_bytes = req.into_inner().updates_bytes;
+        // Decode `Vec<(Label, Value)>` — same wire format the shard
+        // service uses for `PublishBatchRequest.batch_bytes`.
+        let updates: Vec<(Label, Value)> = decode(&updates_bytes).map_err(err_to_status)?;
+        // `ShardedAegon::publish_two_layer` is sync but its shard
+        // fan-out goes through rayon + blocking gRPC clients (shard
+        // transports use their own internal tokio runtimes via
+        // `block_on`). Calling that from this async handler would
+        // panic with "Cannot start a runtime from within a runtime"
+        // because tonic's worker thread already has a tokio CONTEXT
+        // set. `spawn_blocking` moves the work to a pool thread (no
+        // tokio CONTEXT) so the shard transports' inner runtimes can
+        // be entered safely. Same pattern as the other RPCs here.
+        let state = Arc::clone(&self.state);
+        let commit_result = tokio::task::spawn_blocking(move || {
+            let mut state = state.blocking_write();
+            state.publish_two_layer(&updates)
+        })
+        .await
+        .map_err(|e| Status::internal(format!("publish join: {e}")))?;
+        let commit = commit_result.map_err(err_to_status)?;
+        Ok(Response::new(PublishResponse {
+            commitment: encode(&commit).map_err(err_to_status)?,
+            server_processing_micros: start.elapsed().as_micros() as u64,
+        }))
+    }
+
     async fn current_commitment(
         &self,
         _req: Request<Empty>,
@@ -526,6 +558,37 @@ where
                 .current_commitment(Empty {})
                 .await
                 .map_err(|s| AegonError::Config(format!("grpc current_commitment: {s}")))
+        })?;
+        decode::<ShardedEpochCommitment<E, P>>(&resp.into_inner().commitment)
+    }
+
+    /// Publish a batch of `(label, value)` updates through the
+    /// coordinator. The server runs the full `publish_two_layer`
+    /// pipeline (H_shard routing → per-shard phase 1+2 fan-out →
+    /// cross-shard merkle commit → per-shard finalize) and returns the
+    /// new `ShardedEpochCommitment`.
+    ///
+    /// This is a verifying-but-trusted call: we don't have a witness
+    /// to verify locally (publish doesn't produce a client-side proof
+    /// of correctness — auditors verify epoch-to-epoch invariants
+    /// out-of-band), so the returned commitment is just the server's
+    /// claim about the new bulletin-board root. The client should
+    /// cross-check it against a trusted source if soundness matters
+    /// at this layer; for the bench harness, we just need a successful
+    /// round-trip.
+    pub fn publish_two_layer(
+        &self,
+        updates: &[(Label, Value)],
+    ) -> Result<ShardedEpochCommitment<E, P>, AegonError> {
+        let updates_bytes = encode(&updates.to_vec())?;
+        let req = PublishRequest { updates_bytes };
+        let resp = self.runtime.block_on(async {
+            self.client
+                .lock()
+                .await
+                .publish(req)
+                .await
+                .map_err(|s| AegonError::Config(format!("grpc publish: {s}")))
         })?;
         decode::<ShardedEpochCommitment<E, P>>(&resp.into_inner().commitment)
     }
