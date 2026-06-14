@@ -96,6 +96,14 @@ export PUBLISH_WARMUP_BATCH_SIZE="${PUBLISH_WARMUP_BATCH_SIZE:-16384}"
 # climb from conc=1 toward the next bottleneck.
 export N_MASKING_SERVERS="${N_MASKING_SERVERS:-4}"
 export LOOKUP_THROUGHPUT_CONCURRENCIES="${LOOKUP_THROUGHPUT_CONCURRENCIES:-1,4,16,64,256,512,1024}"
+# Medium regime now drives publishes + lookups through a remote
+# `aegon_coordinator_server` running on the coord VM (instead of
+# bundling the coord state inside the bench-client binary).
+# Architecturally matches what a production deployment would look like:
+# bench-client → coord (over network) → shards (over network).
+# Set USE_REMOTE_COORD=0 to fall back to the legacy in-process coord
+# topology if you need to compare against pre-refactor bench numbers.
+export USE_REMOTE_COORD="${USE_REMOTE_COORD:-1}"
 
 # Outputs — distinct filenames so medium and large don't overwrite
 # each other in the same results dirs.
@@ -135,6 +143,16 @@ fi
 # --- Phase 4b: start-shards (once; bench binaries drive prefill via RPC) ---
 if [[ "${SKIP_START_SHARDS:-0}" != "1" ]]; then
   run_phase "medium-start-shards" "$REPO_ROOT/scripts/bench-cluster.sh" start-shards || exit $?
+fi
+
+# --- Phase 4c: start-coord (only when USE_REMOTE_COORD=1) ---
+# Launches `aegon_coordinator_server` on the coord VM, which talks to
+# every shard via gRPC. The bench-client then connects only to the
+# coord; without this phase, USE_REMOTE_COORD=1 fails fast in
+# bench-cluster.sh because `coord_endpoint` can't resolve a listening
+# port.
+if [[ "${SKIP_START_COORD:-0}" != "1" && "${USE_REMOTE_COORD:-1}" == "1" ]]; then
+  run_phase "medium-start-coord" "$REPO_ROOT/scripts/bench-cluster.sh" start-coord || exit $?
 fi
 
 # --- Phase 5: combined lookup-bench (folds in publish-bench per fill) ---

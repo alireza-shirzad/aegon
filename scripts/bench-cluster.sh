@@ -119,6 +119,9 @@ NETWORK="aegon-bench-vpc"
 FIREWALL_GRPC="aegon-bench-grpc"
 FIREWALL_SRS="aegon-bench-srs"
 FIREWALL_SSH="aegon-bench-ssh"
+# Firewall opening bench-client → coord on COORD_PORT; created during
+# `up` if remote-coord mode is enabled in the regime script.
+FIREWALL_BENCH_CLIENT_COORD="aegon-bench-client-coord"
 SHARD_TAG="aegon-bench-shard"
 COORD_TAG="aegon-bench-coord"
 MASKING_TAG="aegon-bench-masking"
@@ -154,6 +157,9 @@ TEMPORARY_WORKER_LABEL="temporary-worker-vm=true"
 SCANNER_TAGS="$DEPARTMENT_TAG,$TEMPORARY_WORKER_TAG"
 SCANNER_LABELS="$DEPARTMENT_LABEL,$TEMPORARY_WORKER_LABEL"
 SHARD_PORT=50051
+# Coordinator gRPC port (`aegon_coordinator_server`). Only bound when
+# the regime script calls `start-coord` (i.e. remote-coord mode).
+COORD_PORT="${COORD_PORT:-50100}"
 # Masking server(s): N_MASKING_SERVERS VMs per cluster. Each holds a
 # queue of pre-built `KZHKMaskingPackage`s; background producers
 # refill the queue continuously. Each shard's value-side opening
@@ -403,10 +409,11 @@ cmd_up() {
   fi
 
   # ---- firewall: bench-client -> shards on gRPC port ----
-  # The bench-client VM runs aegon_lookup_bench, which brings up an
-  # in-process coord state that fans out to the shards directly over
-  # the VPC. So bench-client needs the same shard reachability the
-  # coord has.
+  # The bench-client VM runs aegon_lookup_bench. In the legacy in-process
+  # coord mode it fans out to shards directly; in remote-coord mode it
+  # only talks to the coord (the rule below) and the coord talks to the
+  # shards via $FIREWALL_GRPC. We keep this rule for in-process-mode
+  # compatibility.
   if gcloud compute firewall-rules describe "$FIREWALL_BENCH_CLIENT_GRPC" >/dev/null 2>&1; then
     log "firewall $FIREWALL_BENCH_CLIENT_GRPC exists"
   else
@@ -416,6 +423,22 @@ cmd_up() {
       --allow="tcp:$SHARD_PORT" \
       --source-tags="$BENCH_CLIENT_TAG" \
       --target-tags="$SHARD_TAG" >/dev/null
+  fi
+
+  # ---- firewall: bench-client -> coord on coord-server gRPC port ----
+  # Required by remote-coord mode (the bench drives publishes + lookups
+  # against `aegon_coordinator_server` listening on COORD_PORT on the
+  # coord VM). Created unconditionally — costs nothing if remote-coord
+  # mode isn't used.
+  if gcloud compute firewall-rules describe "$FIREWALL_BENCH_CLIENT_COORD" >/dev/null 2>&1; then
+    log "firewall $FIREWALL_BENCH_CLIENT_COORD exists"
+  else
+    log "creating firewall $FIREWALL_BENCH_CLIENT_COORD (bench-client -> coord:$COORD_PORT)"
+    gcloud compute firewall-rules create "$FIREWALL_BENCH_CLIENT_COORD" \
+      --network="$NETWORK" \
+      --allow="tcp:$COORD_PORT" \
+      --source-tags="$BENCH_CLIENT_TAG" \
+      --target-tags="$COORD_TAG" >/dev/null
   fi
 
   # ---- firewall: shards -> masking server on masking port ----
@@ -752,19 +775,22 @@ cmd_deploy() {
         apt-get update >/dev/null && \
         apt-get install -y --no-install-recommends protobuf-compiler ca-certificates >/dev/null && \
         cargo build --release -p akd $cargo_features --target x86_64-unknown-linux-gnu \
-          --bin aegon_shard_server --bin aegon_coordinator_bench --bin aegon_srs_gen \
+          --bin aegon_shard_server --bin aegon_coordinator_bench \
+          --bin aegon_coordinator_server --bin aegon_srs_gen \
           --bin aegon_masking_server"
     remote_bin_dir="$REPO_ROOT/target/x86_64-unknown-linux-gnu/release"
   else
-    log "building release binaries (aegon_shard_server, aegon_coordinator_bench, aegon_srs_gen, aegon_masking_server)"
+    log "building release binaries (aegon_shard_server, aegon_coordinator_bench, aegon_coordinator_server, aegon_srs_gen, aegon_masking_server)"
     (cd "$REPO_ROOT" && cargo build --release -p akd $cargo_features \
-      --bin aegon_shard_server --bin aegon_coordinator_bench --bin aegon_srs_gen \
+      --bin aegon_shard_server --bin aegon_coordinator_bench \
+      --bin aegon_coordinator_server --bin aegon_srs_gen \
       --bin aegon_masking_server) >/dev/null
   fi
-  [[ -x "$remote_bin_dir/aegon_shard_server" ]]      || die "aegon_shard_server missing"
-  [[ -x "$remote_bin_dir/aegon_coordinator_bench" ]] || die "aegon_coordinator_bench missing"
-  [[ -x "$remote_bin_dir/aegon_srs_gen" ]]           || die "aegon_srs_gen missing"
-  [[ -x "$remote_bin_dir/aegon_masking_server" ]]    || die "aegon_masking_server missing"
+  [[ -x "$remote_bin_dir/aegon_shard_server" ]]       || die "aegon_shard_server missing"
+  [[ -x "$remote_bin_dir/aegon_coordinator_bench" ]]  || die "aegon_coordinator_bench missing"
+  [[ -x "$remote_bin_dir/aegon_coordinator_server" ]] || die "aegon_coordinator_server missing"
+  [[ -x "$remote_bin_dir/aegon_srs_gen" ]]            || die "aegon_srs_gen missing"
+  [[ -x "$remote_bin_dir/aegon_masking_server" ]]     || die "aegon_masking_server missing"
 
   local per_shard; per_shard="$(prefill_per_shard)"
   log "shards will prefill ${per_shard} entries each (total = 2^$TOTAL_PRELOAD_LOG2)"
@@ -825,13 +851,19 @@ cmd_deploy() {
   fi
 
   # ---- push to coordinator ----
+  # Both bins land on the coord VM:
+  #   * aegon_coordinator_bench — large-regime in-process bench harness
+  #   * aegon_coordinator_server — user-facing gRPC service used by the
+  #     medium regime's `start-coord` phase, talked to over the network
+  #     by `aegon_lookup_bench --coord-endpoint`.
   local cname; cname="$(coord_name)"
   wait_for_ssh "$cname"
-  log "[$cname] uploading aegon_coordinator_bench"
+  log "[$cname] uploading aegon_coordinator_bench + aegon_coordinator_server"
   scp_to "$cname" "$remote_bin_dir/aegon_coordinator_bench"
+  scp_to "$cname" "$remote_bin_dir/aegon_coordinator_server"
   remote "$cname" "sudo mkdir -p $REMOTE_BIN_DIR && \
-    sudo mv /tmp/aegon_coordinator_bench $REMOTE_BIN_DIR/ && \
-    sudo chmod +x $REMOTE_BIN_DIR/aegon_coordinator_bench"
+    sudo mv /tmp/aegon_coordinator_bench /tmp/aegon_coordinator_server $REMOTE_BIN_DIR/ && \
+    sudo chmod +x $REMOTE_BIN_DIR/aegon_coordinator_bench $REMOTE_BIN_DIR/aegon_coordinator_server"
 
   # Enable user-session lingering on the coord. Without this, the
   # transient systemd-run unit that wraps aegon_lookup_bench gets
@@ -1059,6 +1091,120 @@ cmd_start_masking() {
     die "$failed masking server start(s) failed"
   fi
   log "all $N_MASKING_SERVERS masking server(s) listening on :$MASKING_PORT"
+}
+
+# Launch `aegon_coordinator_server` on the coord VM. The server holds
+# the in-process `ShardedAegon` state, talks to every shard via gRPC,
+# and exposes the user-facing publish/lookup API on $COORD_PORT.
+#
+# Prereqs:
+#   * `start-shards` ran so every shard is listening + at epoch 0
+#   * shard endpoints resolved via `shard_endpoints_csv`
+#
+# Failure modes the launch surfaces:
+#   * setup_seed mismatch with shards → SRS hash mismatch on first
+#     phase-1 RPC; coord crashes shortly after spawn.
+#   * any shard unreachable → `Sharded::setup` blocks on first
+#     CurrentCommitment probe; coord stays in setup until timeout.
+#
+# Idempotent (kills any prior coord server before launching).
+cmd_start_coord() {
+  require_project
+  require_power_of_two "$N_SHARDS"
+  local log_n_shards
+  log_n_shards="$(python3 -c "import math; print(int(math.log2($N_SHARDS)))")"
+
+  local cname; cname="$(coord_name)"
+  wait_for_ssh "$cname"
+
+  # Wipe the coord's RocksDB so each run starts from a clean keyspace.
+  # `start-shards` does the same for shard DBs; we mirror that here.
+  log "[$cname] wiping $COORD_DB_PATH (clean RocksDB for the run)"
+  remote "$cname" "sudo rm -rf $COORD_DB_PATH && sudo mkdir -p $COORD_DB_PATH && sudo chown \$(whoami) $COORD_DB_PATH"
+
+  local shard_csv; shard_csv="$(shard_endpoints_csv)"
+  log "[$cname] starting aegon_coordinator_server :$COORD_PORT (connects to $N_SHARDS shards via gRPC)"
+
+  # Two short SSH calls — same fire-and-forget pattern as start_shard.
+  local privacy_flag=""
+  if [[ "${SHARD_PRIVATE:-1}" == "1" ]]; then
+    privacy_flag="--private"
+  fi
+  local spawn_cmd="if [ -f /tmp/aegon-coord.pid ]; then \
+      kill \$(cat /tmp/aegon-coord.pid) 2>/dev/null || true; \
+    fi; \
+    pkill -x aegon_coordinat 2>/dev/null || true; \
+    sleep 2; \
+    mkdir -p \$HOME/aegon-run && \
+    cd \$HOME/aegon-run && \
+    AEGON_ROCKSDB_STATS_DUMP_SEC=${AEGON_ROCKSDB_STATS_DUMP_SEC:-60} \
+    AEGON_ROCKSDB_BLOCK_CACHE_GB=${AEGON_ROCKSDB_BLOCK_CACHE_GB:-8} \
+    AEGON_ROCKSDB_PARALLELISM=${AEGON_ROCKSDB_PARALLELISM:-16} \
+    nohup $REMOTE_BIN_DIR/aegon_coordinator_server \
+      --listen 0.0.0.0:$COORD_PORT \
+      --shard-log-capacity $SHARD_LOG_CAPACITY \
+      --kzh-k $KZH_K \
+      --endpoints $shard_csv \
+      --setup-seed $SETUP_SEED \
+      $privacy_flag \
+      --db-path $COORD_DB_PATH \
+      > /tmp/aegon-coord.log 2>&1 < /dev/null & \
+    echo \$! > /tmp/aegon-coord.pid; \
+    disown 2>/dev/null || true; \
+    echo SPAWNED"
+  local spawn_out spawn_rc=0
+  spawn_out="$(timeout 300 gcloud compute ssh "$cname" --zone="$ZONE" \
+    --tunnel-through-iap --quiet \
+    --ssh-flag="-o UserKnownHostsFile=/dev/null" \
+    --ssh-flag="-o StrictHostKeyChecking=no" \
+    --ssh-flag="-o LogLevel=ERROR" \
+    --command="$spawn_cmd" 2>&1)" \
+    || spawn_rc=$?
+  if (( spawn_rc != 0 )) || [[ "$spawn_out" != *"SPAWNED"* ]]; then
+    log "[$cname] coord spawn failed (rc=$spawn_rc): $spawn_out"
+    die "could not spawn coord on $cname"
+  fi
+
+  # Wait for the coord to bind COORD_PORT. The setup phase (SRS gen +
+  # one CurrentCommitment RPC per shard) can take ~3-5 min on medium;
+  # the listener is bound at the end of setup. Probe every 10s for up
+  # to 15min.
+  log "[$cname] waiting for coord to bind :$COORD_PORT (setup takes ~3-5 min)"
+  local ready=0
+  for _ in $(seq 1 90); do
+    if timeout 30 gcloud compute ssh "$cname" --zone="$ZONE" \
+      --tunnel-through-iap --quiet \
+      --ssh-flag="-o UserKnownHostsFile=/dev/null" \
+      --ssh-flag="-o StrictHostKeyChecking=no" \
+      --ssh-flag="-o LogLevel=ERROR" \
+      --command="ss -tln | grep -q ':$COORD_PORT '" >/dev/null 2>&1; then
+      ready=1
+      break
+    fi
+    sleep 10
+  done
+  if (( ready == 0 )); then
+    log "[$cname] coord failed to bind :$COORD_PORT within 15min"
+    log "[$cname] coord log (last 80 lines):"
+    timeout 30 gcloud compute ssh "$cname" --zone="$ZONE" \
+      --tunnel-through-iap --quiet \
+      --command="tail -n 80 /tmp/aegon-coord.log" 2>&1 || true
+    die "coord did not become ready in time"
+  fi
+  log "[$cname] coord listening on :$COORD_PORT"
+}
+
+# Return the coord-server's gRPC endpoint URL (e.g. http://10.x.x.x:50100)
+# for use as a bench `--coord-endpoint` value.
+coord_endpoint() {
+  local cname; cname="$(coord_name)"
+  local ip
+  ip="$(gcloud compute instances describe "$cname" --zone="$ZONE" \
+    --format='value(networkInterfaces[0].networkIP)' 2>/dev/null)"
+  if [[ -z "$ip" ]]; then
+    return 1
+  fi
+  echo "http://$ip:$COORD_PORT"
 }
 
 # Resolve the i-th masking server's internal IP and return its gRPC
@@ -1983,6 +2129,26 @@ cmd_lookup_bench() {
   local remote_log="/tmp/aegon-lookup-bench.log"
   local unit="aegon-lookup-bench"
   local me; me="$(whoami)"
+
+  # Build the bench args dynamically. Two modes:
+  #   * In-process coord (default): bench holds the `ShardedAegon` state
+  #     locally and connects to shards directly. Original arg set.
+  #   * Remote-coord (USE_REMOTE_COORD=1): bench connects only to the
+  #     coord VM via `aegon_coordinator_server`; the coord drives shards.
+  #     Skip --setup-seed / --endpoints / --db-path / --private (the
+  #     remote coord owns all that state) and pass --coord-endpoint
+  #     pointing at the coord's resolved URL.
+  local mode_args
+  if [[ "${USE_REMOTE_COORD:-0}" == "1" ]]; then
+    local coord_url; coord_url="$(coord_endpoint)" \
+      || die "USE_REMOTE_COORD=1 but could not resolve coord endpoint — did start-coord run?"
+    log "[$cname] bench mode: remote-coord (endpoint=$coord_url)"
+    mode_args="--coord-endpoint $coord_url"
+  else
+    log "[$cname] bench mode: in-process coord (connects to shards directly)"
+    mode_args="--setup-seed $SETUP_SEED --endpoints $shard_csv --db-path $COORD_DB_PATH --private"
+  fi
+
   log "[$cname] starting aegon_lookup_bench as systemd unit '$unit'"
   remote "$cname" "
     sudo systemctl reset-failed $unit 2>/dev/null || true
@@ -2009,9 +2175,7 @@ cmd_lookup_bench() {
           --true-log-capacity $LOOKUP_TRUE_LOG_CAP \
           --kzh-k $KZH_K \
           --n-shards $N_SHARDS \
-          --setup-seed $SETUP_SEED \
-          --endpoints $shard_csv \
-          --db-path $COORD_DB_PATH \
+          $mode_args \
           --fill-percents $LOOKUP_FILL_PERCENTS \
           --prefill-seed $PREFILL_SEED \
           --samples-per-level $LOOKUP_SAMPLES_PER_LEVEL \
@@ -2023,7 +2187,6 @@ cmd_lookup_bench() {
           --throughput-window-secs $LOOKUP_THROUGHPUT_WINDOW_SECS \
           --throughput-warmup-secs $LOOKUP_THROUGHPUT_WARMUP_SECS \
           --throughput-lookup-kind $LOOKUP_THROUGHPUT_LOOKUP_KIND \
-          --private \
           --output $remote_out > $remote_log 2>&1
       '
     echo LAUNCHED
@@ -2266,7 +2429,7 @@ cmd_down() {
     log "no aegon-bench-* instances to delete"
   fi
 
-  for fw in "$FIREWALL_GRPC" "$FIREWALL_BENCH_CLIENT_GRPC" "$FIREWALL_SRS" "$FIREWALL_SSH" "aegon-bench-masking"; do
+  for fw in "$FIREWALL_GRPC" "$FIREWALL_BENCH_CLIENT_GRPC" "$FIREWALL_BENCH_CLIENT_COORD" "$FIREWALL_SRS" "$FIREWALL_SSH" "aegon-bench-masking"; do
     if gcloud compute firewall-rules describe "$fw" >/dev/null 2>&1; then
       log "deleting firewall $fw"
       gcloud compute firewall-rules delete "$fw" --quiet >/dev/null
@@ -2392,6 +2555,7 @@ main() {
     migration-bench) cmd_migration_bench ;;
     start-shards)   cmd_start_shards ;;
     start-masking)  cmd_start_masking ;;
+    start-coord)    cmd_start_coord ;;
     bench)          cmd_bench ;;
     lookup-bench)   cmd_lookup_bench ;;
     watchdog)       cmd_watchdog ;;
