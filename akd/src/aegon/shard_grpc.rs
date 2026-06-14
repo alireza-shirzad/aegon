@@ -361,12 +361,17 @@ where
     ) -> Result<EpochCommitment<E, P>, AegonError> {
         // In-process path: the Aegon-as-shard impl has no per-shard
         // RocksDB attached (DB lives on the gRPC ShardServiceImpl,
-        // not on the Aegon itself). We drop the DbOps — the
+        // not on the Aegon itself). Pass a no-op write_chunk
+        // closure so each streamed chunk is discarded — the
         // in-process bench / test path uses DbSource::None and the
         // coord holds nothing else to persist for the shard side.
-        let (commit, _ops) =
-            Aegon::publish_phase_2_and_persist(self, new_r_index, new_r_value, shard_id)?;
-        Ok(commit)
+        Aegon::publish_phase_2_and_persist(
+            self,
+            new_r_index,
+            new_r_value,
+            shard_id,
+            |_chunk| Ok(()),
+        )
     }
 
     fn is_index_slot_occupied(&self, slot_bits: &[bool]) -> bool {
@@ -767,15 +772,25 @@ where
         let r_index: E::ScalarField = decode(&r.r_index).map_err(err_to_status)?;
         let r_value: E::ScalarField = decode(&r.r_value).map_err(err_to_status)?;
         let shard_id = r.shard_id;
+
+        // Clone the Arc<dyn Db> handle so the streaming closure owns
+        // a stable reference for the whole publish (cheap — Arc::clone
+        // is one atomic refcount bump). The closure is `FnMut` and
+        // called many times by `publish_phase_2_and_persist`, once
+        // per chunk.
+        let db_handle = self.db.clone();
+
         let mut aegon = self.aegon.write().await;
-        // Combined phase-2 + DbOps build, all in-process. The
-        // resulting `Vec<DbOp>` is the dictionary-content writes
-        // (value:, value_history:, label_placement:, openings:) for
-        // every label this shard touched in the batch, with empty
-        // merkle paths in stored entries (coord stitches them at
-        // lookup time).
-        let (commit, ops) = aegon
-            .publish_phase_2_and_persist(r_index, r_value, shard_id)
+        let commit = aegon
+            .publish_phase_2_and_persist(r_index, r_value, shard_id, |chunk| {
+                // Streaming chunk write: each call lands as one RocksDB
+                // WriteBatch (one WAL record + one memtable insert).
+                // No-op when no DB is configured (in-process tests).
+                if let Some(db) = &db_handle {
+                    db.write_atomic(chunk)?;
+                }
+                Ok(())
+            })
             .map_err(err_to_status)?;
 
         // TODO(shard-checkpoint-fault-tolerance): per-publish
@@ -808,14 +823,6 @@ where
             }
         }
         drop(aegon);
-
-        // Write the dictionary-content DbOps to the shard's local
-        // RocksDB. Skipped when no DB is configured (in-process
-        // testing). Single atomic batch — RocksDB serializes the
-        // group as one WAL record + one memtable apply.
-        if let Some(db) = &self.db {
-            db.write_atomic(&ops).map_err(err_to_status)?;
-        }
 
         Ok(Response::new(PublishPhase2AndPersistResponse {
             epoch_commitment: encode(&commit).map_err(err_to_status)?,

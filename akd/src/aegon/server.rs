@@ -1167,12 +1167,18 @@ where
             prev_r_value,
             &new_value_com,
         );
-        // Discard the DbOps: this convenience wrapper is the
-        // non-sharded in-process path with no DB attached (tests +
-        // legacy single-shard benches). Sharded callers go through
-        // `ShardedAegon::publish_two_layer`, which forwards the
-        // DbOps to each shard's gRPC handler for atomic write.
-        let (commit, _ops) = self.publish_phase_2_and_persist(new_r_index, new_r_value, 0)?;
+        // No DB attached on this convenience wrapper (it's the
+        // non-sharded in-process path used by tests + legacy
+        // single-shard benches). Pass a no-op write_chunk closure —
+        // each chunk is silently discarded. Sharded callers go
+        // through `ShardedAegon::publish_two_layer`, which lets each
+        // shard's gRPC handler stream chunks to its local DB.
+        let commit = self.publish_phase_2_and_persist(
+            new_r_index,
+            new_r_value,
+            0,
+            |_chunk| Ok(()),
+        )?;
         Ok(commit)
     }
 
@@ -1632,14 +1638,16 @@ where
         feature = "tracing_instrument",
         tracing::instrument(level = "debug", skip_all, name = "Aegon::PublishPhase2AndPersist")
     )]
-    pub fn publish_phase_2_and_persist(
+    pub fn publish_phase_2_and_persist<F>(
         &mut self,
         new_r_index: E::ScalarField,
         new_r_value: E::ScalarField,
         shard_id: u32,
-    ) -> Result<(EpochCommitment<E, P>, Vec<super::db::DbOp>), AegonError>
+        mut write_chunk: F,
+    ) -> Result<EpochCommitment<E, P>, AegonError>
     where
         P::Proof: Clone,
+        F: FnMut(&[super::db::DbOp]) -> Result<(), AegonError>,
     {
         let _phase2_total_t = std::time::Instant::now();
         let _rss_epoch = self.epoch;
@@ -2180,27 +2188,36 @@ where
             );
         }
 
-        // Inline DbOps build. The legacy multi-RPC flow had
-        // `publish_phase_2` stash the locally-computed entries in
-        // `pending_finalize` and a separate `FinalizePublishPersist`
-        // RPC ship the cross-shard merkle anchors + trigger
-        // `build_finalize_ops` to consume the stash. We now collapse
-        // both into a single `publish_phase_2_and_persist` call:
+        // Streaming inline DbOps write. The shard's per-label writes
+        // (value, value_history, label_placement) and the per-epoch
+        // openings bundle are all built + flushed in chunks rather
+        // than materialized as one giant Vec<DbOp>. Three reasons:
         //
-        //   * cross-shard merkle anchors live coord-side only, in the
-        //     coord's in-memory `epoch_commits` cache (rehydrated on
-        //     restart from the durable `coord:epoch_commit:{epoch}`
-        //     keyspace). The coord stitches them into history bundles
-        //     at `lookup_history` / `lookup_label_history` time via
-        //     `ShardedEpochCommitment::merkle_path(shard_id)`.
+        //   1. Memory: a K=524k batch on medium previously held
+        //      ~15-23 GB of Vec<DbOp> transiently before writing,
+        //      pushing shard anon-rss past the VM's 64 GB ceiling
+        //      (run6 OOM). Streaming caps the transient at
+        //      `AEGON_PERSIST_CHUNK_SIZE` ops (~80 MB by default).
         //
-        //   * Empty `Vec<EpochDigest>` is written into the shard-stored
-        //     `StoredValueHistoryEntry.{prev,post}_merkle_path` and
-        //     `StoredLabelPlacement.placement_merkle_path` slots. The
-        //     coord overwrites the empty vecs on read.
+        //   2. Compaction headroom: RocksDB's L0 throttle fires on
+        //      file count (`level0_slowdown_writes_trigger = 40`).
+        //      One huge WriteBatch lands as one big L0 SST that
+        //      compaction has to drain wholesale; many smaller
+        //      chunks let compaction interleave between writes.
         //
-        // Everything else (per-label proofs, value bytes, slot bits)
-        // was just computed in-scope — no stash needed.
+        //   3. Atomicity isn't a property we maintain anyway: the
+        //      shard has no DB-side checkpoint (SHARD_CHECKPOINT_ENABLED
+        //      = false), so a shard crash mid-publish blows away
+        //      in-memory polynomial state and forces the coord to
+        //      re-drive from scratch — partial writes are orphaned
+        //      because their epoch number isn't in
+        //      `coord:epoch_commit:{epoch}` yet.
+        //
+        // Cross-shard merkle anchors live coord-side only (in
+        // `epoch_commits` / `coord:epoch_commit:{epoch}`); shards
+        // write empty `Vec<EpochDigest>` paths, coord stitches them
+        // in at lookup time via
+        // `ShardedEpochCommitment::merkle_path(shard_id)`.
         use super::db::{
             key_history_openings_local, key_label_placement, key_value, key_value_history, DbOp,
         };
@@ -2213,33 +2230,49 @@ where
         // `Aegon::publish` wrapper and tests using
         // `publish_phase_1_at_slots` directly) leave
         // `cached_placements` and `cached_updates` empty. In that
-        // case there's nothing to persist on the shard side —
-        // value/value_history/label_placement writes all require
-        // `cached_placements` to map slot_bits back to a label.
-        // Return empty ops; the caller (legacy `publish` discards
-        // them; tests don't care).
+        // case there's nothing to persist — value/value_history/
+        // label_placement writes all require `cached_placements` to
+        // map slot_bits back to a label. Skip the persist phase
+        // entirely; no chunks flushed.
         if cached_placements.is_empty() {
-            return Ok((post_shard_commit, Vec::new()));
+            return Ok(post_shard_commit);
         }
-        let mut ops: Vec<DbOp> = Vec::with_capacity(
-            cached_updates.len()
-                + value_change_entries.len() * 2
-                + new_label_entries.len()
-                + 1,
-        );
 
-        // 1. value:{label} — one Set per update.
+        // Chunk size for streaming. Tunable via env var; default
+        // 8192 ops gives ~80 MB per chunk at the dominant per-op
+        // size (StoredValueHistoryEntry ~10 KB) — small enough to
+        // keep transient memory bounded, large enough to amortize
+        // RocksDB WAL fsync overhead (~1ms / chunk → ~250ms over
+        // a K=524k batch at default chunk size).
+        let chunk_size = std::env::var("AEGON_PERSIST_CHUNK_SIZE")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .filter(|n| *n > 0)
+            .unwrap_or(8192);
+        let mut chunk: Vec<DbOp> = Vec::with_capacity(chunk_size);
+
+        // 1. value:{label} — one Set per update. Stream in chunks.
         for (label, value) in &cached_updates {
-            ops.push(DbOp::Set {
+            chunk.push(DbOp::Set {
                 key: key_value(label),
                 value: value.clone(),
             });
+            if chunk.len() >= chunk_size {
+                write_chunk(&chunk)?;
+                chunk.clear();
+            }
+        }
+        if !chunk.is_empty() {
+            write_chunk(&chunk)?;
+            chunk.clear();
         }
 
         // 2. openings:{epoch} — §6.4 history witnesses bundle. Only
         // written if at least one new placement landed on this shard;
-        // value-only batches skip this key. Matches the legacy
-        // coord-side filter on `!h.entries.is_empty()`.
+        // value-only batches skip this key. One big DbOp (size scales
+        // with new_label_entries.len()); ship in its own write_atomic
+        // call so it doesn't share a chunk's memory budget with the
+        // other sections.
         if !new_label_entries.is_empty() {
             let mut bytes = Vec::new();
             new_label_entries
@@ -2252,10 +2285,10 @@ where
                 .map_err(|e| {
                     AegonError::Database(format!("serialize history openings.value_changes: {e}"))
                 })?;
-            ops.push(DbOp::Set {
+            write_chunk(&[DbOp::Set {
                 key: key_history_openings_local(pending_epoch),
                 value: bytes,
-            });
+            }])?;
         }
 
         let mut slot_to_label: HashMap<Vec<bool>, &Label> =
@@ -2271,6 +2304,8 @@ where
 
         // 3. value_history:{label} — LPush + LTrim per value_change.
         // Merkle paths are written empty; coord injects on lookup.
+        // Two ops per value_change so we effectively halve the
+        // chunk threshold for this section.
         let empty_path: Vec<EpochDigest> = Vec::new();
         if let Some(prev_leaf) = prev_shard_commit.as_ref() {
             for vc in &value_change_entries {
@@ -2307,15 +2342,23 @@ where
                         AegonError::Database(format!("serialize value history entry: {e}"))
                     })?;
                 let history_key = key_value_history(label);
-                ops.push(DbOp::LPush {
+                chunk.push(DbOp::LPush {
                     key: history_key.clone(),
                     member: entry_bytes,
                 });
-                ops.push(DbOp::LTrim {
+                chunk.push(DbOp::LTrim {
                     key: history_key,
                     start: 0,
                     stop: (HISTORY_WINDOW as isize) - 1,
                 });
+                if chunk.len() >= chunk_size {
+                    write_chunk(&chunk)?;
+                    chunk.clear();
+                }
+            }
+            if !chunk.is_empty() {
+                write_chunk(&chunk)?;
+                chunk.clear();
             }
         }
 
@@ -2340,13 +2383,21 @@ where
             stored
                 .serialize_uncompressed(&mut bytes)
                 .map_err(|e| AegonError::Database(format!("serialize label placement: {e}")))?;
-            ops.push(DbOp::Set {
+            chunk.push(DbOp::Set {
                 key: key_label_placement(label),
                 value: bytes,
             });
+            if chunk.len() >= chunk_size {
+                write_chunk(&chunk)?;
+                chunk.clear();
+            }
+        }
+        if !chunk.is_empty() {
+            write_chunk(&chunk)?;
+            chunk.clear();
         }
 
-        Ok((post_shard_commit, ops))
+        Ok(post_shard_commit)
     }
 
     /// Find the first free slot for `label` via local-only open addressing.
