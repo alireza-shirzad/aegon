@@ -140,7 +140,7 @@ fn build_server() -> Sharded {
                 )
             })
             .collect();
-        server.publish(&preload).expect("preload publish");
+        server.publish_two_layer(&preload).expect("preload publish");
     }
     server
 }
@@ -159,7 +159,7 @@ fn publish_batch(bencher: divan::Bencher, batch_size: usize) {
     bencher
         .with_inputs(|| (build_server(), build_batch(batch_size)))
         .bench_local_values(|(mut server, batch)| {
-            server.publish(&batch).expect("publish")
+            server.publish_two_layer(&batch).expect("publish")
         });
 }
 

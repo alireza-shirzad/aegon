@@ -44,7 +44,7 @@ use super::error::AegonError;
 use super::hash::{bool_index_to_point, HashSuite, Sha256Hash};
 use super::server::Aegon;
 use super::types::{
-    AegonPcs, AuditState, EpochCommitment, HistoryOpeningEntry, HistoryOpenings, Label, RandPair,
+    AegonPcs, AuditState, EpochCommitment, Label, RandPair,
     Value, ValueChangeEntry,
 };
 
@@ -1890,21 +1890,17 @@ where
             })
             .collect();
 
-        // Phase 2 + finalize: unchanged.
+        // Phase 2 + persist (single RPC per shard).
         let (new_r_index, new_r_value) =
             self.derive_chain_scalars(&new_index_commits, &new_value_commits);
-        let (per_shard_commits, _per_shard_history) =
-            self.run_phase_2(new_r_index, new_r_value)?;
+        let per_shard_commits = self.run_phase_2(new_r_index, new_r_value)?;
         let sharded_commit =
             self.finalize_epoch(per_shard_commits, new_r_index, new_r_value);
 
-        // Stage-B refactor: the coord no longer enumerates per-shard
-        // placements or history here — every shard already stashed
-        // everything it needs in its `pending_finalize` during
-        // `publish_phase_2`, and will consume that stash inside
-        // `finalize_publish_persist`. `_per_shard_history` is
-        // intentionally empty post-refactor (publish_phase_2 returns
-        // an empty `HistoryOpenings`).
+        // Coord-side persist: just `coord:state` + `coord:epoch_commit:{epoch}`.
+        // The shard fan-out for dictionary content already happened
+        // inside `publish_phase_2_and_persist` — each shard wrote its
+        // own RocksDB before returning the new commitment.
         self.persist_publish_to_db(&sharded_commit)?;
 
         // Persist the (possibly updated) per-shard fullness map.
@@ -2029,13 +2025,21 @@ where
         &mut self,
         new_r_index: E::ScalarField,
         new_r_value: E::ScalarField,
-    ) -> Result<(Vec<EpochCommitment<E, P>>, Vec<HistoryOpenings<E, P>>), AegonError> {
-        let phase_2: Vec<(EpochCommitment<E, P>, HistoryOpenings<E, P>)> = self
-            .shards
+    ) -> Result<Vec<EpochCommitment<E, P>>, AegonError> {
+        // Combined phase-2 + persist. Each shard runs phase-2 crypto
+        // locally and writes its dictionary-content DbOps (with empty
+        // merkle paths — coord stitches them at lookup time) to its
+        // own RocksDB in a single RPC. We collect the new per-shard
+        // EpochCommitments and build the cross-shard merkle tree
+        // upstream in `finalize_epoch`.
+        let shard_ids: Vec<u32> = (0..self.shards.len() as u32).collect();
+        self.shards
             .par_iter_mut()
-            .map(|shard| shard.publish_phase_2(new_r_index, new_r_value))
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(phase_2.into_iter().unzip())
+            .zip(shard_ids.into_par_iter())
+            .map(|(shard, shard_id)| {
+                shard.publish_phase_2_and_persist(new_r_index, new_r_value, shard_id)
+            })
+            .collect::<Result<Vec<_>, _>>()
     }
 
     /// Coordinator-side bookkeeping: advance `(r_index, r_value,
@@ -2095,14 +2099,14 @@ where
         let prof = super::instrument::publish_profile_enabled();
         let _persist_t_total = std::time::Instant::now();
 
-        // Stage-B refactor: coord ships ONLY the cross-shard merkle
-        // anchors it alone knows. Every per-label DB op (value,
-        // value_history, label_placement, openings) is built and
-        // written by the owning shard from its post-phase-2
-        // `pending_finalize` stash. The coord's own DB still holds
-        // exactly two keys: `coord:state` (epoch + FS scalars) and
-        // `coord:epoch_commit:{epoch}` (the global sharded root).
-        let n_shards = self.shards.len();
+        // Post-collapse: every per-label DB op (value, value_history,
+        // label_placement, openings) was built + written by the
+        // owning shard inside `publish_phase_2_and_persist`. The
+        // coord's own DB writes exactly two keys here:
+        //   * `coord:state` (epoch + FS scalars)
+        //   * `coord:epoch_commit:{epoch}` (the global sharded
+        //      commitment, including the cached merkle paths the
+        //      lookup-history join needs).
         let mut coord_ops: Vec<DbOp> = Vec::with_capacity(2);
 
         // 1. coord:state — one key, contains (epoch, r_index, r_value).
@@ -2160,90 +2164,7 @@ where
             );
         }
 
-        // 4. Per-shard finalize. Encode this shard's slot in the
-        // cross-shard merkle tree (prev + post) and ship via
-        // FinalizePublishPersist. Tens-of-bytes payload per shard;
-        // each shard builds its own value/value_history/label_placement/
-        // openings ops locally from `pending_finalize`. Parallel
-        // dispatch — the wall-clock is bounded by the slowest shard's
-        // DB write, not the sum.
-        let _step4_t = std::time::Instant::now();
-        let prev_sharded: Option<ShardedEpochCommitment<E, P>> = if sharded_commit.epoch == 0 {
-            None
-        } else {
-            self.epoch_commits
-                .get((sharded_commit.epoch - 1) as usize)
-                .cloned()
-        };
-
-        // Pre-encode the post-side bytes per shard (small) on a single
-        // pass; the prev-side too. Parallel across shards from there.
-        let encoded: Vec<(Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>)> = (0..n_shards)
-            .map(|shard_id| -> Result<(Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>), AegonError> {
-                let (prev_commit_bytes, prev_path_bytes) = match &prev_sharded {
-                    Some(prev) => {
-                        let prev_leaf = &prev.per_shard[shard_id];
-                        let prev_path = prev.merkle_path(shard_id).to_vec();
-                        let mut cb = Vec::new();
-                        prev_leaf.serialize_uncompressed(&mut cb).map_err(|e| {
-                            AegonError::Database(format!("serialize prev shard commit: {e}"))
-                        })?;
-                        let mut pb = Vec::new();
-                        prev_path.serialize_uncompressed(&mut pb).map_err(|e| {
-                            AegonError::Database(format!("serialize prev merkle path: {e}"))
-                        })?;
-                        (cb, pb)
-                    }
-                    None => (Vec::new(), Vec::new()),
-                };
-                let post_leaf = &sharded_commit.per_shard[shard_id];
-                let post_path = sharded_commit.merkle_path(shard_id).to_vec();
-                let mut post_commit_bytes = Vec::new();
-                post_leaf
-                    .serialize_uncompressed(&mut post_commit_bytes)
-                    .map_err(|e| {
-                        AegonError::Database(format!("serialize post shard commit: {e}"))
-                    })?;
-                let mut post_path_bytes = Vec::new();
-                post_path
-                    .serialize_uncompressed(&mut post_path_bytes)
-                    .map_err(|e| {
-                        AegonError::Database(format!("serialize post merkle path: {e}"))
-                    })?;
-                Ok((prev_commit_bytes, prev_path_bytes, post_commit_bytes, post_path_bytes))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-
-        // Parallel dispatch via rayon — the slow part inside the shard
-        // is the local RocksDB write (~100 ms at K=16K under stalls);
-        // serializing per-shard payloads in parallel keeps the coord
-        // off the critical path.
-        encoded
-            .par_iter()
-            .enumerate()
-            .try_for_each(|(shard_id, (prev_c, prev_p, post_c, post_p))| -> Result<(), AegonError> {
-                self.shards[shard_id]
-                    .finalize_publish_persist(
-                        sharded_commit.epoch,
-                        shard_id as u32,
-                        prev_c,
-                        prev_p,
-                        post_c,
-                        post_p,
-                    )
-                    .map_err(|e| {
-                        AegonError::Database(format!(
-                            "shard {shard_id} finalize_publish_persist failed: {e}"
-                        ))
-                    })
-            })?;
-
         if prof {
-            eprintln!(
-                "[pub-profile] persist.step4_finalize_persist_dispatch: {:.3} ms (n_shards={})",
-                _step4_t.elapsed().as_secs_f64() * 1000.0,
-                n_shards,
-            );
             eprintln!(
                 "[pub-profile] PERSIST_TOTAL: {:.3} ms",
                 _persist_t_total.elapsed().as_secs_f64() * 1000.0,
@@ -2351,7 +2272,7 @@ where
         let entries: Vec<StoredValueHistoryEntry<E, P>> = raw_entries
             .par_iter()
             .map(|bytes| -> Result<StoredValueHistoryEntry<E, P>, AegonError> {
-                let entry =
+                let mut entry =
                     StoredValueHistoryEntry::<E, P>::deserialize_uncompressed_unchecked(&bytes[..])
                         .map_err(|e| {
                             AegonError::Database(format!("decode value history entry: {e}"))
@@ -2363,6 +2284,24 @@ where
                          (have {} shards)",
                         self.shards.len()
                     )));
+                }
+                // Shard writes stored entries with empty merkle paths
+                // (the shard has no access to cross-shard commits);
+                // coord stitches them in here from its in-memory
+                // `epoch_commits` cache (rebuilt from
+                // `coord:epoch_commit:{epoch}` on restart). For
+                // genesis entries (entry.epoch == 0 / no prev epoch)
+                // the prev_merkle_path stays empty — matches the
+                // legacy "no prior commit to anchor against" guard.
+                entry.post_merkle_path =
+                    self.epoch_commits[entry.epoch as usize]
+                        .merkle_path(shard_id as usize)
+                        .to_vec();
+                if entry.epoch > 0 {
+                    entry.prev_merkle_path =
+                        self.epoch_commits[(entry.epoch - 1) as usize]
+                            .merkle_path(shard_id as usize)
+                            .to_vec();
                 }
                 self.shards[shard_id as usize].remask_value_history_entry(entry)
             })
@@ -2460,7 +2399,7 @@ where
         // `persist_publish_to_db`. See the parallel comment on
         // `lookup_history`'s decode loop for the `_unchecked`
         // rationale.
-        let placement =
+        let mut placement =
             StoredLabelPlacement::<E, P>::deserialize_uncompressed_unchecked(&bytes[..]).map_err(
                 |e| AegonError::Database(format!("decode label placement: {e}")),
             )?;
@@ -2472,6 +2411,13 @@ where
                 self.shards.len()
             )));
         }
+        // Shard wrote the placement record with an empty merkle path
+        // (no cross-shard awareness). Inject the path from coord-side
+        // `epoch_commits` cache before returning.
+        placement.placement_merkle_path = self
+            .epoch_commits[placement.epoch as usize]
+            .merkle_path(shard_id as usize)
+            .to_vec();
         // Live opening — the single piece of non-DB work this RPC
         // does. One shard gRPC + one PCS open of rand_index_poly.
         let current = self.current_commitment();

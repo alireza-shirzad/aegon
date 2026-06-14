@@ -15,10 +15,20 @@ service ShardService {
   rpc PublishPhase1AtSlots(PublishPhase1Request)
       returns (PublishPhase1Response);
 
-  // Phase 2: apply the shared FS scalars from the coordinator,
-  // recommit rand polynomials, finalize the epoch. Returns the
-  // shard's new EpochCommitment + §6.4 HistoryOpenings.
-  rpc PublishPhase2(PublishPhase2Request) returns (PublishPhase2Response);
+  // Phase 2 + persist (collapsed): apply the shared FS scalars from
+  // the coordinator, recommit rand polynomials, build the per-shard
+  // history/value-change openings, write the dictionary-content
+  // DbOps to this shard's local RocksDB, and return the new
+  // EpochCommitment in a single RPC. Replaces the legacy 3-step
+  // (PublishPhase2 → coord builds cross-shard merkle → FinalizePublishPersist)
+  // flow: cross-shard merkle anchors now live on the coord (in its
+  // in-memory ShardedEpochCommitment cache + the durable
+  // `coord:epoch_commit:{epoch}` keyspace), so the shard never needs
+  // them — empty merkle paths are written into StoredValueHistoryEntry
+  // / StoredLabelPlacement on the shard side, and the coord stitches
+  // them in at lookup time via `merkle_path(shard_id)`.
+  rpc PublishPhase2AndPersist(PublishPhase2AndPersistRequest)
+      returns (PublishPhase2AndPersistResponse);
 
   // Open-addressing helper: is the given slot already occupied in
   // the current index polynomial?
@@ -134,20 +144,6 @@ service ShardService {
   rpc FetchHistoryOpenings(FetchHistoryOpeningsRequest)
       returns (FetchHistoryOpeningsResponse);
 
-  // Stage-B finalize entry point: instead of the coord pre-building
-  // every dictionary-content DbOp and shipping the full ~200 MB blob
-  // via ApplyPersistenceOps, the coord ships ONLY the cross-shard
-  // merkle anchors it alone knows (this shard's prev/post commit and
-  // its slot's path through the per-epoch cross-shard merkle tree).
-  // The shard then consumes its post-phase-2 `pending_finalize` stash
-  // — built locally in `publish_phase_2` from the per-label proofs the
-  // shard already computed — to produce the value/value_history/
-  // label_placement/openings ops, and writes them atomically.
-  //
-  // Wire savings at K=16384, n_shards=2 (medium cluster): ~200 MB →
-  // tens of bytes per shard per publish.
-  rpc FinalizePublishPersist(FinalizePublishPersistRequest)
-      returns (FinalizePublishPersistResponse);
 }
 
 message ReconfigurePrefillRequest {
@@ -242,19 +238,23 @@ message FindLabelSlotResponse {
   uint64 slot_ctr = 3;
 }
 
-message PublishPhase2Request {
-  // Canonical-serialized scalar field elements.
+message PublishPhase2AndPersistRequest {
+  // Canonical-serialized scalar field elements — the cross-shard FS
+  // chain scalars derived by the coord from all shards' phase-1
+  // commits.
   bytes r_index = 1;
   bytes r_value = 2;
+  // Shard id (used by the shard to stamp `StoredValueHistoryEntry.shard_id`
+  // / `StoredLabelPlacement.shard_id`; the shard process itself
+  // doesn't track its own id, the coord does).
+  uint32 shard_id = 3;
 }
 
-message PublishPhase2Response {
-  // Canonical-serialized EpochCommitment<E, P>.
+message PublishPhase2AndPersistResponse {
+  // Canonical-serialized EpochCommitment<E, P> for the new epoch.
+  // The coord collects these across shards to build the cross-shard
+  // merkle root and finalize `coord:epoch_commit:{epoch}`.
   bytes epoch_commitment = 1;
-  // Canonical-serialized HistoryOpenings<E, P> — §6.4 history witnesses
-  // covering every brand-new label this shard placed in the batch.
-  // Empty when the shard's batch was value-updates only.
-  bytes history_openings = 3;
 }
 
 message SlotRequest {
@@ -348,29 +348,3 @@ message FetchHistoryOpeningsResponse {
   bytes openings_bytes = 2;
 }
 
-message FinalizePublishPersistRequest {
-  // Sanity-check epoch — must match the `pending_finalize.epoch` on
-  // the shard. Mismatch is a protocol error (the shard rejects
-  // without modifying its DB).
-  uint64 epoch = 1;
-  // Shard id, copied into the stored entries' `shard_id` field so
-  // verifiers can identify the owning shard. The shard process
-  // itself doesn't track its own id — the coord knows it from its
-  // routing table.
-  uint32 shard_id = 2;
-  // Canonical-serialized `EpochCommitment<E, P>` at epoch (epoch-1).
-  // Empty bytes when `epoch == 0` (no prior commit to anchor against;
-  // value_history writes are skipped on the genesis publish).
-  bytes prev_shard_commit = 3;
-  // Canonical-serialized `Vec<EpochDigest>` — this shard's path from
-  // leaf to root in the cross-shard merkle tree at epoch (epoch-1).
-  // Empty when `prev_shard_commit` is empty.
-  bytes prev_merkle_path = 4;
-  // Canonical-serialized `EpochCommitment<E, P>` at this epoch.
-  bytes post_shard_commit = 5;
-  // Canonical-serialized `Vec<EpochDigest>` — this shard's path
-  // through the post-publish cross-shard merkle tree.
-  bytes post_merkle_path = 6;
-}
-
-message FinalizePublishPersistResponse {}

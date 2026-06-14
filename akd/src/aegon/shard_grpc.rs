@@ -40,7 +40,7 @@ use super::db::{
 };
 use super::server::AegonCheckpoint;
 use super::sharded::ShardWrite;
-use super::types::{AegonPcs, EpochCommitment, HistoryOpenings, Label, Value};
+use super::types::{AegonPcs, EpochCommitment, Label, Value};
 
 // Generated tonic code lives in this module. `tonic-build` emits one
 // rust module per proto package; ours is `aegon.shard.v1`.
@@ -54,11 +54,11 @@ use proto::{
     ApplyPersistenceOpsRequest, ApplyPersistenceOpsResponse, CommitmentResponse, Empty,
     FetchHistoryOpeningsRequest, FetchHistoryOpeningsResponse, FetchLabelPlacementRequest,
     FetchLabelPlacementResponse, FetchValueHistoryRequest, FetchValueHistoryResponse,
-    FetchValueRequest, FetchValueResponse, FinalizePublishPersistRequest,
-    FinalizePublishPersistResponse, FindLabelSlotRequest, FindLabelSlotResponse, OpenResponse,
-    PublishBatchRequest, PublishBatchResponse, PublishPhase1Request, PublishPhase1Response,
-    PublishPhase2Request, PublishPhase2Response, ReconfigurePrefillRequest,
-    ReconfigurePrefillResponse, SlotEpochRequest, SlotOccupiedResponse, SlotRequest,
+    FetchValueRequest, FetchValueResponse, FindLabelSlotRequest, FindLabelSlotResponse,
+    OpenResponse, PublishBatchRequest, PublishBatchResponse, PublishPhase1Request,
+    PublishPhase1Response, PublishPhase2AndPersistRequest, PublishPhase2AndPersistResponse,
+    ReconfigurePrefillRequest, ReconfigurePrefillResponse, SlotEpochRequest,
+    SlotOccupiedResponse, SlotRequest,
 };
 
 // ---------- wire encoding helpers --------------------------------------
@@ -110,11 +110,22 @@ where
         batch: &[ShardWrite<E::ScalarField>],
     ) -> Result<(P::Commitment, P::Commitment), AegonError>;
 
-    fn publish_phase_2(
+    /// Combined Phase-2 + persist: apply the cross-shard FS scalars,
+    /// build the per-shard `StoredValueHistoryEntry` /
+    /// `StoredLabelPlacement` DbOps locally (with empty merkle paths —
+    /// the coord stitches them in at lookup time), write them
+    /// atomically to the shard's local DB, and return the new
+    /// `EpochCommitment`. Replaces the legacy 3-step (PublishPhase2 +
+    /// FinalizePublishPersist) flow with one RPC.
+    ///
+    /// `shard_id` is passed in: the shard process itself doesn't
+    /// track its own id — the coord knows it from the routing table.
+    fn publish_phase_2_and_persist(
         &mut self,
         new_r_index: E::ScalarField,
         new_r_value: E::ScalarField,
-    ) -> Result<(EpochCommitment<E, P>, HistoryOpenings<E, P>), AegonError>;
+        shard_id: u32,
+    ) -> Result<EpochCommitment<E, P>, AegonError>;
 
     fn is_index_slot_occupied(&self, slot_bits: &[bool]) -> bool;
 
@@ -312,35 +323,6 @@ where
         Ok(None)
     }
 
-    /// Stage-B finalize: ship only the cross-shard merkle anchors and
-    /// let the shard consume its `pending_finalize` stash to build +
-    /// write the dictionary-content ops locally. Replaces
-    /// `apply_persistence_ops` for everything except `coord:*` keys.
-    ///
-    /// Inputs are all `Vec<u8>` so the in-process and remote impls
-    /// share a single ShardHandle signature; payload encodings are:
-    ///   * `prev_shard_commit_bytes` / `post_shard_commit_bytes`:
-    ///     canonical-serialized `EpochCommitment<E, P>`. Empty
-    ///     `prev_shard_commit_bytes` => no prior commit (epoch 0).
-    ///   * `prev_merkle_path_bytes` / `post_merkle_path_bytes`:
-    ///     canonical-serialized `Vec<EpochDigest>`. Empty when the
-    ///     corresponding commit is empty.
-    ///
-    /// Default impl is a no-op (mirrors `apply_persistence_ops`'s
-    /// default) so the in-process `Aegon`-backed shard with no DB
-    /// keeps working — `pending_finalize` is then never consumed.
-    #[allow(clippy::too_many_arguments)]
-    fn finalize_publish_persist(
-        &self,
-        _epoch: u64,
-        _shard_id: u32,
-        _prev_shard_commit_bytes: &[u8],
-        _prev_merkle_path_bytes: &[u8],
-        _post_shard_commit_bytes: &[u8],
-        _post_merkle_path_bytes: &[u8],
-    ) -> Result<(), AegonError> {
-        Ok(())
-    }
 }
 
 // ---------- in-process impl: Aegon directly is a ShardHandle -----------
@@ -371,12 +353,20 @@ where
         Aegon::publish_phase_1_at_slots(self, batch)
     }
 
-    fn publish_phase_2(
+    fn publish_phase_2_and_persist(
         &mut self,
         new_r_index: E::ScalarField,
         new_r_value: E::ScalarField,
-    ) -> Result<(EpochCommitment<E, P>, HistoryOpenings<E, P>), AegonError> {
-        Aegon::publish_phase_2(self, new_r_index, new_r_value)
+        shard_id: u32,
+    ) -> Result<EpochCommitment<E, P>, AegonError> {
+        // In-process path: the Aegon-as-shard impl has no per-shard
+        // RocksDB attached (DB lives on the gRPC ShardServiceImpl,
+        // not on the Aegon itself). We drop the DbOps — the
+        // in-process bench / test path uses DbSource::None and the
+        // coord holds nothing else to persist for the shard side.
+        let (commit, _ops) =
+            Aegon::publish_phase_2_and_persist(self, new_r_index, new_r_value, shard_id)?;
+        Ok(commit)
     }
 
     fn is_index_slot_occupied(&self, slot_bits: &[bool]) -> bool {
@@ -751,7 +741,6 @@ where
     P::Evaluation: Send + Sync + 'static,
     H: HashSuite<E::ScalarField> + Send + Sync + 'static,
     EpochCommitment<E, P>: CanonicalSerialize + CanonicalDeserialize + Send + Sync + 'static,
-    HistoryOpenings<E, P>: CanonicalSerialize + Send + Sync + 'static,
     AegonCheckpoint<E, P>: CanonicalSerialize + Send + Sync + 'static,
 {
     async fn publish_phase1_at_slots(
@@ -770,16 +759,23 @@ where
         }))
     }
 
-    async fn publish_phase2(
+    async fn publish_phase2_and_persist(
         &self,
-        req: Request<PublishPhase2Request>,
-    ) -> Result<Response<PublishPhase2Response>, Status> {
+        req: Request<PublishPhase2AndPersistRequest>,
+    ) -> Result<Response<PublishPhase2AndPersistResponse>, Status> {
         let r = req.into_inner();
         let r_index: E::ScalarField = decode(&r.r_index).map_err(err_to_status)?;
         let r_value: E::ScalarField = decode(&r.r_value).map_err(err_to_status)?;
+        let shard_id = r.shard_id;
         let mut aegon = self.aegon.write().await;
-        let (commit, history) = aegon
-            .publish_phase_2(r_index, r_value)
+        // Combined phase-2 + DbOps build, all in-process. The
+        // resulting `Vec<DbOp>` is the dictionary-content writes
+        // (value:, value_history:, label_placement:, openings:) for
+        // every label this shard touched in the batch, with empty
+        // merkle paths in stored entries (coord stitches them at
+        // lookup time).
+        let (commit, ops) = aegon
+            .publish_phase_2_and_persist(r_index, r_value, shard_id)
             .map_err(err_to_status)?;
 
         // TODO(shard-checkpoint-fault-tolerance): per-publish
@@ -813,9 +809,16 @@ where
         }
         drop(aegon);
 
-        Ok(Response::new(PublishPhase2Response {
+        // Write the dictionary-content DbOps to the shard's local
+        // RocksDB. Skipped when no DB is configured (in-process
+        // testing). Single atomic batch — RocksDB serializes the
+        // group as one WAL record + one memtable apply.
+        if let Some(db) = &self.db {
+            db.write_atomic(&ops).map_err(err_to_status)?;
+        }
+
+        Ok(Response::new(PublishPhase2AndPersistResponse {
             epoch_commitment: encode(&commit).map_err(err_to_status)?,
-            history_openings: encode(&history).map_err(err_to_status)?,
         }))
     }
 
@@ -1130,62 +1133,6 @@ where
         }))
     }
 
-    async fn finalize_publish_persist(
-        &self,
-        req: Request<FinalizePublishPersistRequest>,
-    ) -> Result<Response<FinalizePublishPersistResponse>, Status> {
-        let FinalizePublishPersistRequest {
-            epoch,
-            shard_id,
-            prev_shard_commit,
-            prev_merkle_path,
-            post_shard_commit,
-            post_merkle_path,
-        } = req.into_inner();
-
-        // Decode cross-shard merkle anchors. Empty prev_shard_commit
-        // means "no prior epoch" (genesis publish — epoch == 0); the
-        // shard skips value_history writes in that case.
-        let prev_commit_opt: Option<EpochCommitment<E, P>> = if prev_shard_commit.is_empty() {
-            None
-        } else {
-            Some(decode(&prev_shard_commit).map_err(err_to_status)?)
-        };
-        let prev_path: Vec<super::sharded::EpochDigest> = if prev_merkle_path.is_empty() {
-            Vec::new()
-        } else {
-            decode(&prev_merkle_path).map_err(err_to_status)?
-        };
-        let post_commit: EpochCommitment<E, P> =
-            decode(&post_shard_commit).map_err(err_to_status)?;
-        let post_path: Vec<super::sharded::EpochDigest> =
-            decode(&post_merkle_path).map_err(err_to_status)?;
-
-        let db = self.db.as_ref().ok_or_else(|| {
-            Status::failed_precondition(
-                "shard has no DB configured for FinalizePublishPersist — start aegon_shard_server with --db-path",
-            )
-        })?;
-
-        // Build the ops locally from the shard's pending_finalize stash
-        // and write them atomically. `build_finalize_ops` consumes
-        // `pending_finalize` (errors if absent or epoch mismatch).
-        let mut aegon = self.aegon.write().await;
-        let ops = aegon
-            .build_finalize_ops(
-                shard_id,
-                epoch,
-                prev_commit_opt,
-                prev_path,
-                post_commit,
-                post_path,
-            )
-            .map_err(err_to_status)?;
-        drop(aegon);
-
-        db.write_atomic(&ops).map_err(err_to_status)?;
-        Ok(Response::new(FinalizePublishPersistResponse {}))
-    }
 }
 
 // ---------- gRPC client: implements ShardHandle ------------------------
@@ -1468,7 +1415,6 @@ where
     P::Evaluation: Send + Sync,
     H: HashSuite<E::ScalarField> + Send + Sync,
     EpochCommitment<E, P>: CanonicalDeserialize + Send + Sync,
-    HistoryOpenings<E, P>: CanonicalDeserialize + Send + Sync,
 {
     fn publish_phase_1_at_slots(
         &mut self,
@@ -1491,27 +1437,28 @@ where
         Ok((idx, val))
     }
 
-    fn publish_phase_2(
+    fn publish_phase_2_and_persist(
         &mut self,
         new_r_index: E::ScalarField,
         new_r_value: E::ScalarField,
-    ) -> Result<(EpochCommitment<E, P>, HistoryOpenings<E, P>), AegonError> {
-        let req = PublishPhase2Request {
+        shard_id: u32,
+    ) -> Result<EpochCommitment<E, P>, AegonError> {
+        let req = PublishPhase2AndPersistRequest {
             r_index: encode(&new_r_index)?,
             r_value: encode(&new_r_value)?,
+            shard_id,
         };
         let resp = self.runtime.block_on(async {
             self.client
                 .lock()
                 .await
-                .publish_phase2(req)
+                .publish_phase2_and_persist(req)
                 .await
                 .map_err(status_to_err)
         })?;
         let inner = resp.into_inner();
         let commit: EpochCommitment<E, P> = decode(&inner.epoch_commitment)?;
-        let history: HistoryOpenings<E, P> = decode(&inner.history_openings)?;
-        Ok((commit, history))
+        Ok(commit)
     }
 
     fn is_index_slot_occupied(&self, slot_bits: &[bool]) -> bool {
@@ -1868,33 +1815,6 @@ where
         })
     }
 
-    fn finalize_publish_persist(
-        &self,
-        epoch: u64,
-        shard_id: u32,
-        prev_shard_commit_bytes: &[u8],
-        prev_merkle_path_bytes: &[u8],
-        post_shard_commit_bytes: &[u8],
-        post_merkle_path_bytes: &[u8],
-    ) -> Result<(), AegonError> {
-        let req = FinalizePublishPersistRequest {
-            epoch,
-            shard_id,
-            prev_shard_commit: prev_shard_commit_bytes.to_vec(),
-            prev_merkle_path: prev_merkle_path_bytes.to_vec(),
-            post_shard_commit: post_shard_commit_bytes.to_vec(),
-            post_merkle_path: post_merkle_path_bytes.to_vec(),
-        };
-        let _resp = self.runtime.block_on(async {
-            self.client
-                .lock()
-                .await
-                .finalize_publish_persist(req)
-                .await
-                .map_err(status_to_err)
-        })?;
-        Ok(())
-    }
 }
 
 // Unused but useful to anchor the type aliases at module-scope.
