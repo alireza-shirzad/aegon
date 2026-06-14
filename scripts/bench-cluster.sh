@@ -1125,22 +1125,32 @@ cmd_start_coord() {
   local shard_csv; shard_csv="$(shard_endpoints_csv)"
   log "[$cname] starting aegon_coordinator_server :$COORD_PORT (connects to $N_SHARDS shards via gRPC)"
 
-  # Two short SSH calls — same fire-and-forget pattern as start_shard.
+  # Use the same `setsid nohup` + `remote ... fire-and-forget` pattern
+  # the masking server uses (see start_one_masking). `setsid` detaches
+  # the spawned process from any controlling terminal/SSH session, so
+  # the IAP-tunnel SSH session can close cleanly. `fire-and-forget`
+  # kills the gcloud client after a 120s grace window — IAP teardown
+  # otherwise hangs for minutes even after the remote shell exits,
+  # which made the earlier `timeout 300 gcloud ssh` recipe trip
+  # rc=124 deterministically here even though the coord process
+  # itself had already bound the port.
   local privacy_flag=""
   if [[ "${SHARD_PRIVATE:-1}" == "1" ]]; then
     privacy_flag="--private"
   fi
-  local spawn_cmd="if [ -f /tmp/aegon-coord.pid ]; then \
-      kill \$(cat /tmp/aegon-coord.pid) 2>/dev/null || true; \
-    fi; \
-    pkill -x aegon_coordinat 2>/dev/null || true; \
-    sleep 2; \
+  remote "$cname" "
+    if [ -f /tmp/aegon-coord.pid ]; then
+      kill \$(cat /tmp/aegon-coord.pid) 2>/dev/null || true
+      sleep 1
+    fi
+    pkill -x aegon_coordinat 2>/dev/null || true
+    sleep 1
     mkdir -p \$HOME/aegon-run && \
     cd \$HOME/aegon-run && \
     AEGON_ROCKSDB_STATS_DUMP_SEC=${AEGON_ROCKSDB_STATS_DUMP_SEC:-60} \
     AEGON_ROCKSDB_BLOCK_CACHE_GB=${AEGON_ROCKSDB_BLOCK_CACHE_GB:-8} \
     AEGON_ROCKSDB_PARALLELISM=${AEGON_ROCKSDB_PARALLELISM:-16} \
-    nohup $REMOTE_BIN_DIR/aegon_coordinator_server \
+    setsid nohup $REMOTE_BIN_DIR/aegon_coordinator_server \
       --listen 0.0.0.0:$COORD_PORT \
       --shard-log-capacity $SHARD_LOG_CAPACITY \
       --kzh-k $KZH_K \
@@ -1148,22 +1158,11 @@ cmd_start_coord() {
       --setup-seed $SETUP_SEED \
       $privacy_flag \
       --db-path $COORD_DB_PATH \
-      > /tmp/aegon-coord.log 2>&1 < /dev/null & \
-    echo \$! > /tmp/aegon-coord.pid; \
-    disown 2>/dev/null || true; \
-    echo SPAWNED"
-  local spawn_out spawn_rc=0
-  spawn_out="$(timeout 300 gcloud compute ssh "$cname" --zone="$ZONE" \
-    --tunnel-through-iap --quiet \
-    --ssh-flag="-o UserKnownHostsFile=/dev/null" \
-    --ssh-flag="-o StrictHostKeyChecking=no" \
-    --ssh-flag="-o LogLevel=ERROR" \
-    --command="$spawn_cmd" 2>&1)" \
-    || spawn_rc=$?
-  if (( spawn_rc != 0 )) || [[ "$spawn_out" != *"SPAWNED"* ]]; then
-    log "[$cname] coord spawn failed (rc=$spawn_rc): $spawn_out"
-    die "could not spawn coord on $cname"
-  fi
+      > /tmp/aegon-coord.log 2>&1 < /dev/null &
+    echo \$! > /tmp/aegon-coord.pid
+    disown 2>/dev/null || true
+    echo SPAWNED
+  " fire-and-forget
 
   # Wait for the coord to bind COORD_PORT. The setup phase (SRS gen +
   # one CurrentCommitment RPC per shard) can take ~3-5 min on medium;
