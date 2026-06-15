@@ -99,6 +99,18 @@ COORD_MACHINE_TYPE="${COORD_MACHINE_TYPE:-$SHARD_MACHINE_TYPE}"
 # extra capacity is wasted but cheap relative to a re-run.
 COORD_BOOT_DISK_SIZE="${COORD_BOOT_DISK_SIZE:-12TB}"
 COORD_BOOT_DISK_TYPE="${COORD_BOOT_DISK_TYPE:-pd-ssd}"
+# Per-shard boot disk. Doubles as the RocksDB volume at $SHARD_DB_PATH
+# (post-Stage-A, each shard owns its slice of the AKD history). At
+# ~5 KB/label observed on disk (value bytes + StoredValueHistoryEntry +
+# StoredLabelPlacement + RocksDB write amplification), medium fill=90%
+# with N_SHARDS=2 means ~150 GB of data per shard; we provision 1 TB
+# of pd-ssd to cover that plus L0/L1 compaction headroom and the
+# ~40 GB baseline (OS + SRS file ~8.6 GiB + binaries). The earlier
+# hard-coded 100 GB was the disk-full bottleneck at fill=30%-ish
+# (~84 GB observed at 9 M entries written) before this run made it
+# configurable.
+SHARD_BOOT_DISK_SIZE="${SHARD_BOOT_DISK_SIZE:-1TB}"
+SHARD_BOOT_DISK_TYPE="${SHARD_BOOT_DISK_TYPE:-pd-ssd}"
 # bench-client RocksDB lives on its own disk; the bench's in-process
 # coord state climbs through fill levels via real publish, so this is
 # the disk that actually fills up during lookup-bench. Sized larger
@@ -481,7 +493,7 @@ cmd_up() {
       log "$name exists, skipping"
       continue
     fi
-    log "creating $name ($SHARD_MACHINE_TYPE)"
+    log "creating $name ($SHARD_MACHINE_TYPE, boot=${SHARD_BOOT_DISK_SIZE} ${SHARD_BOOT_DISK_TYPE})"
     gcloud compute instances create "$name" \
       --zone="$ZONE" \
       --machine-type="$SHARD_MACHINE_TYPE" \
@@ -490,7 +502,8 @@ cmd_up() {
       --tags="$SHARD_TAG,$SCANNER_TAGS" \
       --labels="$SCANNER_LABELS" \
       --image-family="ubuntu-2604-lts-amd64" --image-project="ubuntu-os-cloud" \
-      --boot-disk-size=100GB >/dev/null
+      --boot-disk-size="$SHARD_BOOT_DISK_SIZE" \
+      --boot-disk-type="$SHARD_BOOT_DISK_TYPE" >/dev/null
   done
 
   # ---- coordinator ----
@@ -1486,6 +1499,7 @@ dump_bench_config() {
   log "  COORD_DB_PATH          = $COORD_DB_PATH (RocksDB on coordinator)"
   log "  COORD_BOOT_DISK        = $COORD_BOOT_DISK_SIZE $COORD_BOOT_DISK_TYPE"
   log "  SHARDS                 = $SHARD_MACHINE_TYPE (--no-retain-epoch-polys set)"
+  log "  SHARD_BOOT_DISK        = $SHARD_BOOT_DISK_SIZE $SHARD_BOOT_DISK_TYPE"
   if [[ "$PUBLISH_TRUE_LOG_CAP" != "$derived" ]]; then
     log "  NOTE: PUBLISH_TRUE_LOG_CAP overridden — derived value would be $derived"
   fi
