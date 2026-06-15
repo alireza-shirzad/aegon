@@ -670,7 +670,7 @@ start_shard() {
     sudo rm -rf $SHARD_DB_PATH && sudo mkdir -p $SHARD_DB_PATH && sudo chown \$(whoami) $SHARD_DB_PATH; \
     mkdir -p \$HOME/aegon-run && \
     cd \$HOME/aegon-run && \
-    ulimit -n 1048576 && \
+    ulimit -n 524288 && \
     AEGON_ROCKSDB_STATS_DUMP_SEC=${AEGON_ROCKSDB_STATS_DUMP_SEC:-60} \
     AEGON_ROCKSDB_BLOCK_CACHE_GB=${AEGON_ROCKSDB_BLOCK_CACHE_GB:-8} \
     AEGON_ROCKSDB_PARALLELISM=${AEGON_ROCKSDB_PARALLELISM:-16} \
@@ -1169,7 +1169,7 @@ cmd_start_coord() {
     sleep 1
     mkdir -p \$HOME/aegon-run && \
     cd \$HOME/aegon-run && \
-    ulimit -n 1048576 && \
+    ulimit -n 524288 && \
     AEGON_ROCKSDB_STATS_DUMP_SEC=${AEGON_ROCKSDB_STATS_DUMP_SEC:-60} \
     AEGON_ROCKSDB_BLOCK_CACHE_GB=${AEGON_ROCKSDB_BLOCK_CACHE_GB:-8} \
     AEGON_ROCKSDB_PARALLELISM=${AEGON_ROCKSDB_PARALLELISM:-16} \
