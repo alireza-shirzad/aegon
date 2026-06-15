@@ -33,8 +33,8 @@
 #   SAMPLES_PER_BATCH   timed publishes per batch     (1)
 #   SETUP_SEED          deterministic SRS gen seed    (42)
 #   PREFILL_SEED        deterministic prefill seed    (1)
-#   SHARD_MACHINE_TYPE  GCE machine type for shards   (n2-standard-16 — 64 GB RAM)
-#   COORD_MACHINE_TYPE  GCE machine type coordinator  (defaults to SHARD_MACHINE_TYPE = n2-standard-16)
+#   SHARD_MACHINE_TYPE  GCE machine type for shards   (n2-highmem-16 — 128 GB RAM)
+#   COORD_MACHINE_TYPE  GCE machine type coordinator  (defaults to SHARD_MACHINE_TYPE)
 #
 # At the defaults above (N_SHARDS=128, SHARD_LOG_CAPACITY=27, KZH_K=9,
 # PUBLISH_TRUE_LOG_CAP=32):
@@ -81,7 +81,15 @@ BATCH_SIZES="${BATCH_SIZES:-2,4,8,16,32,64,128,256,512,1024,2048,4096,8192,16384
 SAMPLES_PER_BATCH="${SAMPLES_PER_BATCH:-1}"
 SETUP_SEED="${SETUP_SEED:-42}"
 PREFILL_SEED="${PREFILL_SEED:-1}"
-SHARD_MACHINE_TYPE="${SHARD_MACHINE_TYPE:-n2-standard-16}"
+# Bumped from n2-standard-16 (64 GB) to n2-highmem-16 (128 GB) after
+# observing shard RSS climb to ~40 GB at fill=30% on the streaming
+# ladder (~14 GB → 38.8 GB across 8 M entries written, then dropping
+# to ~23 GB after compaction). The peak vs steady-state spread is wide
+# enough that 64 GB was likely to OOM somewhere in fill=60%/90% even
+# though the steady state would fit; doubling RAM at the same core
+# count is the cheapest hedge. Override via env var when running at
+# very small scales where 64 GB suffices.
+SHARD_MACHINE_TYPE="${SHARD_MACHINE_TYPE:-n2-highmem-16}"
 # Coordinator uses the same machine type as the shards by default. The
 # coordinator's in-memory footprint (open-addressing slot index over the
 # 2^true_log_capacity keyspace + per-shard connection/batch buffers +
@@ -662,6 +670,7 @@ start_shard() {
     sudo rm -rf $SHARD_DB_PATH && sudo mkdir -p $SHARD_DB_PATH && sudo chown \$(whoami) $SHARD_DB_PATH; \
     mkdir -p \$HOME/aegon-run && \
     cd \$HOME/aegon-run && \
+    ulimit -n 1048576 && \
     AEGON_ROCKSDB_STATS_DUMP_SEC=${AEGON_ROCKSDB_STATS_DUMP_SEC:-60} \
     AEGON_ROCKSDB_BLOCK_CACHE_GB=${AEGON_ROCKSDB_BLOCK_CACHE_GB:-8} \
     AEGON_ROCKSDB_PARALLELISM=${AEGON_ROCKSDB_PARALLELISM:-16} \
@@ -1160,6 +1169,7 @@ cmd_start_coord() {
     sleep 1
     mkdir -p \$HOME/aegon-run && \
     cd \$HOME/aegon-run && \
+    ulimit -n 1048576 && \
     AEGON_ROCKSDB_STATS_DUMP_SEC=${AEGON_ROCKSDB_STATS_DUMP_SEC:-60} \
     AEGON_ROCKSDB_BLOCK_CACHE_GB=${AEGON_ROCKSDB_BLOCK_CACHE_GB:-8} \
     AEGON_ROCKSDB_PARALLELISM=${AEGON_ROCKSDB_PARALLELISM:-16} \
