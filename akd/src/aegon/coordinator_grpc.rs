@@ -30,10 +30,11 @@ use super::error::AegonError;
 use super::hash::{HashSuite, Sha256Hash};
 use super::sharded::{
     verify_lookup_history, verify_lookup_label_history, verify_lookup_label_two_layer,
-    verify_lookup_value, LabelSlot, ShardedAegon, ShardedEpochCommitment, ShardedLabelHistory,
-    ShardedLabelProofTwoLayer, ShardedValueHistory, ShardedValueProof, ShardedVerifierContext,
+    verify_lookup_value, verify_sharded_invariance, LabelSlot, ShardedAegon,
+    ShardedEpochCommitment, ShardedLabelHistory, ShardedLabelProofTwoLayer, ShardedValueHistory,
+    ShardedValueProof, ShardedVerifierContext,
 };
-use super::types::{AegonPcs, EpochCommitment, Label, Value};
+use super::types::{AegonPcs, AuditState, EpochCommitment, Label, Value};
 
 // Generated tonic code for the coordinator service. Lives in its own
 // proto package (`aegon.coordinator.v1`) so it can evolve
@@ -45,9 +46,10 @@ pub mod proto {
 use proto::coordinator_service_client::CoordinatorServiceClient;
 use proto::coordinator_service_server::{CoordinatorService, CoordinatorServiceServer};
 use proto::{
-    CommitmentResponse, Empty, LookupHistoryRequest, LookupHistoryResponse,
-    LookupLabelHistoryRequest, LookupLabelHistoryResponse, LookupLabelRequest, LookupLabelResponse,
-    LookupValueRequest, LookupValueResponse, PublishRequest, PublishResponse,
+    AuditChainRequest, AuditChainResponse, AuditSample, CommitmentResponse, Empty,
+    LookupHistoryRequest, LookupHistoryResponse, LookupLabelHistoryRequest,
+    LookupLabelHistoryResponse, LookupLabelRequest, LookupLabelResponse, LookupValueRequest,
+    LookupValueResponse, PublishRequest, PublishResponse,
 };
 use tokio::runtime::Runtime;
 use tokio::sync::Mutex as AsyncMutex;
@@ -130,6 +132,7 @@ where
     P::Commitment: CanonicalSerialize
         + CanonicalDeserialize
         + Clone
+        + PartialEq
         + Send
         + Sync
         + 'static
@@ -208,6 +211,7 @@ where
 impl<E, P, H> CoordinatorService for CoordinatorServer<E, P, H>
 where
     E: Pairing,
+    E::ScalarField: ark_ff::Zero,
     P: AegonPcs<E> + Send + Sync + 'static,
     P::ProverParam:
         akd_core::aegon_crypto::pcs::PCSGlobalParam + CanonicalDeserialize + Send + Sync + 'static,
@@ -216,6 +220,7 @@ where
     P::Commitment: CanonicalSerialize
         + CanonicalDeserialize
         + Clone
+        + PartialEq
         + Send
         + Sync
         + 'static
@@ -378,10 +383,141 @@ where
         .await
         .map_err(|e| Status::internal(format!("publish join: {e}")))?;
         let commit = commit_result.map_err(err_to_status)?;
+        // Commit-class sizes: same per-shard sum the in-process bench
+        // computes from `ShardedEpochCommitment::per_shard`. Cheap to
+        // compute here (a few uncompressed_size() calls on already-
+        // built commits); the bench client uses them to populate
+        // publish_bench JSON without re-deserializing the wire
+        // commitment locally.
+        let (mut ic, mut vc, mut ric, mut rvc) = (0u64, 0u64, 0u64, 0u64);
+        for shard_commit in &commit.per_shard {
+            ic += shard_commit.index_commitment.uncompressed_size() as u64;
+            vc += shard_commit.value_commitment.uncompressed_size() as u64;
+            ric += shard_commit.rand_index_commitment.uncompressed_size() as u64;
+            rvc += shard_commit.rand_value_commitment.uncompressed_size() as u64;
+        }
+        let total_commitment_bytes = commit.uncompressed_size() as u64;
         Ok(Response::new(PublishResponse {
             commitment: encode(&commit).map_err(err_to_status)?,
             server_processing_micros: start.elapsed().as_micros() as u64,
+            index_commitment_bytes: ic,
+            value_commitment_bytes: vc,
+            rand_index_commitment_bytes: ric,
+            rand_value_commitment_bytes: rvc,
+            total_commitment_bytes,
         }))
+    }
+
+    async fn audit_chain(
+        &self,
+        req: Request<AuditChainRequest>,
+    ) -> Result<Response<AuditChainResponse>, Status> {
+        let num_samples = req.into_inner().num_samples as u64;
+        // One-transition timing: we want N samples of "what does it
+        // cost to audit ONE epoch transition?" — not N samples of N
+        // distinct transitions. The transition's cost is invariant in
+        // epoch index (same per-shard polynomial sizes, same merkle
+        // depth, same Fiat-Shamir scalar count), so picking the latest
+        // gives a representative sample. We pre-walk the chain from 0
+        // up to `current_epoch - 1` to compute the correct AuditState
+        // there — that's setup cost, not timed. Then we time the final
+        // (current_epoch - 1 → current_epoch) transition `num_samples`
+        // times, cloning the pre-warmed AuditState per iteration so
+        // each sample sees an honest verification.
+        //
+        // Same spawn_blocking rationale as the other handlers:
+        // verify_sharded_invariance is sync + CPU-bound + holds a
+        // blocking read on the in-process state.
+        let state = Arc::clone(&self.state);
+        let samples = tokio::task::spawn_blocking(move || -> Result<Vec<AuditSample>, Status> {
+            let state = state.blocking_read();
+            let current_epoch = state.current_commitment().epoch;
+            if current_epoch < 1 || num_samples == 0 {
+                return Ok(vec![]);
+            }
+            let verifier_ctx = state.sharded_verifier_context();
+            // Walk chain 0..current_epoch-1 to pre-warm audit_state.
+            // This is the setup work an external auditor would already
+            // have done before the next bulletin-board update lands;
+            // for the bench, the relevant cost is the marginal one-
+            // transition audit, not the chain replay.
+            let prev_epoch = current_epoch - 1;
+            let next_epoch = current_epoch;
+            let mut warmup_state =
+                AuditState::<<E as Pairing>::ScalarField>::default();
+            let mut prev_commit = state.epoch_commitment(0).ok_or_else(|| {
+                Status::internal("audit_chain: epoch 0 commitment missing")
+            })?;
+            for i in 0..prev_epoch {
+                let next_warmup = state.epoch_commitment(i + 1).ok_or_else(|| {
+                    Status::internal(format!(
+                        "audit_chain warmup: epoch_commitment({}) missing",
+                        i + 1
+                    ))
+                })?;
+                let ok = verify_sharded_invariance::<E, P>(
+                    &verifier_ctx,
+                    &mut warmup_state,
+                    &prev_commit,
+                    &next_warmup,
+                )
+                .map_err(|e| {
+                    Status::internal(format!("audit_chain warmup verify: {e}"))
+                })?;
+                if !ok {
+                    return Err(Status::internal(format!(
+                        "audit_chain warmup: verify_sharded_invariance returned false at \
+                         transition {i} -> {}",
+                        i + 1
+                    )));
+                }
+                prev_commit = next_warmup;
+            }
+            let chain_state = warmup_state;
+            // Now time the final transition `num_samples` times.
+            // server_fetch is the same cached-commit accessor on every
+            // sample (just for parity with the in-process audit JSON
+            // schema); the meaningful number is verify_nanos.
+            let next_commit = state.epoch_commitment(next_epoch).ok_or_else(|| {
+                Status::internal(format!(
+                    "audit_chain: epoch_commitment({next_epoch}) missing"
+                ))
+            })?;
+            let audit_proof_bytes = next_commit.uncompressed_size() as u64;
+            let mut samples = Vec::with_capacity(num_samples as usize);
+            for _ in 0..num_samples {
+                let t_fetch = Instant::now();
+                let _ = state.epoch_commitment(next_epoch);
+                let server_fetch_nanos = t_fetch.elapsed().as_nanos() as u64;
+                let mut sample_state = chain_state.clone();
+                let t = Instant::now();
+                let ok = verify_sharded_invariance::<E, P>(
+                    &verifier_ctx,
+                    &mut sample_state,
+                    &prev_commit,
+                    &next_commit,
+                )
+                .map_err(|e| Status::internal(format!("audit_chain verify: {e}")))?;
+                let verify_nanos = t.elapsed().as_nanos() as u64;
+                if !ok {
+                    return Err(Status::internal(format!(
+                        "audit_chain: verify_sharded_invariance returned false at \
+                         transition {prev_epoch} -> {next_epoch}"
+                    )));
+                }
+                samples.push(AuditSample {
+                    prev_epoch,
+                    next_epoch,
+                    server_fetch_nanos,
+                    verify_nanos,
+                    audit_proof_bytes,
+                });
+            }
+            Ok(samples)
+        })
+        .await
+        .map_err(|e| Status::internal(format!("audit_chain join: {e}")))??;
+        Ok(Response::new(AuditChainResponse { samples }))
     }
 
     async fn current_commitment(

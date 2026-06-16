@@ -106,10 +106,10 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use akd::aegon::coordinator_grpc::{
     proto::{
-        coordinator_service_client::CoordinatorServiceClient, Empty, LookupHistoryRequest,
-        LookupHistoryResponse, LookupLabelHistoryRequest, LookupLabelHistoryResponse,
-        LookupLabelRequest, LookupLabelResponse, LookupValueRequest, LookupValueResponse,
-        PublishRequest,
+        coordinator_service_client::CoordinatorServiceClient, AuditChainRequest, Empty,
+        LookupHistoryRequest, LookupHistoryResponse, LookupLabelHistoryRequest,
+        LookupLabelHistoryResponse, LookupLabelRequest, LookupLabelResponse, LookupValueRequest,
+        LookupValueResponse, PublishRequest,
     },
     CoordinatorServer,
 };
@@ -1583,14 +1583,71 @@ fn main() -> ExitCode {
         // `server_fetch_ns` so the auditor + bulletin-board sides are
         // both visible.
         let mut audit_json: Option<String> = None;
-        // Audit reads the in-process epoch history; not supported in
-        // remote-coord mode (would need an `EpochHistory` RPC to fetch
-        // past `ShardedEpochCommitment`s from the coord). Skip when
-        // shared is None.
+        // Remote-coord audits run server-side via the AuditChain RPC.
+        // The coord drives `verify_sharded_invariance` against its own
+        // cached commits + verifier context — same code path the
+        // in-process branch below uses — and returns per-sample timings
+        // (server_fetch_nanos, verify_nanos, audit_proof_bytes). We
+        // emit them in the same JSON schema the in-process branch
+        // produces so plot_lookup.py reads both uniformly.
         if args.audit_samples > 0 && shared.is_none() {
-            eprintln!(
-                "  audit: skipped (remote-coord mode has no in-process epoch history)"
-            );
+            let req = AuditChainRequest {
+                num_samples: args.audit_samples as u32,
+            };
+            let mut rc = raw_client.clone();
+            let resp = match driver_rt.block_on(async move { rc.audit_chain(req).await }) {
+                Ok(r) => r.into_inner(),
+                Err(e) => {
+                    eprintln!("error: remote audit_chain failed: {e}");
+                    return ExitCode::from(1);
+                },
+            };
+            if resp.samples.is_empty() {
+                eprintln!(
+                    "  audit: skipped — coord reported no transitions to audit"
+                );
+            } else {
+                let audit_blocks: Vec<String> = resp
+                    .samples
+                    .iter()
+                    .enumerate()
+                    .map(|(i, s)| {
+                        if i == 0 || (i + 1) % 5 == 0 {
+                            eprintln!(
+                                "  audit sample {i}: epoch {}->{} verify={:.3}ms \
+                                 fetch={:.3}ms proof_bytes={}",
+                                s.prev_epoch,
+                                s.next_epoch,
+                                s.verify_nanos as f64 / 1e6,
+                                s.server_fetch_nanos as f64 / 1e6,
+                                s.audit_proof_bytes,
+                            );
+                        }
+                        format!(
+                            concat!(
+                                "          {{\n",
+                                "            \"sample_idx\": {idx},\n",
+                                "            \"prev_epoch\": {pe},\n",
+                                "            \"next_epoch\": {ne},\n",
+                                "            \"server_fetch_ns\": {fetch_ns},\n",
+                                "            \"audit_invariance_ns\": {audit_ns},\n",
+                                "            \"audit_proof_bytes\": {bytes}\n",
+                                "          }}"
+                            ),
+                            idx = i,
+                            pe = s.prev_epoch,
+                            ne = s.next_epoch,
+                            fetch_ns = s.server_fetch_nanos,
+                            audit_ns = s.verify_nanos,
+                            bytes = s.audit_proof_bytes,
+                        )
+                    })
+                    .collect();
+                audit_json = Some(format!(
+                    "        \"samples\": [\n{samples}\n        ]",
+                    samples = audit_blocks.join(",\n"),
+                ));
+            }
         }
         if args.audit_samples > 0 && shared.is_some() {
             let shared = shared.as_ref().unwrap();
@@ -1600,42 +1657,84 @@ fn main() -> ExitCode {
                     "  audit: skipped — only epoch 0 available (no transitions to audit)"
                 );
             } else {
-                let max_audit = args.audit_samples.min(current_epoch as usize);
+                // One-transition timing: pre-walk the chain to current_epoch-1
+                // so audit_state is in the right place, then time the final
+                // transition `audit_samples` times. The chain walk is setup
+                // cost an external auditor pays once per chain catch-up; for
+                // the bench, the marginal one-transition cost is what we
+                // want to measure. Same semantics as the AuditChain RPC
+                // server-side, kept symmetric so plot_lookup reads both
+                // schemas uniformly.
                 let verifier_ctx = shared.blocking_read().sharded_verifier_context();
-                let mut audit_state =
+                let prev_epoch = current_epoch - 1;
+                let next_epoch = current_epoch;
+                let mut warmup_state =
                     AuditState::<<Bn254 as Pairing>::ScalarField>::default();
-                let prev0 = match shared.blocking_read().epoch_commitment(0) {
+                let mut prev_commit = match shared.blocking_read().epoch_commitment(0) {
                     Some(c) => c,
                     None => {
                         eprintln!("error: epoch 0 commitment missing");
                         return ExitCode::from(1);
                     },
                 };
-                let mut prev_commit = prev0;
-                let mut audit_blocks: Vec<String> = Vec::with_capacity(max_audit);
-                for i in 0..max_audit {
-                    let next_epoch = i as u64 + 1;
-                    // Time the server-side commit fetch (cached clone)
-                    // and the auditor-side verify separately. Auditors
-                    // pull `next` from a bulletin board; the bench
-                    // approximates that with the local `epoch_commitment`
-                    // accessor (a clone of a cached `Vec` entry).
-                    let t_fetch = Instant::now();
-                    let next_commit = match shared.blocking_read().epoch_commitment(next_epoch) {
+                for i in 0..prev_epoch {
+                    let next_warmup = match shared.blocking_read().epoch_commitment(i + 1) {
                         Some(c) => c,
                         None => {
                             eprintln!(
-                                "error: epoch_commitment({next_epoch}) missing during audit"
+                                "error: audit warmup: epoch_commitment({}) missing",
+                                i + 1
                             );
                             return ExitCode::from(1);
                         },
                     };
+                    match verify_sharded_invariance::<Bn254, Pcs>(
+                        &verifier_ctx,
+                        &mut warmup_state,
+                        &prev_commit,
+                        &next_warmup,
+                    ) {
+                        Ok(true) => {},
+                        Ok(false) => {
+                            eprintln!(
+                                "error: audit warmup verify_sharded_invariance returned false at \
+                                 transition {i} -> {}",
+                                i + 1
+                            );
+                            return ExitCode::from(1);
+                        },
+                        Err(e) => {
+                            eprintln!(
+                                "error: audit warmup verify_sharded_invariance failed at \
+                                 transition {i} -> {}: {e}",
+                                i + 1
+                            );
+                            return ExitCode::from(1);
+                        },
+                    }
+                    prev_commit = next_warmup;
+                }
+                let chain_state = warmup_state;
+                let next_commit = match shared.blocking_read().epoch_commitment(next_epoch) {
+                    Some(c) => c,
+                    None => {
+                        eprintln!(
+                            "error: epoch_commitment({next_epoch}) missing during audit"
+                        );
+                        return ExitCode::from(1);
+                    },
+                };
+                let audit_proof_bytes = next_commit.uncompressed_size() as u64;
+                let mut audit_blocks: Vec<String> = Vec::with_capacity(args.audit_samples);
+                for sample_idx in 0..args.audit_samples {
+                    let t_fetch = Instant::now();
+                    let _ = shared.blocking_read().epoch_commitment(next_epoch);
                     let server_fetch_ns = t_fetch.elapsed().as_nanos() as u64;
-
+                    let mut sample_state = chain_state.clone();
                     let t_audit = Instant::now();
                     let ok = verify_sharded_invariance::<Bn254, Pcs>(
                         &verifier_ctx,
-                        &mut audit_state,
+                        &mut sample_state,
                         &prev_commit,
                         &next_commit,
                     );
@@ -1645,19 +1744,18 @@ fn main() -> ExitCode {
                         Ok(false) => {
                             eprintln!(
                                 "error: verify_sharded_invariance returned false at \
-                                 epoch transition {i} -> {next_epoch}"
+                                 transition {prev_epoch} -> {next_epoch}"
                             );
                             return ExitCode::from(1);
                         },
                         Err(e) => {
                             eprintln!(
-                                "error: verify_sharded_invariance failed at epoch transition \
-                                 {i} -> {next_epoch}: {e}"
+                                "error: verify_sharded_invariance failed at transition \
+                                 {prev_epoch} -> {next_epoch}: {e}"
                             );
                             return ExitCode::from(1);
                         },
                     }
-                    let audit_proof_bytes = next_commit.uncompressed_size() as u64;
                     audit_blocks.push(format!(
                         concat!(
                             "          {{\n",
@@ -1669,22 +1767,21 @@ fn main() -> ExitCode {
                             "            \"audit_proof_bytes\": {bytes}\n",
                             "          }}"
                         ),
-                        idx = i,
-                        pe = i,
+                        idx = sample_idx,
+                        pe = prev_epoch,
                         ne = next_epoch,
                         fetch_ns = server_fetch_ns,
                         audit_ns = audit_ns,
                         bytes = audit_proof_bytes,
                     ));
-                    if i == 0 || (i + 1) % 5 == 0 {
+                    if sample_idx == 0 || (sample_idx + 1) % 20 == 0 {
                         eprintln!(
-                            "  audit sample {i}: epoch {i}->{next_epoch} verify={:.3}ms \
-                             fetch={:.3}ms proof_bytes={audit_proof_bytes}",
+                            "  audit sample {sample_idx}: epoch {prev_epoch}->{next_epoch} \
+                             verify={:.3}ms fetch={:.3}ms proof_bytes={audit_proof_bytes}",
                             audit_ns as f64 / 1e6,
                             server_fetch_ns as f64 / 1e6,
                         );
                     }
-                    prev_commit = next_commit;
                 }
                 audit_json = Some(format!(
                     "        \"samples\": [\n{samples}\n        ]",
@@ -2040,13 +2137,7 @@ fn main() -> ExitCode {
         // accidentally turn its own publish-samples into sample
         // candidates for the next stage.
         let mut publish_bench_json: Option<String> = None;
-        if publish_enabled && shared.is_none() {
-            eprintln!(
-                "  publish_bench: skipped (remote-coord mode — would need an in-process \
-                 ShardedAegon to capture commit-class sizes)"
-            );
-        }
-        if publish_enabled && shared.is_some() {
+        if publish_enabled {
             let mut batch_blocks: Vec<String> = Vec::with_capacity(args.publish_batch_sizes.len());
             for &batch_size in &args.publish_batch_sizes {
                 eprintln!(
@@ -2067,35 +2158,82 @@ fn main() -> ExitCode {
                         })
                         .collect();
                     let t = Instant::now();
-                    let res = {
-                        // shared is guaranteed Some — guarded by
-                        // `if publish_enabled && shared.is_some()` above.
-                        let shared = shared.as_ref().unwrap();
-                        let mut s = shared.blocking_write();
-                        s.publish_two_layer(&updates)
-                    };
-                    let ms = t.elapsed().as_secs_f64() * 1000.0;
-                    samples_ms.push(ms);
-                    let commit = match res {
-                        Ok(c) => c,
-                        Err(e) => {
+                    // Two paths, mirroring the preload loop above:
+                    //   * in-process: deserialize the commit locally
+                    //     and read commit-class sizes from `per_shard`.
+                    //   * remote-coord: ship updates via the Publish
+                    //     RPC; the coord returns commit-class sizes
+                    //     pre-summed in the response so we don't have
+                    //     to deserialize the commit bytes here (the
+                    //     bench has no verifier_param in this mode).
+                    let new_sizes: Option<(u64, u64, u64, u64, u64)> = if let Some(s) = &shared {
+                        let res = {
+                            let mut s = s.blocking_write();
+                            s.publish_two_layer(&updates)
+                        };
+                        let commit = match res {
+                            Ok(c) => c,
+                            Err(e) => {
+                                eprintln!(
+                                    "error: publish_bench publish failed (level={target}, \
+                                     batch={batch_size}, sample={sample_idx}): {e}"
+                                );
+                                return ExitCode::from(1);
+                            },
+                        };
+                        if commit_sizes.is_none() {
+                            let (mut ic, mut vc, mut ric, mut rvc) = (0u64, 0u64, 0u64, 0u64);
+                            for shard_commit in &commit.per_shard {
+                                ic += shard_commit.index_commitment.uncompressed_size() as u64;
+                                vc += shard_commit.value_commitment.uncompressed_size() as u64;
+                                ric += shard_commit.rand_index_commitment.uncompressed_size() as u64;
+                                rvc += shard_commit.rand_value_commitment.uncompressed_size() as u64;
+                            }
+                            let total = commit.uncompressed_size() as u64;
+                            Some((ic, vc, ric, rvc, total))
+                        } else {
+                            None
+                        }
+                    } else {
+                        // Encode updates with the same wire format
+                        // the preload loop uses (and the coord
+                        // server expects on PublishRequest.updates_bytes).
+                        let mut bytes = Vec::with_capacity(updates.uncompressed_size());
+                        if let Err(e) = updates.serialize_uncompressed(&mut bytes) {
                             eprintln!(
-                                "error: publish_bench publish failed (level={target}, \
+                                "error: serialize publish_bench updates (level={target}, \
                                  batch={batch_size}, sample={sample_idx}): {e}"
                             );
                             return ExitCode::from(1);
-                        },
-                    };
-                    if commit_sizes.is_none() {
-                        let (mut ic, mut vc, mut ric, mut rvc) = (0u64, 0u64, 0u64, 0u64);
-                        for shard_commit in &commit.per_shard {
-                            ic += shard_commit.index_commitment.uncompressed_size() as u64;
-                            vc += shard_commit.value_commitment.uncompressed_size() as u64;
-                            ric += shard_commit.rand_index_commitment.uncompressed_size() as u64;
-                            rvc += shard_commit.rand_value_commitment.uncompressed_size() as u64;
                         }
-                        let total = commit.uncompressed_size() as u64;
-                        commit_sizes = Some((ic, vc, ric, rvc, total));
+                        let req = PublishRequest { updates_bytes: bytes };
+                        let mut rc = raw_client.clone();
+                        let resp = match driver_rt.block_on(async move { rc.publish(req).await }) {
+                            Ok(r) => r.into_inner(),
+                            Err(e) => {
+                                eprintln!(
+                                    "error: remote publish_bench publish failed (level={target}, \
+                                     batch={batch_size}, sample={sample_idx}): {e}"
+                                );
+                                return ExitCode::from(1);
+                            },
+                        };
+                        if commit_sizes.is_none() {
+                            Some((
+                                resp.index_commitment_bytes,
+                                resp.value_commitment_bytes,
+                                resp.rand_index_commitment_bytes,
+                                resp.rand_value_commitment_bytes,
+                                resp.total_commitment_bytes,
+                            ))
+                        } else {
+                            None
+                        }
+                    };
+                    let ms = t.elapsed().as_secs_f64() * 1000.0;
+                    samples_ms.push(ms);
+                    if let Some(s) = new_sizes {
+                        commit_sizes = Some(s);
                     }
                 }
                 let mut sorted = samples_ms.clone();

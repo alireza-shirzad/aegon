@@ -50,6 +50,15 @@ service CoordinatorService {
   // Wire payload at K=65k batch is ~17 MB; the MAX_MSG_BYTES ceiling on
   // both sides is 8 GiB so even K=524k (~150 MB) fits comfortably.
   rpc Publish(PublishRequest) returns (PublishResponse);
+
+  // Audit the first `num_samples` consecutive epoch transitions
+  // (0→1, 1→2, …) and return per-sample timings + audit-proof sizes.
+  // Bench-only RPC: lets remote-coord clients populate `audit_vs_fill`
+  // without holding an in-process `ShardedAegon` or shipping verifier
+  // params over the wire. The coord walks `verify_sharded_invariance`
+  // using its own cached commits + verifier context; the bench just
+  // records the times.
+  rpc AuditChain(AuditChainRequest) returns (AuditChainResponse);
 }
 
 message LookupLabelRequest {
@@ -163,4 +172,46 @@ message PublishResponse {
   // epoch (the one this publish just created).
   bytes commitment = 1;
   uint64 server_processing_micros = 2;
+  // Commit-class uncompressed byte counts, summed across shards.
+  // Recorded for `publish_bench` so the bench client can populate the
+  // publish_vs_batch plot in remote-coord mode (where it has no
+  // in-process `ShardedEpochCommitment` to introspect locally). The
+  // four per-class fields sum to less than `total_commitment_bytes`
+  // because the latter also covers the cross-shard envelope (epoch,
+  // n_shards, merkle anchors) on top of the per-shard commits.
+  uint64 index_commitment_bytes = 3;
+  uint64 value_commitment_bytes = 4;
+  uint64 rand_index_commitment_bytes = 5;
+  uint64 rand_value_commitment_bytes = 6;
+  uint64 total_commitment_bytes = 7;
+}
+
+message AuditChainRequest {
+  // Number of consecutive epoch transitions to time, starting from
+  // (epoch 0 → epoch 1). Clamped to current_epoch on the server side
+  // so callers can pass `audit_samples` directly without worrying
+  // about the current chain length.
+  uint32 num_samples = 1;
+}
+
+message AuditChainResponse {
+  repeated AuditSample samples = 1;
+}
+
+message AuditSample {
+  uint64 prev_epoch = 1;
+  uint64 next_epoch = 2;
+  // Cached-commit fetch on the coord (dictionary lookup over the
+  // epoch_commits cache, no I/O at steady state). Modeled after the
+  // in-process `epoch_commitment(epoch)` accessor. Nanoseconds for
+  // schema parity with the in-process bench's `server_fetch_ns`.
+  uint64 server_fetch_nanos = 3;
+  // `verify_sharded_invariance` on the coord using its in-process
+  // verifier context — same code path an external auditor would run.
+  // Nanoseconds, see above.
+  uint64 verify_nanos = 4;
+  // Uncompressed `ShardedEpochCommitment` size for `next_epoch`. This
+  // is what the auditor would receive from the bulletin board; size
+  // is invariant in epoch but varies in n_shards.
+  uint64 audit_proof_bytes = 5;
 }

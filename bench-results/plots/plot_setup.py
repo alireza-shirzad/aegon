@@ -2,15 +2,21 @@
 """plot_setup.py — render setup-bench results into two publication-ready
 PDFs (setup time, key sizes) under bench-results/plots/.
 
-Reads:
-    bench-results/setup/{small,medium,large-per-shard}.json
-
-Each JSON has the schema emitted by aegon_setup_bench:
-    label, shard_log_capacity, kzh_k, setup_seed,
-    gen_duration_secs, trim_duration_secs,
-    compute_secs, communication_secs,
-    universal_params_bytes, prover_param_bytes, verifier_param_bytes,
-    h_t_entries
+Reads (per regime, first match wins):
+    bench-results/setup/<regime>.json          — aegon_setup_bench schema:
+        label, shard_log_capacity, kzh_k, setup_seed,
+        gen_duration_secs, trim_duration_secs,
+        compute_secs, communication_secs,
+        universal_params_bytes, prover_param_bytes, verifier_param_bytes,
+        h_t_entries
+    bench-results/setup/<regime>_cluster.json  — bench-cluster.sh schema:
+        regime, n_shards, shard_log_capacity, kzh_k, log_n_shards,
+        setup_seed, gen_seconds, gen_seconds_max/min/median/mean,
+        gen_seconds_per_shard, broadcast_seconds, srs_bytes
+        Cluster mode skips the trim step (each shard uses the full SRS
+        as its prover param) so verifier_param_bytes is absent — those
+        regimes appear in the setup-time chart but not the key-sizes
+        chart.
 
 Writes:
     bench-results/plots/setup_time.pdf
@@ -53,37 +59,112 @@ REGIME_COLOR = {
 }
 
 
+def _load_one(regime: str) -> dict | None:
+    """Return a normalized record for `regime`, preferring the
+    aegon_setup_bench schema and falling back to the cluster schema
+    (mapped to the same field names so callers stay schema-agnostic).
+    Returns None when neither file exists."""
+    legacy = SETUP_DIR / f"{regime}.json"
+    if legacy.exists():
+        with legacy.open() as f:
+            return json.load(f)
+    cluster = SETUP_DIR / f"{regime}_cluster.json"
+    if cluster.exists():
+        with cluster.open() as f:
+            raw = json.load(f)
+        # Cluster mode: each shard runs SRS gen sequentially on its
+        # own VM, in parallel with the others (no inter-shard comms
+        # during gen). Every per-shard time is an independent sample
+        # of "sequential SRS gen at this shard config", so we treat
+        # `gen_seconds_per_shard` as the sample distribution and use
+        # the median as the central tendency, min/max as the error
+        # bar. With 1 shard the distribution degenerates to a single
+        # point (no error bar); with N shards we have N samples for
+        # free.
+        per_shard = raw.get("gen_seconds_per_shard")
+        if isinstance(per_shard, list) and per_shard:
+            samples = [float(x) for x in per_shard]
+        else:
+            samples = [float(raw.get("gen_seconds_max", raw.get("gen_seconds", 0.0)))]
+        srs_bytes = int(raw["srs_bytes"])
+        return {
+            "label": regime,
+            "shard_log_capacity": int(raw["shard_log_capacity"]),
+            "kzh_k": int(raw["kzh_k"]),
+            "gen_duration_secs": float(np.median(samples)),
+            "gen_seconds_samples": samples,
+            "universal_params_bytes": srs_bytes,
+            # Cluster mode skips trim — each shard uses the full SRS
+            # as its prover param. Record that so key_sizes can plot
+            # pk and flag the absent vk via _has_vk below.
+            "prover_param_bytes": srs_bytes,
+            "_source": "cluster",
+        }
+    return None
+
+
 def load_records() -> list[dict]:
     records = []
     for name in REGIME_ORDER:
-        path = SETUP_DIR / f"{name}.json"
-        if not path.exists():
-            print(f"[warn] missing {path}; skipping")
+        rec = _load_one(name)
+        if rec is None:
+            print(f"[warn] missing setup/{name}.json or setup/{name}_cluster.json; skipping")
             continue
-        with path.open() as f:
-            records.append(json.load(f))
+        records.append(rec)
     if not records:
         raise SystemExit("no setup JSONs found under " + str(SETUP_DIR))
     return records
 
 
+def _has_vk(rec: dict) -> bool:
+    """Cluster-mode records don't have a trimmed verifier_param_bytes;
+    the bench skips trim because each shard uses the full SRS as its
+    prover param. Filter such records out of the key-sizes chart."""
+    return "verifier_param_bytes" in rec
+
+
 def plot_setup_time(records: list[dict]) -> Path:
     """Bar chart of total setup time per regime. Log y-axis because the
-    range spans ~5 s (small) to ~several minutes (large-per-shard)."""
+    range spans ~5 s (small) to ~several minutes (large-per-shard).
+    Cluster regimes carry one sample per shard (each shard runs SRS
+    gen independently on its VM); we draw min–max error bars and
+    annotate the sample count. Legacy in-process records (one sample)
+    appear without an error bar."""
     labels = [REGIME_LABEL[r["label"]] for r in records]
     times = [r["gen_duration_secs"] for r in records]
     colors = [REGIME_COLOR[r["label"]] for r in records]
+    # Build asymmetric (lower, upper) deltas-from-bar-height per
+    # regime; falls back to zero when only one sample is present so
+    # matplotlib draws nothing for those bars.
+    yerr_lo: list[float] = []
+    yerr_hi: list[float] = []
+    sample_counts: list[int] = []
+    for r in records:
+        samples = r.get("gen_seconds_samples", [r["gen_duration_secs"]])
+        sample_counts.append(len(samples))
+        med = r["gen_duration_secs"]
+        yerr_lo.append(max(0.0, med - min(samples)))
+        yerr_hi.append(max(0.0, max(samples) - med))
 
     fig, ax = plt.subplots(figsize=(5.2, 3.4))
     x = np.arange(len(records))
-    bars = ax.bar(x, times, color=colors, edgecolor="black", linewidth=0.6)
+    bars = ax.bar(
+        x,
+        times,
+        color=colors,
+        edgecolor="black",
+        linewidth=0.6,
+        yerr=[yerr_lo, yerr_hi],
+        capsize=4,
+        error_kw={"ecolor": "#222222", "elinewidth": 0.8},
+    )
     ax.set_yscale("log")
     ax.set_ylabel("Setup time (seconds, log scale)")
     ax.set_xticks(x)
     ax.set_xticklabels(labels)
     ax.grid(True, which="both", axis="y", linestyle=":", alpha=0.5)
     ax.set_axisbelow(True)
-    ax.set_title("KZH-k SRS generation time")
+    ax.set_title("KZH-k SRS generation time (median; whiskers = min..max across shards)")
 
     for bar, t in zip(bars, times):
         h = bar.get_height()
@@ -131,7 +212,13 @@ def fmt_bytes(b: int) -> str:
 
 def plot_key_sizes(records: list[dict]) -> Path:
     """Grouped bar chart of prover-key and verifier-key sizes per
-    regime. Log y because pk is GB-scale while vk is ~1 MB."""
+    regime. Log y because pk is GB-scale while vk is ~1 MB. Cluster-
+    mode regimes (no trim, no vk) are filtered out — they'd otherwise
+    show up as an empty vk bar."""
+    records = [r for r in records if _has_vk(r)]
+    if not records:
+        raise SystemExit("no setup records have verifier_param_bytes; "
+                         "did all your regimes come from cluster setup?")
     labels = [REGIME_LABEL[r["label"]] for r in records]
     pk = np.array([r["prover_param_bytes"] for r in records], dtype=float)
     vk = np.array([r["verifier_param_bytes"] for r in records], dtype=float)

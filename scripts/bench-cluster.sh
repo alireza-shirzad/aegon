@@ -2059,7 +2059,7 @@ cmd_bench() {
 # aegon_coordinator_bench, not aegon_lookup_bench. If you're running
 # the lookup bench after a deploy, the binary isn't on the coord yet.
 LOOKUP_PRELOAD_COUNT="${LOOKUP_PRELOAD_COUNT:-1000}"
-LOOKUP_SAMPLES_PER_LEVEL="${LOOKUP_SAMPLES_PER_LEVEL:-20}"
+LOOKUP_SAMPLES_PER_LEVEL="${LOOKUP_SAMPLES_PER_LEVEL:-100}"
 LOOKUP_FILL_PERCENTS="${LOOKUP_FILL_PERCENTS:-${PUBLISH_FILL_PERCENTS}}"
 LOOKUP_PUBLISH_BATCH_SIZES="${LOOKUP_PUBLISH_BATCH_SIZES:-${PUBLISH_BATCH_SIZES}}"
 LOOKUP_PUBLISH_SAMPLES_PER_BATCH="${LOOKUP_PUBLISH_SAMPLES_PER_BATCH:-${PUBLISH_SAMPLES_PER_BATCH}}"
@@ -2069,7 +2069,7 @@ LOOKUP_TRUE_LOG_CAP="${LOOKUP_TRUE_LOG_CAP:-${PUBLISH_TRUE_LOG_CAP}}"
 # time at large fill levels (1024 was a small-bench default that
 # would balloon medium's 20M-entry warmup to ~19k epochs).
 LOOKUP_PUBLISH_BATCH_SIZE="${LOOKUP_PUBLISH_BATCH_SIZE:-${PUBLISH_WARMUP_BATCH_SIZE:-16384}}"
-LOOKUP_AUDIT_SAMPLES="${LOOKUP_AUDIT_SAMPLES:-5}"
+LOOKUP_AUDIT_SAMPLES="${LOOKUP_AUDIT_SAMPLES:-100}"
 # Throughput sweep: comma-separated concurrency levels for the
 # per-stage QPS-vs-N measurement. Empty = skip (preserves the old
 # behavior). The sweep runs after lookup samples + audit, before
