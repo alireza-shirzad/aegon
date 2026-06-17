@@ -1846,14 +1846,20 @@ def plot_migration_curves(
     large_runs: list[MigrationRun],
     subset: tuple[str, ...],
 ) -> Path:
-    """Migration-time vs target-fill, one curve per chunk size K,
-    one panel per regime in `subset`. The fastest K's endpoint is
-    annotated so the reader can see the throughput-optimal K at a
-    glance. If `bench-results/migration/{regime}_best_k.txt` exists,
-    its K is also marked in the panel title.
+    """Throughput vs publish chunk-size K. The migration bench
+    produces one summary point per K (a full climb to target fill
+    timed end-to-end), so the right view is a 1-D throughput
+    sweep, not a time-vs-fill scatter. One line per regime, log-x
+    on K, throughput on y. The peak per regime is annotated and
+    the `{regime}_best_k.txt` value gets a vertical guide so the
+    reader can see at a glance that the cluster bench picks the
+    same K the sweep found.
 
-    No median/max variant — each milestone is a single timed point
-    (no per-sample distribution).
+    Why this beats the old time-vs-fill rendering: each K in the
+    sweep is a single timed milestone, so the old plot rendered
+    one dot per K. With dots-only the throughput optimum was
+    invisible. A line connecting the dots in K-space puts the
+    peak right in the middle of the figure.
     """
     all_runs = {"small": small_runs, "medium": medium_runs, "large": large_runs}
     selected: list[tuple[str, list[MigrationRun]]] = []
@@ -1878,70 +1884,76 @@ def plot_migration_curves(
         plt.close(fig)
         return out_path
 
-    fig, axes = plt.subplots(1, len(selected), figsize=(3.5 * len(selected), 3.2), sharey=False)
-    if len(selected) == 1:
-        axes = [axes]
+    fig, ax = plt.subplots(figsize=(6.4, 4.0))
 
-    # Within each panel, color curves by chunk size — use the same
-    # Spectral palette as the fill-colored plots, but anchored on the
-    # K values present (smallest K = red, largest K = blue). Sweep
-    # ranges differ per regime so the mapping is per-panel.
-    cmap = plt.get_cmap("Spectral")
-
-    for ax, (regime_name, runs) in zip(axes, selected):
-        ks_sorted = sorted({r.chunk_size for r in runs})
-        n_ks = len(ks_sorted)
-        if n_ks <= 1:
-            k_to_color_pos = {ks_sorted[0]: 0.0} if ks_sorted else {}
-        else:
-            k_to_color_pos = {
-                k: i / (n_ks - 1) for i, k in enumerate(ks_sorted)
-            }
-
-        # Identify the fastest K in this regime (smallest total
-        # elapsed). Used for the highlighted endpoint annotation.
-        fastest = min(runs, key=lambda r: r.total_elapsed_ms)
+    for regime_name, runs in selected:
+        # Sort by K so the line connects in K order, not insertion
+        # order from the file system.
+        runs_sorted = sorted(runs, key=lambda r: r.chunk_size)
+        xs = np.array([r.chunk_size for r in runs_sorted], dtype=float)
+        # Use total throughput (users/sec) as the y-axis — same
+        # units as `users_per_sec` the migration JSON reports.
+        # Divide by 1000 so the y-axis numbers read at human scale
+        # (k users/s).
+        ys = np.array(
+            [r.total_throughput_users_per_sec / 1000.0 for r in runs_sorted]
+        )
+        style = REGIME_STYLES.get(regime_name, {"color": "#666666", "marker": "o"})
+        color = style["color"]
+        marker = style["marker"]
+        label = style.get("label", regime_name)
+        ax.plot(
+            xs, ys,
+            color=color,
+            marker=marker,
+            linewidth=2.0,
+            markersize=7,
+            label=label,
+        )
+        # Mark the peak so the optimal K reads off the figure
+        # without doing arithmetic in your head.
+        peak_idx = int(np.argmax(ys))
+        peak_k = xs[peak_idx]
+        peak_y = ys[peak_idx]
+        ax.scatter(
+            [peak_k], [peak_y],
+            facecolor="white", edgecolor=color,
+            s=160, linewidths=2.0, zorder=5,
+        )
+        ax.annotate(
+            f"peak: K={int(peak_k):,}\n{peak_y:.2f}k users/s",
+            xy=(peak_k, peak_y), xytext=(8, 0),
+            textcoords="offset points",
+            fontsize=8, color=color, ha="left", va="center",
+            bbox=dict(boxstyle="round,pad=0.3", facecolor="white",
+                      edgecolor=color, alpha=0.9, linewidth=0.8),
+        )
+        # `{regime}_best_k.txt` is what the cluster bench reads to
+        # pick PUBLISH_WARMUP_BATCH_SIZE. Drop a dashed guide at
+        # that K so a reader can confirm the chosen K matches the
+        # sweep's peak (or see by how much it deviates).
         best_k_file = load_best_k(regime_name)
-
-        for run in runs:
-            if not run.milestones:
-                continue
-            xs = np.array([m.fill_percent for m in run.milestones])
-            ys_s = np.array([m.elapsed_ms / 1000.0 for m in run.milestones])
-            color = cmap(k_to_color_pos[run.chunk_size])
-            is_fastest = run.chunk_size == fastest.chunk_size
-            ax.plot(
-                xs, ys_s,
-                color=color,
-                marker="o",
-                linewidth=2.4 if is_fastest else 1.6,
-                markersize=6 if is_fastest else 5,
-                alpha=1.0 if is_fastest else 0.85,
-                label=f"K={run.chunk_size:,}",
-            )
-
-        # Annotate the fastest K's endpoint with the cumulative time
-        # and throughput at the highest milestone — this is the
-        # paper-quotable migration number.
-        if fastest.milestones:
-            last = fastest.milestones[-1]
-            ax.annotate(
-                f"  best K={fastest.chunk_size:,}\n"
-                f"  {last.elapsed_ms / 1000.0:.1f}s @ {last.fill_percent:g}%\n"
-                f"  {fastest.total_throughput_users_per_sec / 1000.0:.1f}k users/s",
-                xy=(last.fill_percent, last.elapsed_ms / 1000.0),
-                xycoords="data", fontsize=8, color="#222222",
-                ha="left", va="top",
-            )
-
-        title = regime_name
         if best_k_file is not None:
-            title = f"{regime_name} (best_k.txt: K={best_k_file:,})"
-        ax.set_title(title, fontsize=10)
-        ax.set_xlabel("target fill (% of true capacity)")
-        ax.set_ylabel("elapsed time from epoch 0 (s)")
-        ax.grid(True, which="both", alpha=0.3)
-        ax.legend(frameon=False, loc="upper left", fontsize=8)
+            ax.axvline(
+                best_k_file, color=color, linestyle="--",
+                linewidth=1.0, alpha=0.6,
+            )
+
+    ax.set_xscale("log", base=2)
+    ax.set_xlabel("publish chunk size K (log scale)")
+    ax.set_ylabel("end-to-end throughput (×10³ users / sec)")
+    ax.set_title("Migration throughput vs chunk size\n"
+                 "(dashed line = best_k.txt; circled = sweep peak)")
+    ax.grid(True, which="both", axis="both", alpha=0.3)
+    ax.set_axisbelow(True)
+    # Format x ticks as raw K values (the default 2^N labels are
+    # less readable than e.g. "65,536" when comparing to batch
+    # sizes named in the rest of the pipeline).
+    all_ks = sorted({r.chunk_size for _, runs in selected for r in runs})
+    if all_ks:
+        ax.set_xticks(all_ks)
+        ax.set_xticklabels([f"{k:,}" for k in all_ks], rotation=30, ha="right")
+    ax.legend(frameon=False, loc="best", fontsize=9)
 
     fig.tight_layout()
     fig.savefig(out_path, format="pdf", bbox_inches="tight")
