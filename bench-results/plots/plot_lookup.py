@@ -85,13 +85,8 @@ AGG_MAX = "max"
 
 
 def _percentiles_for(agg: str) -> tuple[float, float, float]:
-    """(low, central, high) percentiles for an aggregation.
-    For "median" -> (10, 50, 90); for "max" -> (0, 100, 100), so
-    the central line traces the slowest sample and the band shows
-    the full measured envelope (min..max)."""
-    if agg == AGG_MAX:
-        return 0.0, 100.0, 100.0
-    return 10.0, 50.0, 90.0
+    """(low, central, high) percentiles. Median line + min..max band."""
+    return 0.0, 50.0, 100.0
 
 
 def _agg_suffix(agg: str) -> str:
@@ -1978,28 +1973,18 @@ def main() -> None:
     medium_runs = load_migration_runs("medium")
     large_runs = load_migration_runs("large")
 
-    # Every per-data-point figure is rendered FOUR times — once per
-    # (subset, agg) pair. SMALL+MEDIUM vs LARGE keeps the
-    # qualitatively-different large regime from compressing
-    # small/medium's y-axis. MEDIAN vs MAX produces the typical-case
-    # and worst-case views of the same data. The output filenames
-    # are suffixed accordingly:
-    #   <name>_small_medium.pdf       <- median, small+medium
-    #   <name>_small_medium_max.pdf   <- max,    small+medium
-    #   <name>_large.pdf              <- median, large
-    #   <name>_large_max.pdf          <- max,    large
-    #
-    # The migration-curves plot has no per-sample variance (each
-    # milestone is one timed crossing), so it's emitted once per
-    # subset, no agg variant.
+    # Every per-data-point figure is rendered TWICE — once per
+    # subset (SMALL+MEDIUM vs LARGE) to keep the qualitatively-
+    # different large regime from compressing small/medium's y-axis.
+    # The central line is the median; the band is min..max.
+    #   <name>_small_medium.pdf       <- small+medium
+    #   <name>_large.pdf              <- large
     written: list[Path] = []
-    for agg in (AGG_MEDIAN, AGG_MAX):
-        for subset in (SMALL_MEDIUM, LARGE_ONLY):
-            written.extend(plot_lookup_per_operation(small, medium, large, subset, agg))
-            written.append(plot_publish_vs_batch(small, medium, large, subset, agg))
-            written.append(plot_audit_vs_fill(small, medium, large, subset, agg))
-            written.append(plot_latency_knee(small, medium, large, subset, agg))
     for subset in (SMALL_MEDIUM, LARGE_ONLY):
+        written.extend(plot_lookup_per_operation(small, medium, large, subset, AGG_MEDIAN))
+        written.append(plot_publish_vs_batch(small, medium, large, subset, AGG_MEDIAN))
+        written.append(plot_audit_vs_fill(small, medium, large, subset, AGG_MEDIAN))
+        written.append(plot_latency_knee(small, medium, large, subset, AGG_MEDIAN))
         written.append(plot_migration_curves(small_runs, medium_runs, large_runs, subset))
 
     for p in written:

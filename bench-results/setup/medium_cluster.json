@@ -7,14 +7,14 @@
   "setup_seed": 42,
   "gen_host_machine_type": "n2-highmem-16",
   "gen_host_note": "Per-shard parallel SRS generation; every shard runs aegon_srs_gen with the same seed, writing to local disk at /opt/aegon/srs/cluster.srs. No NFS, no central gen, no broadcast.",
-  "gen_seconds": 198.552,
-  "gen_seconds_max": 198.552,
-  "gen_seconds_min": 173.318,
-  "gen_seconds_median": 185.935,
-  "gen_seconds_mean": 185.935,
+  "gen_seconds": 177.151,
+  "gen_seconds_max": 177.151,
+  "gen_seconds_min": 176.555,
+  "gen_seconds_median": 176.853,
+  "gen_seconds_mean": 176.853,
   "gen_seconds_per_shard": [
-    198.552,
-    173.318
+    176.555,
+    177.151
   ],
   "broadcast_seconds": 0,
   "srs_bytes": 9819476306
