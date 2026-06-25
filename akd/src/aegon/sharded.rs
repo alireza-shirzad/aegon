@@ -2271,13 +2271,34 @@ where
         // EpochCommitments and build the cross-shard merkle tree
         // upstream in `finalize_epoch`.
         let shard_ids: Vec<u32> = (0..self.shards.len() as u32).collect();
-        self.shards
+        eprintln!(
+            "[EPOCH-INSTR coord] run_phase_2 entry coord.epoch={} dispatching to {} shards",
+            self.epoch, self.shards.len()
+        );
+        let results: Vec<Result<EpochCommitment<E, P>, AegonError>> = self.shards
             .par_iter_mut()
             .zip(shard_ids.into_par_iter())
             .map(|(shard, shard_id)| {
-                shard.publish_phase_2_and_persist(new_r_index, new_r_value, shard_id)
+                let res = shard.publish_phase_2_and_persist(new_r_index, new_r_value, shard_id);
+                if let Err(ref e) = res {
+                    eprintln!(
+                        "[EPOCH-INSTR coord] shard={} phase_2 RPC returned Err: {}",
+                        shard_id, e
+                    );
+                }
+                res
             })
-            .collect::<Result<Vec<_>, _>>()
+            .collect();
+        let mut ok = 0usize;
+        let mut errs = 0usize;
+        for r in &results {
+            if r.is_ok() { ok += 1; } else { errs += 1; }
+        }
+        eprintln!(
+            "[EPOCH-INSTR coord] run_phase_2 results: ok={} err={}",
+            ok, errs
+        );
+        results.into_iter().collect::<Result<Vec<_>, _>>()
     }
 
     /// Coordinator-side bookkeeping: advance `(r_index, r_value,
@@ -2296,7 +2317,12 @@ where
     ) -> ShardedEpochCommitment<E, P> {
         self.r_index = new_r_index;
         self.r_value = new_r_value;
+        let _epoch_instr_old = self.epoch;
         self.epoch += 1;
+        eprintln!(
+            "[EPOCH-INSTR coord] finalize_epoch advanced {} -> {}",
+            _epoch_instr_old, self.epoch
+        );
         let sharded_commit =
             ShardedEpochCommitment::<E, P>::with_per_shard(self.epoch, per_shard_commits);
         self.epoch_commits.push(sharded_commit.clone());

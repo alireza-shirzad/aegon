@@ -2313,7 +2313,12 @@ where
         let _finalize_span = tracing::debug_span!("Aegon::Phase2::FinalizeEpoch").entered();
         self.r_index = new_r_index;
         self.r_value = new_r_value;
+        let _epoch_instr_old = self.epoch;
         self.epoch += 1;
+        eprintln!(
+            "[EPOCH-INSTR shard={}] phase_2 advanced {} -> {} (tid={:?})",
+            shard_id, _epoch_instr_old, self.epoch, std::thread::current().id()
+        );
 
         // When `retain_epoch_polys` is false (bench mode), keep only the
         // four commitments per epoch and drop the rand polys + states.
