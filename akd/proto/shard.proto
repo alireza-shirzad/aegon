@@ -108,6 +108,16 @@ service ShardService {
   // sole source of truth — no DB roundtrip.
   rpc FindLabelSlot(FindLabelSlotRequest) returns (FindLabelSlotResponse);
 
+  // Combined trail RPC. Collapses (FindLabelSlot + N×OpenIndexAtSlot)
+  // into a single round-trip. The shard walks `H_slot` exactly as
+  // FindLabelSlot does, and along the way emits an index-polynomial
+  // opening at every probed slot. Used by `ShardedAegon::lookup_label_two_layer`
+  // and the two-layer audit/consistency paths so the coord pays one
+  // network RTT for the intra-shard probe trail instead of one per
+  // probe.
+  rpc FetchLabelProofTrail(FetchLabelProofTrailRequest)
+      returns (FetchLabelProofTrailResponse);
+
   // -------- Per-shard durable state (DB-anchored, post-refactor) --------
   // Each shard now owns the durable storage for the labels that route
   // to it. The coord ships pre-formed DbOps via ApplyPersistenceOps at
@@ -133,10 +143,29 @@ service ShardService {
   rpc FetchValueHistory(FetchValueHistoryRequest)
       returns (FetchValueHistoryResponse);
 
+  // Combined value-history RPC. Collapses
+  //   FetchValueHistory + N×RemaskValueHistoryEntry + OpenRandValueAtSlotCurrent
+  // into a single round-trip. The owning shard reads its sliding
+  // window, decodes + remasks each entry, and (for entries[0]) opens
+  // the live `rand_value_poly` at the slot for the freshness
+  // attestation — all under one read lock. Used by
+  // `ShardedAegon::lookup_history`; saves 1 + HISTORY_WINDOW + 1
+  // round-trips per call (≈7 RTTs on the GCP cluster).
+  rpc FetchFullValueHistory(FetchFullValueHistoryRequest)
+      returns (FetchFullValueHistoryResponse);
+
   // Read the `StoredLabelPlacement<E,P>` blob for `label` from this
   // shard's DB.
   rpc FetchLabelPlacement(FetchLabelPlacementRequest)
       returns (FetchLabelPlacementResponse);
+
+  // Combined label-history RPC. Collapses
+  //   FetchLabelPlacement + OpenRandIndexAtSlotCurrent
+  // into a single round-trip. The owning shard reads its placement
+  // record and opens the live `rand_index_poly` at the slot in the
+  // same call. Used by `ShardedAegon::lookup_label_history`.
+  rpc FetchFullLabelHistory(FetchFullLabelHistoryRequest)
+      returns (FetchFullLabelHistoryResponse);
 
   // Read this shard's `HistoryOpenings<E,P>` bundle for the given
   // epoch from its DB. Key on the shard is `openings:{epoch}` (no
@@ -190,6 +219,15 @@ message PublishBatchRequest {
   // wire: u32_le n, then n × (u32_le label_len || label bytes ||
   // u32_le value_len || value bytes).
   bytes batch_bytes = 1;
+  // Canonical-serialized `Vec<Vec<Vec<u8>>>` — one outer entry per
+  // label (parallel to `batch_bytes`), containing the H_shard VRF
+  // proof bytes for ctr 0..=final_shard_ctr along the inter-shard
+  // routing chain. Empty when no VRF prover is configured cluster-
+  // wide (lookups will then recompute proofs the legacy way).
+  // The destination shard stores these alongside its locally-
+  // computed H_slot proofs and serves both via
+  // FetchLabelProofTrail at lookup time.
+  bytes vrf_proofs_shard_bytes = 2;
 }
 
 message PublishBatchResponse {
@@ -236,6 +274,21 @@ message FindLabelSlotResponse {
   // The `H_slot` counter at the final probe — `slot_ctr0` in the
   // intra-shard trail. Unset (zero) when `found == false`.
   uint64 slot_ctr = 3;
+}
+
+message FetchLabelProofTrailRequest {
+  bytes label = 1;
+}
+
+message FetchLabelProofTrailResponse {
+  // True when the shard found `label`. When false, `trail_uncompressed`
+  // is empty and the coord should map this to UnknownLabel.
+  bool found = 1;
+  // Bincode encoding of `LabelProofTrail<E, P>` (see
+  // `aegon::shard_grpc::wire`). Same opaque-blob pattern as
+  // `RemaskValueHistoryEntry` — keeps proof types out of the proto
+  // schema.
+  bytes trail_uncompressed = 2;
 }
 
 message PublishPhase2AndPersistRequest {
@@ -326,6 +379,23 @@ message FetchValueHistoryResponse {
   repeated bytes entries = 1;
 }
 
+message FetchFullValueHistoryRequest {
+  bytes label = 1;
+}
+
+message FetchFullValueHistoryResponse {
+  // True when the shard had any value-history entries for this label.
+  // When false, `history_uncompressed` is empty and the coord returns
+  // an empty `ShardedValueHistory` (matching pre-existing semantics).
+  bool found = 1;
+  // Canonical-serialized `FullValueHistory<E, P>` blob. Each contained
+  // `StoredValueHistoryEntry` has been remasked (live ZK openings)
+  // but carries EMPTY `prev_merkle_path` / `post_merkle_path`; the
+  // coord stitches the paths in from its in-memory `epoch_commits`
+  // cache before serving the bundle to the user.
+  bytes history_uncompressed = 2;
+}
+
 message FetchLabelPlacementRequest {
   bytes label = 1;
 }
@@ -335,6 +405,23 @@ message FetchLabelPlacementResponse {
   // Canonical-serialized `StoredLabelPlacement<E,P>` (uncompressed,
   // same format as the prior coord-side write).
   bytes placement_bytes = 2;
+}
+
+message FetchFullLabelHistoryRequest {
+  bytes label = 1;
+}
+
+message FetchFullLabelHistoryResponse {
+  // True when the shard has a placement record for this label. When
+  // false, `full_uncompressed` is empty and the coord returns
+  // (placement = None, freshness = None) — matching the existing
+  // `lookup_label_history` semantics for unknown labels.
+  bool found = 1;
+  // Canonical-serialized `FullLabelHistory<E, P>` blob. The contained
+  // `StoredLabelPlacement` carries an EMPTY `placement_merkle_path`;
+  // the coord stitches it in from its in-memory `epoch_commits`
+  // cache before serving the bundle to the user.
+  bytes full_uncompressed = 2;
 }
 
 message FetchHistoryOpeningsRequest {

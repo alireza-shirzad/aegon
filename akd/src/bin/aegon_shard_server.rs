@@ -22,6 +22,7 @@ use akd::aegon::distributed_srs::{
 use akd::aegon::server::load_aegon_checkpoint_from_db;
 use akd::aegon::shard_grpc::{ShardServer, ShardServerTlsConfig};
 use akd::aegon::sharded::read_srs_from_file;
+use akd::aegon::hash::VrfProver;
 use akd::aegon::{AegonConfig, DbSource, EcVrfHash};
 use akd_core::aegon_crypto::pcs::kzhk::structs::KZHKConfig;
 use akd_core::aegon_crypto::pcs::kzhk::KZHK;
@@ -354,6 +355,13 @@ async fn main() -> ExitCode {
         eprintln!("shard config: retain_epoch_polys=false (consistency_proof at old epochs disabled)");
         aegon.set_retain_epoch_polys(false);
     }
+
+    // DIAGNOSTIC v15c: VRF prover RE-attached (cache will populate
+    // during publish_batch). The coord's lookup_label_two_layer was
+    // reverted to v14-style structure for this iteration so we can
+    // tell whether the v15 regression came from the cache-aware
+    // lookup branches.
+    aegon.set_vrf_prover(VrfProver::from_env());
 
     // Distributed-gen path advances phase as we work through init +
     // prefill so any `WaitForReady` poll has a useful status string.

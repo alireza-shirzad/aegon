@@ -117,6 +117,20 @@ where
     }
 }
 
+/// Precomputed VRF proofs for one label, populated at publish time
+/// and returned at lookup time via [`crate::aegon::sharded::LabelProofTrail`].
+///
+///   * `vrf_proofs_shard.len() == final_shard_ctr + 1` — the coord's
+///     inter-shard routing chain (ctr 0 first, landing ctr last).
+///   * `vrf_proofs_slot.len() == slot_ctr0 + 1` — the shard's
+///     intra-shard `H_slot` probe chain.
+/// Each `Vec<u8>` is the ECVRF proof bytes (`VRF_PROOF_BYTES = 80`).
+#[derive(Clone, Debug, Default, CanonicalSerialize, CanonicalDeserialize)]
+pub struct CachedLabelVrfProofs {
+    pub vrf_proofs_shard: Vec<Vec<u8>>,
+    pub vrf_proofs_slot: Vec<Vec<u8>>,
+}
+
 /// Per-label placement record produced by [`Aegon::publish_batch`].
 /// Identifies, for one label that this shard successfully placed in
 /// the current batch, the final `(slot_bits, slot_ctr)` reached by
@@ -222,6 +236,22 @@ where
 
     // Server bookkeeping for fast lookups.
     label_table: HashMap<Label, (Vec<bool>, u64)>,
+
+    // Per-label cache of pre-computed VRF proofs, populated at publish
+    // time so the lookup hot path never has to call prove_h_shard /
+    // prove_h_slot. The two vectors are indexed by the relevant ctr
+    // (ctr 0 first); their lengths are `final_shard_ctr + 1` and
+    // `slot_ctr0 + 1` respectively. Only present when `vrf_prover` is
+    // configured (otherwise lookups don't need VRF proofs).
+    label_vrf_proofs: HashMap<Label, CachedLabelVrfProofs>,
+
+    // VRF prover used by `publish_batch` to compute H_slot proofs at
+    // publish time. The corresponding H_shard proofs are computed by
+    // the coordinator (which holds the routing state) and shipped in
+    // alongside each label via `publish_batch`. Without this, the
+    // cluster falls back to the legacy "compute proofs on every
+    // lookup" path.
+    vrf_prover: Option<super::hash::VrfProver>,
 
     // Past epochs we can serve consistency proofs against. Keyed by
     // epoch number; epoch 0 is the empty initial state.
@@ -365,6 +395,26 @@ struct PendingPublish<E: Pairing, P: AegonPcs<E>> {
     /// 1`. Carried through phase 2 so the finalize step can pair each
     /// label with its slot for the user-facing writes.
     cached_placements: Vec<ShardPlacement>,
+    /// Cached `(index_commitment, value_commitment)` and fullness
+    /// signal that `publish_batch` returned to its caller. Stored so
+    /// an idempotent retry (`publish_batch` called again with the same
+    /// `cached_updates` while pending) can return the same outcome
+    /// without re-mutating state — needed because the coord's
+    /// `publish_two_layer` can leave some shards pending if one
+    /// shard's gRPC call hits a transient error mid-fan-out, and the
+    /// bench then retries the whole publish. `None` for callers that
+    /// drove `publish_phase_1_at_slots` directly (tests, in-process
+    /// path) and never expect a retry.
+    cached_publish_batch_outcome: Option<CachedPublishBatchOutcome<E, P>>,
+}
+
+/// Snapshot of what `publish_batch` returned, kept on `PendingPublish`
+/// so an idempotent retry with the same input can replay the result
+/// without re-running phase-1 on already-pending shard state.
+struct CachedPublishBatchOutcome<E: Pairing, P: AegonPcs<E>> {
+    index_commitment: P::Commitment,
+    value_commitment: P::Commitment,
+    fullness_proof: Option<Vec<u8>>,
 }
 
 impl<E, P, H> Aegon<E, P, H>
@@ -581,6 +631,8 @@ where
             r_index: E::ScalarField::zero(),
             r_value: E::ScalarField::zero(),
             label_table: HashMap::new(),
+            label_vrf_proofs: HashMap::new(),
+            vrf_prover: None,
             epoch_history,
             retain_epoch_polys: true,
             pending: None,
@@ -602,6 +654,29 @@ where
         source: std::sync::Arc<dyn super::masking::MaskingSource<E, P>>,
     ) {
         self.masking_client = Some(source);
+    }
+
+    /// Attach a VRF prover so `publish_batch` can compute and cache the
+    /// per-label H_slot proofs locally. The coordinator still computes
+    /// H_shard proofs (it holds the inter-shard routing state) and
+    /// ships them in via `publish_batch`'s `vrf_proofs_shard_per_label`
+    /// argument; the shard concatenates the two and serves both on
+    /// every subsequent lookup via `fetch_label_proof_trail`, removing
+    /// VRF compute from the lookup hot path entirely.
+    ///
+    /// Must be called before the first publish. Configured uniformly
+    /// across the cluster: the shard's seed matches the coordinator's
+    /// (driven by the same `AEGON_VRF_SEED` env var in production).
+    pub fn set_vrf_prover(&mut self, prover: super::hash::VrfProver) {
+        self.vrf_prover = Some(prover);
+    }
+
+    /// Read back a label's precomputed VRF proofs, populated by
+    /// [`Self::publish_batch`]. Returns `None` when no proofs were
+    /// cached (either the label is unknown or the shard is running
+    /// without a `vrf_prover`).
+    pub fn label_vrf_proofs(&self, label: &Label) -> Option<&CachedLabelVrfProofs> {
+        self.label_vrf_proofs.get(label)
     }
 
     /// Toggle whether each `publish` retains the rand polynomials + PCS
@@ -825,6 +900,8 @@ where
             r_index: ckpt.r_index,
             r_value: ckpt.r_value,
             label_table,
+            label_vrf_proofs: HashMap::new(),
+            vrf_prover: None,
             epoch_history,
             retain_epoch_polys: true,
             pending: None,
@@ -868,6 +945,7 @@ where
         self.r_index = E::ScalarField::zero();
         self.r_value = E::ScalarField::zero();
         self.label_table.clear();
+        self.label_vrf_proofs.clear();
         self.epoch_history.clear();
         let (reset_value_tau, reset_rand_value_tau) = self.snapshot_value_taus();
         self.epoch_history.insert(
@@ -1037,6 +1115,7 @@ where
         self.r_index = E::ScalarField::zero();
         self.r_value = E::ScalarField::zero();
         self.label_table.clear();
+        self.label_vrf_proofs.clear();
         self.epoch_history.clear();
         self.epoch_history
             .insert(0, self.setup_baseline.epoch_zero_snapshot.clone());
@@ -1466,6 +1545,7 @@ where
             // which means the finalize step is a no-op for that flow.
             cached_updates: Vec::new(),
             cached_placements: Vec::new(),
+            cached_publish_batch_outcome: None,
         });
         log_rss_ctx("phase1.exit", &format!("epoch={}", _rss_epoch));
         if super::instrument::publish_profile_enabled() {
@@ -1500,10 +1580,53 @@ where
     pub fn publish_batch(
         &mut self,
         batch: &[(Label, Value)],
+        vrf_proofs_shard_per_label: &[Vec<Vec<u8>>],
     ) -> Result<PublishBatchOutcome<E, P>, AegonError>
     where
         P::Commitment: Clone,
     {
+        // The coord ships H_shard proofs alongside each label so the
+        // shard can cache them next to the H_slot proofs it computes
+        // locally. A mismatched length is a programming error in the
+        // caller's marshalling code.
+        if !vrf_proofs_shard_per_label.is_empty()
+            && vrf_proofs_shard_per_label.len() != batch.len()
+        {
+            return Err(AegonError::Config(format!(
+                "publish_batch: vrf_proofs_shard_per_label len ({}) must match batch len ({})",
+                vrf_proofs_shard_per_label.len(),
+                batch.len(),
+            )));
+        }
+        // Idempotent retry: if a publish is already pending AND the
+        // caller is replaying the same input batch, return the cached
+        // outcome instead of erroring. This lets the coord's
+        // `publish_two_layer` recover from a transient mid-fan-out
+        // gRPC failure that left some shards pending — the bench
+        // retries the same publish and each shard either runs phase-1
+        // fresh (non-pending) or replays its cached outcome (pending,
+        // matching input). A different input while pending still
+        // errors at `publish_phase_1_at_slots` below.
+        if let Some(pending) = self.pending.as_ref() {
+            if let Some(cached) = &pending.cached_publish_batch_outcome {
+                if pending.cached_updates.len() == batch.len()
+                    && pending
+                        .cached_updates
+                        .iter()
+                        .zip(batch.iter())
+                        .all(|((cl, cv), (l, v))| cl == l && cv == v)
+                {
+                    return Ok(PublishBatchOutcome {
+                        placements: pending.cached_placements.clone(),
+                        placed_count: pending.cached_placements.len(),
+                        index_commitment: cached.index_commitment.clone(),
+                        value_commitment: cached.value_commitment.clone(),
+                        fullness_proof: cached.fullness_proof.clone(),
+                    });
+                }
+            }
+        }
+
         // Capacity check used to decide fullness. The polynomial's
         // current nonzero set plus the within-batch claims must stay
         // strictly below the addressable capacity, else there's no
@@ -1590,24 +1713,53 @@ where
             }
         }
 
+        // Cache the per-label VRF proofs alongside the placement
+        // record so subsequent lookups can pull them straight from
+        // memory instead of paying ~0.5 ms of ECVRF prove per ctr step
+        // on the coord. H_shard proofs come in from the coord (it
+        // walks the inter-shard fullness chain); H_slot proofs are
+        // computed locally from each placement's `slot_ctr`. Skipped
+        // when no `vrf_prover` is configured (e.g. tests that don't
+        // care about proof bytes) or when the coord didn't ship any
+        // H_shard proofs.
+        //
+        // Slot-proof computation is the dominant cost here: at fill
+        // 1% with `slot_ctr0=0` it's ~0.5 ms per label, so a 1.3 M-
+        // label wave is 11 minutes single-threaded. par_iter scales
+        // it linearly with the shard's core count.
+        if let Some(prover) = self.vrf_prover.as_ref() {
+            if !vrf_proofs_shard_per_label.is_empty() {
+                let log_capacity = self.log_capacity;
+                let new_entries: Vec<(Label, CachedLabelVrfProofs)> = placements
+                    .par_iter()
+                    .enumerate()
+                    .map(|(idx, placement)| {
+                        let label = placement.label.clone();
+                        let slot_ctr0 = placement.slot_ctr;
+                        let mut slot_proofs: Vec<Vec<u8>> =
+                            Vec::with_capacity((slot_ctr0 as usize) + 1);
+                        for slot_ctr in 0..=slot_ctr0 {
+                            let (_bits, proof_bytes) =
+                                prover.prove_h_slot(slot_ctr, &label, log_capacity);
+                            slot_proofs.push(proof_bytes.to_vec());
+                        }
+                        (
+                            label,
+                            CachedLabelVrfProofs {
+                                vrf_proofs_shard: vrf_proofs_shard_per_label[idx].clone(),
+                                vrf_proofs_slot: slot_proofs,
+                            },
+                        )
+                    })
+                    .collect();
+                self.label_vrf_proofs.extend(new_entries);
+            }
+        }
+
         // Run the existing crypto pipeline on the writes we built.
         // Returns the same (index_commitment, value_commitment) as
         // the legacy call site would.
         let (index_commitment, value_commitment) = self.publish_phase_1_at_slots(&writes)?;
-
-        // Cache (label, value) + per-label placements on `self.pending`
-        // so the finalize step (triggered by the coord after phase 2)
-        // can build user-facing persistence entries locally without
-        // re-shipping the raw bytes from the coord. Stash only the
-        // accepted prefix — labels past `placed_count` were re-routed
-        // past this shard and aren't ours to persist.
-        if let Some(pending) = self.pending.as_mut() {
-            pending.cached_updates = batch[..placed_count]
-                .iter()
-                .map(|(l, v)| (l.clone(), v.clone()))
-                .collect();
-            pending.cached_placements = placements.clone();
-        }
 
         let fullness_proof = if full {
             // Placeholder: empty bytes. When the real fullness-proof
@@ -1618,6 +1770,28 @@ where
         } else {
             None
         };
+
+        // Cache (label, value) + per-label placements on `self.pending`
+        // so the finalize step (triggered by the coord after phase 2)
+        // can build user-facing persistence entries locally without
+        // re-shipping the raw bytes from the coord. Stash only the
+        // accepted prefix — labels past `placed_count` were re-routed
+        // past this shard and aren't ours to persist. Also cache the
+        // returned commitments + fullness so an idempotent retry can
+        // replay this outcome (see the early-return guard at the top
+        // of `publish_batch`).
+        if let Some(pending) = self.pending.as_mut() {
+            pending.cached_updates = batch[..placed_count]
+                .iter()
+                .map(|(l, v)| (l.clone(), v.clone()))
+                .collect();
+            pending.cached_placements = placements.clone();
+            pending.cached_publish_batch_outcome = Some(CachedPublishBatchOutcome {
+                index_commitment: index_commitment.clone(),
+                value_commitment: value_commitment.clone(),
+                fullness_proof: fullness_proof.clone(),
+            });
+        }
 
         Ok(PublishBatchOutcome {
             placements,
@@ -1669,6 +1843,7 @@ where
             value_change_slots,
             cached_updates,
             cached_placements,
+            cached_publish_batch_outcome: _,
         } = pending;
 
         // Build the placement_idx map up-front — we need it both for

@@ -25,6 +25,16 @@ package aegon.coordinator.v1;
 service CoordinatorService {
   rpc LookupLabel(LookupLabelRequest) returns (LookupLabelResponse);
   rpc LookupValue(LookupValueRequest) returns (LookupValueResponse);
+  // Combined value-chain RPC. Bundles `LookupLabel` + `LookupValue` into
+  // a single bench↔coord round-trip so realistic clients don't pay an
+  // extra RTT for the second half of the chain. The server runs the same
+  // two-layer label probe + value-poly opening it would for the split
+  // RPCs and bundles the (slot, label_proof, value_proof, value_bytes)
+  // tuple in one response. Saves 1 client↔coord RTT per call — the
+  // dominant remaining hop now that the shard side is collapsed to 1
+  // RPC per lookup.
+  rpc LookupValueChain(LookupValueChainRequest)
+      returns (LookupValueChainResponse);
   // Fetch up to HISTORY_WINDOW (currently 5) most-recent value-change
   // records for `label`. Each record is a self-contained bundle the
   // client verifies locally via `verify_lookup_history`. Response is
@@ -104,6 +114,36 @@ message LookupValueResponse {
   // matches `H_F(value)` themselves.
   bytes value = 2;
   uint64 server_processing_micros = 3;
+}
+
+message LookupValueChainRequest {
+  // Raw label bytes — same as LookupLabelRequest.label.
+  bytes label = 1;
+}
+
+message LookupValueChainResponse {
+  // Canonical-serialized LabelSlot. Same payload as
+  // LookupLabelResponse.slot — the client caches it for subsequent
+  // value-only calls (the chain RPC is meant for "I want everything
+  // about this label right now"; once cached, subsequent value-only
+  // refreshes can still use the plain LookupValue with the cached
+  // slot).
+  bytes slot = 1;
+  // Canonical-serialized ShardedLabelProofTwoLayer — the H_shard /
+  // H_slot probe trail proving residency. Same payload as
+  // LookupLabelResponse.proof.
+  bytes label_proof = 2;
+  // Canonical-serialized ShardedValueProof — the value-poly opening
+  // at the same slot. Same payload as LookupValueResponse.proof.
+  bytes value_proof = 3;
+  // Raw value bytes; same semantics as LookupValueResponse.value
+  // (empty when DbSource::None or when the coord has no KV index by
+  // slot).
+  bytes value = 4;
+  // Total handler wall-clock micros (label probe + value open). The
+  // benches sum this directly instead of having to add two server
+  // micros across two RPCs.
+  uint64 server_processing_micros = 5;
 }
 
 message CommitmentResponse {

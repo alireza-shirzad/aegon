@@ -48,8 +48,9 @@ use proto::coordinator_service_server::{CoordinatorService, CoordinatorServiceSe
 use proto::{
     AuditChainRequest, AuditChainResponse, AuditSample, CommitmentResponse, Empty,
     LookupHistoryRequest, LookupHistoryResponse, LookupLabelHistoryRequest,
-    LookupLabelHistoryResponse, LookupLabelRequest, LookupLabelResponse, LookupValueRequest,
-    LookupValueResponse, PublishRequest, PublishResponse,
+    LookupLabelHistoryResponse, LookupLabelRequest, LookupLabelResponse, LookupValueChainRequest,
+    LookupValueChainResponse, LookupValueRequest, LookupValueResponse, PublishRequest,
+    PublishResponse,
 };
 use tokio::runtime::Runtime;
 use tokio::sync::Mutex as AsyncMutex;
@@ -173,7 +174,10 @@ where
         addr: std::net::SocketAddr,
     ) -> Result<(), tonic::transport::Error> {
         let service = Self::wrap_service(self);
-        Server::builder().add_service(service).serve(addr).await
+        Self::tuned_builder()
+            .add_service(service)
+            .serve(addr)
+            .await
     }
 
     /// Bind and serve with TLS. The client connects via
@@ -184,11 +188,32 @@ where
         tls: CoordinatorServerTlsConfig,
     ) -> Result<(), tonic::transport::Error> {
         let service = Self::wrap_service(self);
-        Server::builder()
+        Self::tuned_builder()
             .tls_config(tls.inner)?
             .add_service(service)
             .serve(addr)
             .await
+    }
+
+    /// Server builder with HTTP/2 flow-control + stream concurrency
+    /// tuned for the bench↔coord path. Patch 10 (2026-06-23): the
+    /// tonic defaults of 64 KB initial_connection_window_size +
+    /// 64 KB initial_stream_window_size were the actual GCP lookup
+    /// cap (~958 qps). With ~5 KB lookup_value_chain responses, a
+    /// 64 KB conn-window holds only ~12 in-flight responses; at
+    /// GCP RTT (~0.5 ms) the WINDOW_UPDATE cycle pegs sustained
+    /// throughput at ~64 KB / (5 KB × RTT) ≈ ~960 qps per
+    /// connection — exactly what v6-v12 baselines hit before this
+    /// patch. Bumped to 64 MiB conn / 16 MiB stream → ~13k in-flight
+    /// responses headroom, comfortably above any bench client
+    /// concurrency we drive. max_concurrent_streams = 4096 keeps
+    /// the server from advertising "unlimited" (tonic default,
+    /// fine but uncomfortable under adversarial clients).
+    fn tuned_builder() -> Server {
+        Server::builder()
+            .initial_connection_window_size(64 * 1024 * 1024)
+            .initial_stream_window_size(16 * 1024 * 1024)
+            .max_concurrent_streams(Some(4096))
     }
 
     /// Same 1 GiB ceiling as `ShardServer::wrap_service`. The coord↔
@@ -262,6 +287,38 @@ where
         Ok(Response::new(LookupLabelResponse {
             slot: encode(&slot).map_err(err_to_status)?,
             proof: encode(&proof).map_err(err_to_status)?,
+            server_processing_micros: start.elapsed().as_micros() as u64,
+        }))
+    }
+
+    async fn lookup_value_chain(
+        &self,
+        req: Request<LookupValueChainRequest>,
+    ) -> Result<Response<LookupValueChainResponse>, Status> {
+        let start = Instant::now();
+        let label = req.into_inner().label;
+        // Same `spawn_blocking` rationale as `lookup_label` above —
+        // both lookup_label_two_layer and lookup_value run blocking
+        // shard RPCs internally, so they must run on a blocking thread.
+        // We do both inside ONE spawn_blocking so we only pay the
+        // blocking-pool handoff once for the whole client-facing RPC.
+        let state = Arc::clone(&self.state);
+        let result = tokio::task::spawn_blocking(move || {
+            let state = state.blocking_read();
+            let (slot, label_proof) = state.lookup_label_two_layer(&label)?;
+            let value_proof = state.lookup_value(&slot)?;
+            Ok::<_, AegonError>((slot, label_proof, value_proof))
+        })
+        .await
+        .map_err(|e| Status::internal(format!("lookup_value_chain join: {e}")))?;
+        let (slot, label_proof, value_proof) = result.map_err(err_to_status)?;
+        Ok(Response::new(LookupValueChainResponse {
+            slot: encode(&slot).map_err(err_to_status)?,
+            label_proof: encode(&label_proof).map_err(err_to_status)?,
+            value_proof: encode(&value_proof).map_err(err_to_status)?,
+            // No KV-by-slot index yet (mirrors lookup_value); the
+            // client knows the value bytes out of band for now.
+            value: Vec::new(),
             server_processing_micros: start.elapsed().as_micros() as u64,
         }))
     }
@@ -628,8 +685,14 @@ where
     pub fn connect_with(cfg: CoordinatorClientConfig<E, P>) -> Result<Self, AegonError> {
         let runtime = Runtime::new()
             .map_err(|e| AegonError::Config(format!("tokio runtime: {e}")))?;
+        // Patch 10: HTTP/2 flow-control windows. See
+        // `CoordinatorServer::tuned_builder` for the rationale —
+        // the 64 KB tonic defaults capped sustained throughput at
+        // ~960 qps on the bench↔coord channel under GCP RTT.
         let mut endpoint = tonic::transport::Endpoint::from_shared(cfg.endpoint.clone())
-            .map_err(|e| AegonError::Config(format!("endpoint '{}': {e}", cfg.endpoint)))?;
+            .map_err(|e| AegonError::Config(format!("endpoint '{}': {e}", cfg.endpoint)))?
+            .initial_connection_window_size(64 * 1024 * 1024)
+            .initial_stream_window_size(16 * 1024 * 1024);
         if let Some(t) = cfg.connect_timeout {
             endpoint = endpoint.connect_timeout(t);
         }
@@ -823,6 +886,89 @@ where
             ));
         }
         Ok(proof)
+    }
+
+    /// Combined value-chain lookup: residency proof + value opening in
+    /// a single client↔coord round-trip. Mirror of `lookup_label` +
+    /// `lookup_value` bundled — the canonical "I just want everything
+    /// about this label right now" client call. Returns the verified
+    /// `LabelSlot`, the verified value proof, and whatever bytes the
+    /// server delivered inline (`Value` may be empty when the coord
+    /// has no DB-by-slot index — same semantics as `lookup_value`).
+    ///
+    /// When the caller already has the value bytes (typical for
+    /// publish-time roundtrips and benches), prefer
+    /// [`Self::lookup_value_chain_with_bytes`] so the value-side
+    /// verifier check binds the caller's bytes — symmetric with
+    /// `lookup_value_with_bytes`.
+    pub fn lookup_value_chain(
+        &self,
+        commit: &ShardedEpochCommitment<E, P>,
+        label: &Label,
+    ) -> Result<(LabelSlot, Value, ShardedValueProof<E, P>), AegonError> {
+        let req = LookupValueChainRequest {
+            label: label.clone(),
+        };
+        let resp = self.runtime.block_on(async {
+            self.client
+                .lock()
+                .await
+                .lookup_value_chain(req)
+                .await
+                .map_err(|s| AegonError::Config(format!("grpc lookup_value_chain: {s}")))
+        })?;
+        let inner = resp.into_inner();
+        let server_slot: LabelSlot = decode(&inner.slot)?;
+        let label_proof: ShardedLabelProofTwoLayer<E, P> = decode(&inner.label_proof)?;
+        let value_proof: ShardedValueProof<E, P> = decode(&inner.value_proof)?;
+        let verified_slot = verify_lookup_label_two_layer::<E, P, H>(
+            &self.verifier_ctx,
+            commit,
+            label,
+            &label_proof,
+        )?;
+        if server_slot != verified_slot {
+            return Err(AegonError::Verification(
+                "lookup_value_chain: server-claimed slot disagrees with verified label proof",
+            ));
+        }
+        if !inner.value.is_empty()
+            && !verify_lookup_value::<E, P, H>(
+                &self.verifier_ctx,
+                commit,
+                &verified_slot,
+                &inner.value,
+                &value_proof,
+            )?
+        {
+            return Err(AegonError::Verification(
+                "lookup_value_chain: value proof did not verify against server-supplied bytes",
+            ));
+        }
+        Ok((verified_slot, inner.value, value_proof))
+    }
+
+    /// Same as `lookup_value_chain`, but binds the value-side check to
+    /// caller-supplied bytes. Mirrors `lookup_value_with_bytes`.
+    pub fn lookup_value_chain_with_bytes(
+        &self,
+        commit: &ShardedEpochCommitment<E, P>,
+        label: &Label,
+        value: &Value,
+    ) -> Result<(LabelSlot, ShardedValueProof<E, P>), AegonError> {
+        let (slot, _server_value, value_proof) = self.lookup_value_chain(commit, label)?;
+        if !verify_lookup_value::<E, P, H>(
+            &self.verifier_ctx,
+            commit,
+            &slot,
+            value,
+            &value_proof,
+        )? {
+            return Err(AegonError::Verification(
+                "lookup_value_chain_with_bytes: value proof did not verify against caller bytes",
+            ));
+        }
+        Ok((slot, value_proof))
     }
 
     /// Fetch this label's value-history bundle from the coordinator

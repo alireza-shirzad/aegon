@@ -108,8 +108,8 @@ use akd::aegon::coordinator_grpc::{
     proto::{
         coordinator_service_client::CoordinatorServiceClient, AuditChainRequest, Empty,
         LookupHistoryRequest, LookupHistoryResponse, LookupLabelHistoryRequest,
-        LookupLabelHistoryResponse, LookupLabelRequest, LookupLabelResponse, LookupValueRequest,
-        LookupValueResponse, PublishRequest,
+        LookupLabelHistoryResponse, LookupLabelRequest, LookupLabelResponse,
+        LookupValueChainRequest, LookupValueRequest, LookupValueResponse, PublishRequest,
     },
     CoordinatorServer,
 };
@@ -183,6 +183,75 @@ fn read_self_rss_kb() -> Option<u64> {
         }
     }
     None
+}
+
+/// Classify a gRPC error from the coord client as transient (worth
+/// retrying) or terminal (real failure). Transient errors are TCP-layer
+/// hiccups — bench-client briefly loses connection to a still-healthy
+/// coord. v5 died at 46% of fill=1% (3h25m of preload work) because a
+/// single `tcp connect error` came back from tonic and the bench had
+/// no retry. The coord postmortem from that run confirmed the coord
+/// process was alive with 24.7% CPU and 1.8 GB RSS — the disconnect
+/// was purely on the wire. See the v5 failure log line at 06:02:11
+/// 2026-06-19. We treat the following as transient:
+///   * `tcp connect error` — TCP-layer fault, often from temporary
+///     refusal on the coord listener;
+///   * `service is currently unavailable` — gRPC's standard wording
+///     for HTTP/2 connection drop;
+///   * `broken pipe` / `connection reset` — kernel-level socket events
+///     across the long-running bench;
+///   * `h2 protocol error` / `stream reset` — tonic's wrapper around
+///     RST_STREAM or GOAWAY frames;
+///   * `deadline exceeded` — could be real overload, but at preload
+///     scale we'd rather retry than throw away the climb.
+/// Any other error (validation, panic on server, unknown code) is
+/// terminal — the retry would just hit it again.
+fn is_transient_grpc_error(status: &tonic::Status) -> bool {
+    let msg = status.message().to_lowercase();
+    msg.contains("tcp connect error")
+        || msg.contains("currently unavailable")
+        || msg.contains("broken pipe")
+        || msg.contains("connection reset")
+        || msg.contains("connection refused")
+        || msg.contains("h2 protocol error")
+        || msg.contains("stream reset")
+        || msg.contains("deadline exceeded")
+        || msg.contains("transport error")
+}
+
+/// Drive `rc.publish(req)` with bounded exponential-backoff retry on
+/// transient gRPC errors (see [`is_transient_grpc_error`]). Returns
+/// the final `Result` from tonic — caller maps it to an
+/// `AegonError`/exit code as before. Up to 6 attempts with 1s/2s/4s/
+/// 8s/16s/32s backoff = 63 s of total wait in the worst transient
+/// case, after which we give up and let the bench fail loudly.
+fn publish_with_retry(
+    raw_client: &CoordinatorServiceClient<tonic::transport::Channel>,
+    req: PublishRequest,
+    driver_rt: &tokio::runtime::Runtime,
+    context: &str,
+) -> Result<tonic::Response<akd::aegon::coordinator_grpc::proto::PublishResponse>, tonic::Status> {
+    let mut delay_secs: u64 = 1;
+    for attempt in 1..=6 {
+        let mut rc = raw_client.clone();
+        let req_clone = req.clone();
+        let res = driver_rt.block_on(async move { rc.publish(req_clone).await });
+        match res {
+            Ok(resp) => return Ok(resp),
+            Err(status) => {
+                if attempt == 6 || !is_transient_grpc_error(&status) {
+                    return Err(status);
+                }
+                eprintln!(
+                    "warn: {context}: transient gRPC error on attempt {attempt}/6 \
+                     (sleeping {delay_secs}s): {status}"
+                );
+                std::thread::sleep(std::time::Duration::from_secs(delay_secs));
+                delay_secs = (delay_secs * 2).min(32);
+            },
+        }
+    }
+    unreachable!("loop returns explicitly on every path");
 }
 
 #[derive(Debug, Parser)]
@@ -391,6 +460,16 @@ struct Args {
     /// flow), `history`, `label_history`.
     #[arg(long, default_value = "value")]
     throughput_lookup_kind: String,
+
+    /// Number of independent tonic Channels (TCP connections) the
+    /// throughput sweep multiplexes across. Default 1 = legacy single-
+    /// connection behavior; all c tasks share one HTTP/2 connection.
+    /// Higher values build a pool of N connections to the same coord
+    /// endpoint and assign task k to channel `k % N`. Useful for
+    /// isolating whether the per-connection tonic / hyper / h2 frame
+    /// loop is the throughput cap at high c.
+    #[arg(long, default_value_t = 1)]
+    throughput_channels: usize,
 
     /// Per-RPC timeout in the throughput sweep, in seconds. Bounds
     /// the resource footprint of a stalled request (gRPC buffer +
@@ -758,8 +837,20 @@ fn main() -> ExitCode {
     // message setup.
     let raw_client: CoordinatorServiceClient<tonic::transport::Channel> = match driver_rt
         .block_on(async {
+            // Patch 10: bump HTTP/2 flow-control windows. Tonic's
+            // 64 KB defaults capped sustained per-connection
+            // throughput at ~960 qps on the bench↔coord path under
+            // GCP RTT (~0.5 ms), independent of how fast the server
+            // could process individual requests. With ~5 KB
+            // value-chain responses, a 64 KB conn-window holds only
+            // ~12 in-flight; bumping to 64 MiB conn / 16 MiB stream
+            // lifts the cap well above any concurrency we drive.
+            // Matched to `CoordinatorServer::tuned_builder` on the
+            // server side.
             let endpoint = tonic::transport::Endpoint::from_shared(endpoint_url.clone())?
-                .connect_timeout(std::time::Duration::from_secs(10));
+                .connect_timeout(std::time::Duration::from_secs(10))
+                .initial_connection_window_size(64 * 1024 * 1024)
+                .initial_stream_window_size(16 * 1024 * 1024);
             let channel = endpoint.connect().await?;
             const MAX_MSG_BYTES: usize = 8 * 1024 * 1024 * 1024;
             let mut c = CoordinatorServiceClient::new(channel)
@@ -840,8 +931,10 @@ fn main() -> ExitCode {
                     return ExitCode::from(1);
                 }
                 let req = PublishRequest { updates_bytes: bytes };
-                let mut rc = raw_client.clone();
-                match driver_rt.block_on(async move { rc.publish(req).await }) {
+                let ctx = format!(
+                    "preload publish (level={target}, batch {current_count}..{batch_end})"
+                );
+                match publish_with_retry(&raw_client, req, &driver_rt, &ctx) {
                     Ok(_resp) => Ok(()),
                     Err(e) => Err(akd::aegon::AegonError::Config(format!(
                         "remote publish: {e}"
@@ -1923,10 +2016,59 @@ fn main() -> ExitCode {
                 let attempt_count = Arc::new(AtomicU64::new(0));
 
                 let (all_latencies, elapsed_s) = driver_rt.block_on(async {
+                    // Channel pool — by default size 1 (legacy: every task
+                    // multiplexes over the same TCP connection). With
+                    // --throughput-channels=N>1 we open N independent
+                    // connections to the same coord endpoint and round-
+                    // robin tasks across them, so a per-connection
+                    // serialization point (single h2 frame loop, single
+                    // HOL-blocked TCP stream, etc.) doesn't artificially
+                    // cap the result.
+                    let pool_size = args.throughput_channels.max(1);
+                    let mut pool: Vec<CoordinatorServiceClient<tonic::transport::Channel>> =
+                        Vec::with_capacity(pool_size);
+                    pool.push(raw_client.clone());
+                    for _ in 1..pool_size {
+                        // Patch 10 windows must apply to EVERY channel in
+                        // the pool — otherwise the multi-channel A/B
+                        // confounds "more frame-processing tasks" with
+                        // "lifted flow-control window" when comparing
+                        // pool_size=1 vs >1. Keep parity with the
+                        // primary raw_client built above.
+                        let endpoint = match tonic::transport::Endpoint::from_shared(
+                            endpoint_url.clone(),
+                        ) {
+                            Ok(e) => e
+                                .connect_timeout(Duration::from_secs(10))
+                                .initial_connection_window_size(64 * 1024 * 1024)
+                                .initial_stream_window_size(16 * 1024 * 1024),
+                            Err(e) => {
+                                eprintln!(
+                                    "  throughput_sweep: failed to build endpoint for extra channel: {e}"
+                                );
+                                return (Vec::new(), 0.0_f64);
+                            },
+                        };
+                        let ch = match endpoint.connect().await {
+                            Ok(c) => c,
+                            Err(e) => {
+                                eprintln!(
+                                    "  throughput_sweep: failed to open extra channel: {e}"
+                                );
+                                return (Vec::new(), 0.0_f64);
+                            },
+                        };
+                        const MAX_MSG_BYTES: usize = 8 * 1024 * 1024 * 1024;
+                        let c = CoordinatorServiceClient::new(ch)
+                            .max_decoding_message_size(MAX_MSG_BYTES)
+                            .max_encoding_message_size(MAX_MSG_BYTES);
+                        pool.push(c);
+                    }
+
                     let mut handles: Vec<tokio::task::JoinHandle<Vec<f64>>> =
                         Vec::with_capacity(concurrency);
                     for task_id in 0..concurrency {
-                        let mut client = raw_client.clone();
+                        let mut client = pool[task_id % pool_size].clone();
                         let stop = Arc::clone(&stop);
                         let measuring = Arc::clone(&measuring);
                         let err_count = Arc::clone(&err_count);
@@ -1963,29 +2105,22 @@ fn main() -> ExitCode {
                                         }
                                     },
                                     "value" => {
-                                        // Realistic two-step: label
-                                        // probe, then value at slot.
-                                        // Both legs inside the same
-                                        // timeout budget. Sum the two
-                                        // server-side processing
-                                        // intervals to get the total
-                                        // server work for the chained
-                                        // operation.
-                                        let chained = async {
-                                            let lbl_req = LookupLabelRequest { label: label.clone() };
-                                            let lbl_resp = client.lookup_label(lbl_req).await?;
-                                            let lbl_inner = lbl_resp.into_inner();
-                                            let slot = lbl_inner.slot;
-                                            let val_req = LookupValueRequest { slot };
-                                            let val_resp = client.lookup_value(val_req).await?;
-                                            let val_inner = val_resp.into_inner();
-                                            Ok::<u64, tonic::Status>(
-                                                lbl_inner.server_processing_micros
-                                                    + val_inner.server_processing_micros,
-                                            )
-                                        };
-                                        match tokio::time::timeout(rpc_timeout, chained).await {
-                                            Ok(Ok(us)) => Some(us),
+                                        // Patch 9: single combined RPC.
+                                        // Server runs label probe +
+                                        // value open inside one
+                                        // spawn_blocking; client pays
+                                        // one bench↔coord RTT instead
+                                        // of two.
+                                        let req = LookupValueChainRequest { label };
+                                        match tokio::time::timeout(
+                                            rpc_timeout,
+                                            client.lookup_value_chain(req),
+                                        )
+                                        .await
+                                        {
+                                            Ok(Ok(resp)) => {
+                                                Some(resp.into_inner().server_processing_micros)
+                                            },
                                             _ => None,
                                         }
                                     },
@@ -2207,8 +2342,10 @@ fn main() -> ExitCode {
                             return ExitCode::from(1);
                         }
                         let req = PublishRequest { updates_bytes: bytes };
-                        let mut rc = raw_client.clone();
-                        let resp = match driver_rt.block_on(async move { rc.publish(req).await }) {
+                        let ctx = format!(
+                            "publish_bench (level={target}, batch={batch_size}, sample={sample_idx})"
+                        );
+                        let resp = match publish_with_retry(&raw_client, req, &driver_rt, &ctx) {
                             Ok(r) => r.into_inner(),
                             Err(e) => {
                                 eprintln!(

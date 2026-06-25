@@ -26,7 +26,7 @@ use std::time::Duration;
 use ark_ec::pairing::Pairing;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use tokio::runtime::Runtime;
-use tokio::sync::{Mutex as AsyncMutex, RwLock as AsyncRwLock};
+use tokio::sync::RwLock as AsyncRwLock;
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Identity, Server, ServerTlsConfig};
 use tonic::{Request, Response, Status};
 
@@ -54,7 +54,8 @@ use proto::{
     ApplyPersistenceOpsRequest, ApplyPersistenceOpsResponse, CommitmentResponse, Empty,
     FetchHistoryOpeningsRequest, FetchHistoryOpeningsResponse, FetchLabelPlacementRequest,
     FetchLabelPlacementResponse, FetchValueHistoryRequest, FetchValueHistoryResponse,
-    FetchValueRequest, FetchValueResponse, FindLabelSlotRequest, FindLabelSlotResponse,
+    FetchLabelProofTrailRequest, FetchLabelProofTrailResponse, FetchValueRequest,
+    FetchValueResponse, FindLabelSlotRequest, FindLabelSlotResponse,
     OpenResponse, PublishBatchRequest, PublishBatchResponse, PublishPhase1Request,
     PublishPhase1Response, PublishPhase2AndPersistRequest, PublishPhase2AndPersistResponse,
     ReconfigurePrefillRequest, ReconfigurePrefillResponse, SlotEpochRequest,
@@ -232,6 +233,7 @@ where
     fn publish_batch(
         &mut self,
         _batch: &[(super::types::Label, super::types::Value)],
+        _vrf_proofs_shard_per_label: &[Vec<Vec<u8>>],
     ) -> Result<super::server::PublishBatchOutcome<E, P>, AegonError>
     where
         P::Commitment: Clone,
@@ -258,6 +260,67 @@ where
         ))
     }
 
+    /// Two-layer routing's combined lookup entry. Walks `H_slot`
+    /// exactly like [`Self::find_label_slot`] and, for every probed
+    /// slot, also returns the index-polynomial opening at that slot.
+    /// The coord uses this on the destination shard during
+    /// `ShardedAegon::lookup_label_two_layer` instead of issuing
+    /// `find_label_slot` + N × `open_index_at_slot` separately — one
+    /// network RTT instead of `slot_ctr0 + 2`. The shard walks the
+    /// H_slot trail only once.
+    ///
+    /// `Ok(None)` mirrors `find_label_slot`'s "label not in this
+    /// shard" outcome. The default implementation composes the legacy
+    /// methods so any transport that already implements
+    /// `find_label_slot` + `open_index_at_slot` works without further
+    /// wiring; the GRPC transport overrides this to make the RPC
+    /// directly and is the load-bearing path on the cluster.
+    fn fetch_label_proof_trail(
+        &self,
+        label: &super::types::Label,
+    ) -> Result<Option<super::sharded::LabelProofTrail<E, P>>, AegonError> {
+        let Some((final_slot_bits, slot_ctr0)) = self.find_label_slot(label)? else {
+            return Ok(None);
+        };
+        // Default fallback — recompose the trail by issuing one
+        // `open_index_at_slot` per probe. The remote transport
+        // overrides this with a single RPC.
+        let mut entries: Vec<super::sharded::LabelProofTrailEntry<E, P>> =
+            Vec::with_capacity((slot_ctr0 as usize) + 1);
+        let log_capacity = self.log_capacity();
+        for ctr in 0..=slot_ctr0 {
+            // Re-derive slot_bits via the same H_slot the shard used.
+            // We don't have a `&self.vrf_prover` here on the trait, so
+            // use the static H::h_slot path — this default is the
+            // in-process Aegon-backed `ShardHandle`, which also uses
+            // the static path internally for `H::h_slot` evaluations.
+            let slot_bits = if ctr == slot_ctr0 {
+                final_slot_bits.clone()
+            } else {
+                H::h_slot(ctr, label, log_capacity)
+            };
+            let (evaluation, proof) = self.open_index_at_slot(&slot_bits)?;
+            entries.push(super::sharded::LabelProofTrailEntry {
+                slot_bits,
+                evaluation,
+                proof,
+            });
+        }
+        Ok(Some(super::sharded::LabelProofTrail {
+            final_slot_bits,
+            slot_ctr0,
+            entries,
+            // The trait default has no access to a VRF prover or to
+            // the coord's H_shard route, so it leaves both proof
+            // vectors empty. The coord's lookup path treats empty
+            // proof vectors as "no cache available — recompute" and
+            // falls back to the legacy prove_h_* calls. Production
+            // shards override this fn with a path that fills both.
+            vrf_proofs_shard: Vec::new(),
+            vrf_proofs_slot: Vec::new(),
+        }))
+    }
+
     // ---------- per-shard durable state (post-refactor) ----------
     //
     // Defaults are deliberately no-op (or empty-result) so the
@@ -276,8 +339,8 @@ where
     ///
     /// Takes `&self` (not `&mut self`) so the coord can call it from a
     /// `&self` context like `persist_publish_to_db`. The remote impl
-    /// goes through an `AsyncMutex<ShardServiceClient>`; the in-process
-    /// default is a no-op.
+    /// constructs a fresh `ShardServiceClient` from the cached Channel
+    /// per call; the in-process default is a no-op.
     fn apply_persistence_ops(
         &self,
         _ops_bytes: &[u8],
@@ -305,6 +368,63 @@ where
         Ok(Vec::new())
     }
 
+    /// Combined value-history RPC: collapses fetch + per-entry remask +
+    /// freshness opening into a single shard round-trip. Used by
+    /// `ShardedAegon::lookup_history`.
+    ///
+    /// The default implementation composes
+    ///   `fetch_value_history` + per-entry `remask_value_history_entry`
+    ///   + `open_rand_value_at_slot_current`
+    /// so the in-process transport works without any extra plumbing.
+    /// The GRPC client overrides this with a single RPC; the GRPC
+    /// server hands off to this default impl on the shard side. Entries
+    /// in the returned `FullValueHistory` carry empty
+    /// `prev_merkle_path` / `post_merkle_path` — the coord stitches
+    /// those in from its `epoch_commits` cache before serving the
+    /// bundle to the user.
+    fn fetch_full_value_history(
+        &self,
+        label: &super::types::Label,
+    ) -> Result<super::sharded::FullValueHistory<E, P>, AegonError> {
+        let mut raw_entries = self.fetch_value_history(label)?;
+        if raw_entries.len() > super::sharded::HISTORY_WINDOW {
+            raw_entries.truncate(super::sharded::HISTORY_WINDOW);
+        }
+        if raw_entries.is_empty() {
+            return Ok(super::sharded::FullValueHistory {
+                entries: Vec::new(),
+                freshness_eval: None,
+                freshness_proof: None,
+            });
+        }
+        // Same decode + remask logic the coord used to run, just
+        // executed once on the shard side.
+        let entries: Vec<super::sharded::StoredValueHistoryEntry<E, P>> = raw_entries
+            .into_iter()
+            .map(|bytes| -> Result<super::sharded::StoredValueHistoryEntry<E, P>, AegonError> {
+                let entry =
+                    super::sharded::StoredValueHistoryEntry::<E, P>::deserialize_uncompressed_unchecked(
+                        &bytes[..],
+                    )
+                    .map_err(|e| {
+                        AegonError::Database(format!("decode value history entry: {e}"))
+                    })?;
+                self.remask_value_history_entry(entry)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        // Freshness opening at the latest entry's slot under THIS
+        // shard's live rand_value_poly. `entries[0]` is the most
+        // recently published value-change for `label`.
+        let latest = &entries[0];
+        let (freshness_eval, freshness_proof) =
+            self.open_rand_value_at_slot_current(&latest.slot_bits)?;
+        Ok(super::sharded::FullValueHistory {
+            entries,
+            freshness_eval: Some(freshness_eval),
+            freshness_proof: Some(freshness_proof),
+        })
+    }
+
     /// Read the `StoredLabelPlacement<E,P>` bytes for `label` from
     /// this shard's DB. `Ok(None)` when missing.
     fn fetch_label_placement(
@@ -312,6 +432,36 @@ where
         _label: &super::types::Label,
     ) -> Result<Option<Vec<u8>>, AegonError> {
         Ok(None)
+    }
+
+    /// Combined label-history RPC: collapses placement fetch + live
+    /// rand_index opening into a single shard round-trip. Used by
+    /// `ShardedAegon::lookup_label_history`.
+    ///
+    /// The default implementation composes `fetch_label_placement` +
+    /// `open_rand_index_at_slot_current` so the in-process transport
+    /// works without extra plumbing. The placement carries an empty
+    /// `placement_merkle_path` — the coord stitches that in from its
+    /// `epoch_commits` cache.
+    fn fetch_full_label_history(
+        &self,
+        label: &super::types::Label,
+    ) -> Result<Option<super::sharded::FullLabelHistory<E, P>>, AegonError> {
+        let Some(bytes) = self.fetch_label_placement(label)? else {
+            return Ok(None);
+        };
+        let placement =
+            super::sharded::StoredLabelPlacement::<E, P>::deserialize_uncompressed_unchecked(
+                &bytes[..],
+            )
+            .map_err(|e| AegonError::Database(format!("decode label placement: {e}")))?;
+        let (freshness_eval, freshness_proof) =
+            self.open_rand_index_at_slot_current(&placement.slot_bits)?;
+        Ok(Some(super::sharded::FullLabelHistory {
+            placement,
+            freshness_eval,
+            freshness_proof,
+        }))
     }
 
     /// Read the `HistoryOpenings<E,P>` bytes for `epoch` from this
@@ -558,11 +708,12 @@ where
     fn publish_batch(
         &mut self,
         batch: &[(super::types::Label, super::types::Value)],
+        vrf_proofs_shard_per_label: &[Vec<Vec<u8>>],
     ) -> Result<super::server::PublishBatchOutcome<E, P>, AegonError>
     where
         P::Commitment: Clone,
     {
-        Aegon::publish_batch(self, batch)
+        Aegon::publish_batch(self, batch, vrf_proofs_shard_per_label)
     }
 
     fn find_label_slot(
@@ -570,6 +721,54 @@ where
         label: &super::types::Label,
     ) -> Result<Option<(Vec<bool>, u64)>, AegonError> {
         Ok(Aegon::find_label_slot(self, label))
+    }
+
+    fn fetch_label_proof_trail(
+        &self,
+        label: &super::types::Label,
+    ) -> Result<Option<super::sharded::LabelProofTrail<E, P>>, AegonError> {
+        // In-process specialization: walk H_slot once and open the
+        // index polynomial at every probed slot in the same pass. We
+        // could lean on the trait default, but that re-walks H_slot
+        // for every probe — wasteful even in process. Mirrors the
+        // exact loop the coord used to run via N×OpenIndexAtSlot.
+        let Some((final_slot_bits, slot_ctr0)) = Aegon::find_label_slot(self, label) else {
+            return Ok(None);
+        };
+        let log_capacity = Aegon::log_capacity(self);
+        let mut entries: Vec<super::sharded::LabelProofTrailEntry<E, P>> =
+            Vec::with_capacity((slot_ctr0 as usize) + 1);
+        for ctr in 0..=slot_ctr0 {
+            let slot_bits = if ctr == slot_ctr0 {
+                final_slot_bits.clone()
+            } else {
+                H::h_slot(ctr, label, log_capacity)
+            };
+            let (evaluation, proof) = Aegon::open_index_at_slot(self, &slot_bits)?;
+            entries.push(super::sharded::LabelProofTrailEntry {
+                slot_bits,
+                evaluation,
+                proof,
+            });
+        }
+        // If a VRF prover is configured and `publish_batch` cached
+        // proofs for this label, ship them with the trail so the coord
+        // can skip its prove_h_shard / prove_h_slot calls. Empty
+        // vectors signal "no cache; recompute" to the coord.
+        let (vrf_proofs_shard, vrf_proofs_slot) = match self.label_vrf_proofs(label) {
+            Some(cached) => (
+                cached.vrf_proofs_shard.clone(),
+                cached.vrf_proofs_slot.clone(),
+            ),
+            None => (Vec::new(), Vec::new()),
+        };
+        Ok(Some(super::sharded::LabelProofTrail {
+            final_slot_bits,
+            slot_ctr0,
+            entries,
+            vrf_proofs_shard,
+            vrf_proofs_slot,
+        }))
     }
 
     fn log_capacity(&self) -> usize {
@@ -690,7 +889,10 @@ where
         addr: std::net::SocketAddr,
     ) -> Result<(), tonic::transport::Error> {
         let service = Self::wrap_service(self);
-        Server::builder().add_service(service).serve(addr).await
+        Self::tuned_builder()
+            .add_service(service)
+            .serve(addr)
+            .await
     }
 
     /// Bind and serve indefinitely on `addr` with TLS. The
@@ -702,11 +904,26 @@ where
         tls: ShardServerTlsConfig,
     ) -> Result<(), tonic::transport::Error> {
         let service = Self::wrap_service(self);
-        Server::builder()
+        Self::tuned_builder()
             .tls_config(tls.inner)?
             .add_service(service)
             .serve(addr)
             .await
+    }
+
+    /// Server builder with HTTP/2 flow-control + stream concurrency
+    /// tuned for the coord↔shard path. Patch 10 (2026-06-23): the
+    /// tonic 64 KB defaults capped sustained per-connection
+    /// throughput at ~960 qps under GCP RTT. The coord opens ONE
+    /// channel per shard, so this affects every coord→shard request
+    /// the cluster makes (lookups + publishes). Same conn=64 MiB /
+    /// stream=16 MiB tuning as the coordinator server — see
+    /// `CoordinatorServer::tuned_builder` for the derivation.
+    fn tuned_builder() -> Server {
+        Server::builder()
+            .initial_connection_window_size(64 * 1024 * 1024)
+            .initial_stream_window_size(16 * 1024 * 1024)
+            .max_concurrent_streams(Some(4096))
     }
 
     /// Wrap `self` as a tonic service with the message-size limits the
@@ -1005,10 +1222,23 @@ where
         &self,
         req: Request<PublishBatchRequest>,
     ) -> Result<Response<PublishBatchResponse>, Status> {
+        let inner = req.into_inner();
         let batch: Vec<(super::types::Label, super::types::Value)> =
-            decode(&req.into_inner().batch_bytes).map_err(err_to_status)?;
+            decode(&inner.batch_bytes).map_err(err_to_status)?;
+        // Empty bytes signal "no per-label H_shard proofs shipped"
+        // (legacy callers, or VRF disabled). Decoding an empty blob
+        // gives an empty Vec, which `Aegon::publish_batch` treats as
+        // "skip the VRF cache".
+        let vrf_proofs_shard_per_label: Vec<Vec<Vec<u8>>> =
+            if inner.vrf_proofs_shard_bytes.is_empty() {
+                Vec::new()
+            } else {
+                decode(&inner.vrf_proofs_shard_bytes).map_err(err_to_status)?
+            };
         let mut aegon = self.aegon.write().await;
-        let outcome = aegon.publish_batch(&batch).map_err(err_to_status)?;
+        let outcome = aegon
+            .publish_batch(&batch, &vrf_proofs_shard_per_label)
+            .map_err(err_to_status)?;
         let is_full = outcome.fullness_proof.is_some();
         let fullness_proof = outcome.fullness_proof.unwrap_or_default();
         Ok(Response::new(PublishBatchResponse {
@@ -1039,6 +1269,28 @@ where
                 slot_ctr: 0,
             })),
         }
+    }
+
+    async fn fetch_label_proof_trail(
+        &self,
+        req: Request<FetchLabelProofTrailRequest>,
+    ) -> Result<Response<FetchLabelProofTrailResponse>, Status> {
+        let label = req.into_inner().label;
+        let aegon = self.aegon.read().await;
+        // Reuse the in-process ShardHandle impl — it walks H_slot
+        // once and emits an opening per probed slot in the same pass.
+        let trail = ShardHandle::<E, P, H>::fetch_label_proof_trail(&*aegon, &label)
+            .map_err(err_to_status)?;
+        let Some(trail) = trail else {
+            return Ok(Response::new(FetchLabelProofTrailResponse {
+                found: false,
+                trail_uncompressed: Vec::new(),
+            }));
+        };
+        Ok(Response::new(FetchLabelProofTrailResponse {
+            found: true,
+            trail_uncompressed: encode(&trail).map_err(err_to_status)?,
+        }))
     }
 
     // ---------- per-shard durable state (post-refactor) ----------
@@ -1094,6 +1346,61 @@ where
         Ok(Response::new(FetchValueHistoryResponse { entries }))
     }
 
+    async fn fetch_full_value_history(
+        &self,
+        req: Request<proto::FetchFullValueHistoryRequest>,
+    ) -> Result<Response<proto::FetchFullValueHistoryResponse>, Status> {
+        let label = req.into_inner().label;
+        let db = self.db.as_ref().ok_or_else(|| {
+            Status::failed_precondition(
+                "shard has no DB configured for FetchFullValueHistory",
+            )
+        })?;
+        // Read sliding window directly from this shard's DB.
+        let mut raw_entries = db
+            .lrange(&key_value_history(&label), 0, -1)
+            .map_err(err_to_status)?;
+        if raw_entries.len() > super::sharded::HISTORY_WINDOW {
+            raw_entries.truncate(super::sharded::HISTORY_WINDOW);
+        }
+        if raw_entries.is_empty() {
+            return Ok(Response::new(proto::FetchFullValueHistoryResponse {
+                found: false,
+                history_uncompressed: Vec::new(),
+            }));
+        }
+        // Decode + remask + freshness opening — all under a single
+        // Aegon read lock so we don't reacquire it per entry.
+        let aegon = self.aegon.read().await;
+        let entries: Vec<super::sharded::StoredValueHistoryEntry<E, P>> = raw_entries
+            .into_iter()
+            .map(|bytes| -> Result<super::sharded::StoredValueHistoryEntry<E, P>, AegonError> {
+                let entry =
+                    super::sharded::StoredValueHistoryEntry::<E, P>::deserialize_uncompressed_unchecked(
+                        &bytes[..],
+                    )
+                    .map_err(|e| {
+                        AegonError::Database(format!("decode value history entry: {e}"))
+                    })?;
+                ShardHandle::<E, P, H>::remask_value_history_entry(&*aegon, entry)
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(err_to_status)?;
+        let latest = &entries[0];
+        let (freshness_eval, freshness_proof) = aegon
+            .open_rand_value_at_slot_current(&latest.slot_bits)
+            .map_err(err_to_status)?;
+        let full = super::sharded::FullValueHistory::<E, P> {
+            entries,
+            freshness_eval: Some(freshness_eval),
+            freshness_proof: Some(freshness_proof),
+        };
+        Ok(Response::new(proto::FetchFullValueHistoryResponse {
+            found: true,
+            history_uncompressed: encode(&full).map_err(err_to_status)?,
+        }))
+    }
+
     async fn fetch_label_placement(
         &self,
         req: Request<FetchLabelPlacementRequest>,
@@ -1114,6 +1421,45 @@ where
                 found: false,
                 placement_bytes: Vec::new(),
             },
+        }))
+    }
+
+    async fn fetch_full_label_history(
+        &self,
+        req: Request<proto::FetchFullLabelHistoryRequest>,
+    ) -> Result<Response<proto::FetchFullLabelHistoryResponse>, Status> {
+        let label = req.into_inner().label;
+        let db = self.db.as_ref().ok_or_else(|| {
+            Status::failed_precondition(
+                "shard has no DB configured for FetchFullLabelHistory",
+            )
+        })?;
+        let Some(placement_bytes) =
+            db.get(&key_label_placement(&label)).map_err(err_to_status)?
+        else {
+            return Ok(Response::new(proto::FetchFullLabelHistoryResponse {
+                found: false,
+                full_uncompressed: Vec::new(),
+            }));
+        };
+        let placement = super::sharded::StoredLabelPlacement::<E, P>::deserialize_uncompressed_unchecked(
+            &placement_bytes[..],
+        )
+        .map_err(|e| {
+            Status::internal(format!("decode label placement: {e}"))
+        })?;
+        let aegon = self.aegon.read().await;
+        let (freshness_eval, freshness_proof) = aegon
+            .open_rand_index_at_slot_current(&placement.slot_bits)
+            .map_err(err_to_status)?;
+        let full = super::sharded::FullLabelHistory::<E, P> {
+            placement,
+            freshness_eval,
+            freshness_proof,
+        };
+        Ok(Response::new(proto::FetchFullLabelHistoryResponse {
+            found: true,
+            full_uncompressed: encode(&full).map_err(err_to_status)?,
         }))
     }
 
@@ -1239,7 +1585,12 @@ where
     P: AegonPcs<E>,
 {
     runtime: Arc<Runtime>,
-    client: Arc<AsyncMutex<ShardServiceClient<Channel>>>,
+    /// Cloneable HTTP/2 channel. Each RPC clones it cheaply (Arc-bump
+    /// internally) and constructs a fresh `ShardServiceClient` from
+    /// the clone — HTTP/2 multiplexes the streams over the underlying
+    /// connection, so concurrent calls run in parallel without the
+    /// `Mutex<Client>` serialization the old design imposed.
+    channel: Channel,
     cached_verifier_context: VerifierContext<E, P>,
     cached_log_capacity: usize,
     retry: RetryPolicy,
@@ -1266,23 +1617,41 @@ where
     }
 
     /// Connect with full configurability (TLS, timeouts, retries).
+    /// Creates its own private 64-worker runtime — fine for tests and
+    /// one-off clients, but **don't** call this in a loop for many
+    /// shards: 128 × 64 = 8K worker threads on a 16-CPU coord
+    /// thrashes the OS scheduler and caps throughput on context
+    /// switches instead of real work. Use
+    /// [`build_shared_runtime`] +
+    /// [`Self::connect_with_runtime`] from the coord instead.
     pub fn connect_with(cfg: GrpcShardClientConfig<E, P>) -> Result<Self, AegonError> {
-        // The coord's plan_phase_1_batches RPC fan-out (~16K
-        // is_index_slot_occupied calls per fresh-cluster publish) is
-        // I/O-bound — each call is a sub-ms gRPC RTT, not CPU work.
-        // Default Runtime::new() sizes workers to CPU count, which on
-        // an n2-standard-4 coord caps in-flight concurrency at 4 and
-        // turns the fan-out into an 8 s serial wall. 64 workers
-        // multiplex the same connection without contention.
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(64)
-            .enable_all()
-            .thread_name("aegon-grpc-rt")
-            .build()
-            .map_err(|e| AegonError::Config(format!("tokio runtime: {e}")))?;
+        let runtime = Arc::new(build_shared_runtime()?);
+        Self::connect_with_runtime(cfg, runtime)
+    }
 
+    /// Same as [`Self::connect_with`] but reuses a caller-supplied
+    /// runtime instead of spawning a fresh one. The coord builds ONE
+    /// runtime up-front and passes it to all 128 shard clients —
+    /// without this, each `connect_with` would mint its own 64-worker
+    /// runtime and the coord would land at ~8K threads on a 16-CPU
+    /// VM, where OS-scheduler context switching dominates real work
+    /// and caps lookup throughput in the ~1 kqps range. With one
+    /// shared runtime the thread count drops to ~64 + main-runtime
+    /// workers + the blocking pool.
+    pub fn connect_with_runtime(
+        cfg: GrpcShardClientConfig<E, P>,
+        runtime: Arc<Runtime>,
+    ) -> Result<Self, AegonError> {
+        // Patch 10: HTTP/2 flow-control windows. Tonic defaults of
+        // 64 KB conn / 64 KB stream capped the coord↔shard channel
+        // at ~960 sustained RPCs/s per shard under GCP RTT.
+        // Publishes + lookups both go through this channel, so the
+        // cap matters for the whole cluster. See
+        // `ShardServer::tuned_builder` for the matched server side.
         let mut endpoint = tonic::transport::Endpoint::from_shared(cfg.endpoint.clone())
-            .map_err(|e| AegonError::Config(format!("endpoint '{}': {e}", cfg.endpoint)))?;
+            .map_err(|e| AegonError::Config(format!("endpoint '{}': {e}", cfg.endpoint)))?
+            .initial_connection_window_size(64 * 1024 * 1024)
+            .initial_stream_window_size(16 * 1024 * 1024);
         if let Some(t) = cfg.connect_timeout {
             endpoint = endpoint.connect_timeout(t);
         }
@@ -1296,24 +1665,47 @@ where
             })?;
         }
 
-        let client = runtime
+        let channel = runtime
             .block_on(endpoint.connect())
             .map_err(|e| AegonError::Config(format!("connect '{}': {e}", cfg.endpoint)))?;
-        // See `ShardServer::wrap_service` for the rationale on the 1 GiB
-        // limit — same trigger (batch=10k publish_phase_1 response).
-        const MAX_MSG_BYTES: usize = 8 * 1024 * 1024 * 1024;
-        let client = ShardServiceClient::new(client)
-            .max_decoding_message_size(MAX_MSG_BYTES)
-            .max_encoding_message_size(MAX_MSG_BYTES);
 
         Ok(Self {
-            runtime: Arc::new(runtime),
-            client: Arc::new(AsyncMutex::new(client)),
+            runtime,
+            channel,
             cached_verifier_context: cfg.verifier_context,
             cached_log_capacity: cfg.log_capacity,
             retry: cfg.retry,
         })
     }
+
+    /// Construct a fresh client from the shared channel. The clone is
+    /// cheap (an Arc-bump on the underlying HTTP/2 connection); each
+    /// caller gets its own `&mut self` so concurrent RPCs multiplex
+    /// natively over the connection instead of serializing on a
+    /// `Mutex<Client>`. See `ShardServer::wrap_service` for the 8 GiB
+    /// message-size rationale (same trigger as the old call sites).
+    fn client(&self) -> ShardServiceClient<Channel> {
+        const MAX_MSG_BYTES: usize = 8 * 1024 * 1024 * 1024;
+        ShardServiceClient::new(self.channel.clone())
+            .max_decoding_message_size(MAX_MSG_BYTES)
+            .max_encoding_message_size(MAX_MSG_BYTES)
+    }
+}
+
+/// Build the tokio runtime that backs all of one coord's shard
+/// clients. The fan-out workload (lookup, plan_phase_1, audit) is
+/// purely I/O-bound — each call awaits a sub-ms gRPC RTT — and tonic
+/// multiplexes any number of in-flight streams over a single
+/// connection. 64 workers leaves headroom for parallel publish
+/// fan-out (~16K calls per shard during a fresh-cluster start) while
+/// keeping total coord thread count bounded.
+pub fn build_shared_runtime() -> Result<Runtime, AegonError> {
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(64)
+        .enable_all()
+        .thread_name("aegon-grpc-rt")
+        .build()
+        .map_err(|e| AegonError::Config(format!("tokio runtime: {e}")))
 }
 
 /// One-shot fetch of a shard's `(VerifierContext, log_capacity)` over
@@ -1366,21 +1758,23 @@ where
     P::VerifierParam: Clone + Send + Sync,
 {
 
-    /// Run `op` against the client, retrying on transport-level
+    /// Run `op` against a fresh client, retrying on transport-level
     /// failures only (`Status::code() == Unavailable | Unknown`). The
     /// `op` closure is async, awaited from this method's owned tokio
-    /// runtime. Retries use exponential backoff capped at
-    /// `retry.max_backoff`.
+    /// runtime. Each attempt receives its own `ShardServiceClient`
+    /// constructed from the shared channel, so concurrent in-flight
+    /// retries do not serialize on a shared mutex. Retries use
+    /// exponential backoff capped at `retry.max_backoff`.
     fn with_retry<T, Fut, F>(&self, mut op: F) -> Result<T, AegonError>
     where
-        F: FnMut(Arc<AsyncMutex<ShardServiceClient<Channel>>>) -> Fut,
+        F: FnMut(ShardServiceClient<Channel>) -> Fut,
         Fut: std::future::Future<Output = Result<T, Status>>,
     {
         self.runtime.block_on(async {
             let mut backoff = self.retry.initial_backoff;
             let mut last_err: Option<Status> = None;
             for attempt in 0..self.retry.max_attempts {
-                match op(self.client.clone()).await {
+                match op(self.client()).await {
                     Ok(v) => return Ok(v),
                     Err(s) => {
                         let retriable = matches!(
@@ -1431,9 +1825,7 @@ where
             batch_bytes: encode(&batch.to_vec())?,
         };
         let resp = self.runtime.block_on(async {
-            self.client
-                .lock()
-                .await
+            self.client()
                 .publish_phase1_at_slots(req)
                 .await
                 .map_err(status_to_err)
@@ -1456,9 +1848,7 @@ where
             shard_id,
         };
         let resp = self.runtime.block_on(async {
-            self.client
-                .lock()
-                .await
+            self.client()
                 .publish_phase2_and_persist(req)
                 .await
                 .map_err(status_to_err)
@@ -1470,20 +1860,17 @@ where
 
     fn is_index_slot_occupied(&self, slot_bits: &[bool]) -> bool {
         // Hot path: plan_phase_1_batches calls this once per probe
-        // (~16K times per fresh-cluster publish). Using `with_retry`
-        // would hold the client's AsyncMutex across the whole RPC,
-        // serializing every concurrent call onto a single in-flight
-        // request and turning the fan-out into a serial wall. Take
-        // the lock just long enough to clone the (cheap, Channel-
-        // backed) client, then drive the RPC without holding it.
+        // (~16K times per fresh-cluster publish). Each call gets a
+        // fresh Channel-backed client so concurrent probes multiplex
+        // over the same HTTP/2 connection without serializing on a
+        // shared mutex.
         let req = SlotRequest {
             slot_bits: encode(&slot_bits.to_vec()).expect("slot_bits encode"),
         };
-        let client = self.client.clone();
-        let result = self.runtime.block_on(async move {
-            let mut client = client.lock().await.clone();
-            client.is_index_slot_occupied(req).await
-        });
+        let mut client = self.client();
+        let result = self
+            .runtime
+            .block_on(async move { client.is_index_slot_occupied(req).await });
         match result {
             Ok(resp) => resp.into_inner().occupied,
             // RPC unreachable; default to "occupied" so the
@@ -1500,9 +1887,9 @@ where
         let req = SlotRequest {
             slot_bits: encode(&slot_bits.to_vec())?,
         };
-        let resp = self.with_retry(move |client| {
+        let resp = self.with_retry(move |mut client| {
             let req = req.clone();
-            async move { client.lock().await.open_index_at_slot(req).await }
+            async move { client.open_index_at_slot(req).await }
         })?;
         let inner = resp.into_inner();
         Ok((decode(&inner.evaluation)?, decode(&inner.proof)?))
@@ -1515,9 +1902,9 @@ where
         let req = SlotRequest {
             slot_bits: encode(&slot_bits.to_vec())?,
         };
-        let resp = self.with_retry(move |client| {
+        let resp = self.with_retry(move |mut client| {
             let req = req.clone();
-            async move { client.lock().await.open_value_at_slot(req).await }
+            async move { client.open_value_at_slot(req).await }
         })?;
         let inner = resp.into_inner();
         Ok((decode(&inner.evaluation)?, decode(&inner.proof)?))
@@ -1532,15 +1919,9 @@ where
             slot_bits: encode(&slot_bits.to_vec())?,
             epoch,
         };
-        let resp = self.with_retry(move |client| {
+        let resp = self.with_retry(move |mut client| {
             let req = req.clone();
-            async move {
-                client
-                    .lock()
-                    .await
-                    .open_rand_index_at_slot_in_epoch(req)
-                    .await
-            }
+            async move { client.open_rand_index_at_slot_in_epoch(req).await }
         })?;
         let inner = resp.into_inner();
         Ok((decode(&inner.evaluation)?, decode(&inner.proof)?))
@@ -1555,15 +1936,9 @@ where
             slot_bits: encode(&slot_bits.to_vec())?,
             epoch,
         };
-        let resp = self.with_retry(move |client| {
+        let resp = self.with_retry(move |mut client| {
             let req = req.clone();
-            async move {
-                client
-                    .lock()
-                    .await
-                    .open_rand_value_at_slot_in_epoch(req)
-                    .await
-            }
+            async move { client.open_rand_value_at_slot_in_epoch(req).await }
         })?;
         let inner = resp.into_inner();
         Ok((decode(&inner.evaluation)?, decode(&inner.proof)?))
@@ -1576,15 +1951,9 @@ where
         let req = SlotRequest {
             slot_bits: encode(&slot_bits.to_vec())?,
         };
-        let resp = self.with_retry(move |client| {
+        let resp = self.with_retry(move |mut client| {
             let req = req.clone();
-            async move {
-                client
-                    .lock()
-                    .await
-                    .open_rand_value_at_slot_current(req)
-                    .await
-            }
+            async move { client.open_rand_value_at_slot_current(req).await }
         })?;
         let inner = resp.into_inner();
         Ok((decode(&inner.evaluation)?, decode(&inner.proof)?))
@@ -1597,15 +1966,9 @@ where
         let req = SlotRequest {
             slot_bits: encode(&slot_bits.to_vec())?,
         };
-        let resp = self.with_retry(move |client| {
+        let resp = self.with_retry(move |mut client| {
             let req = req.clone();
-            async move {
-                client
-                    .lock()
-                    .await
-                    .open_rand_index_at_slot_current(req)
-                    .await
-            }
+            async move { client.open_rand_index_at_slot_current(req).await }
         })?;
         let inner = resp.into_inner();
         Ok((decode(&inner.evaluation)?, decode(&inner.proof)?))
@@ -1618,22 +1981,16 @@ where
         let req = proto::RemaskValueHistoryEntryRequest {
             entry_uncompressed: encode(&entry)?,
         };
-        let resp = self.with_retry(move |client| {
+        let resp = self.with_retry(move |mut client| {
             let req = req.clone();
-            async move {
-                client
-                    .lock()
-                    .await
-                    .remask_value_history_entry(req)
-                    .await
-            }
+            async move { client.remask_value_history_entry(req).await }
         })?;
         decode(&resp.into_inner().entry_uncompressed)
     }
 
     fn current_commitment(&self) -> EpochCommitment<E, P> {
-        self.with_retry(|client| async move {
-            client.lock().await.current_commitment(Empty {}).await
+        self.with_retry(|mut client| async move {
+            client.current_commitment(Empty {}).await
         })
         .and_then(|r| decode(&r.into_inner().epoch_commitment))
         .expect("current_commitment RPC")
@@ -1656,16 +2013,16 @@ where
             count: count as u64,
             seed,
         };
-        let _ = self.with_retry(move |client| {
+        let _ = self.with_retry(move |mut client| {
             let req = req.clone();
-            async move { client.lock().await.reconfigure_prefill(req).await }
+            async move { client.reconfigure_prefill(req).await }
         })?;
         Ok(())
     }
 
     fn clear_dictionary(&mut self) -> Result<(), AegonError> {
-        let _ = self.with_retry(|client| async move {
-            client.lock().await.clear_dictionary(Empty {}).await
+        let _ = self.with_retry(|mut client| async move {
+            client.clear_dictionary(Empty {}).await
         })?;
         Ok(())
     }
@@ -1673,17 +2030,25 @@ where
     fn publish_batch(
         &mut self,
         batch: &[(super::types::Label, super::types::Value)],
+        vrf_proofs_shard_per_label: &[Vec<Vec<u8>>],
     ) -> Result<super::server::PublishBatchOutcome<E, P>, AegonError>
     where
         P::Commitment: Clone,
     {
+        // Ship the H_shard proofs alongside the batch so the shard can
+        // cache them for lookup. Encoding an empty slice as empty bytes
+        // keeps the wire small when VRF is not configured cluster-wide.
+        let vrf_proofs_shard_bytes: Vec<u8> = if vrf_proofs_shard_per_label.is_empty() {
+            Vec::new()
+        } else {
+            encode(&vrf_proofs_shard_per_label.to_vec())?
+        };
         let req = PublishBatchRequest {
             batch_bytes: encode(&batch.to_vec())?,
+            vrf_proofs_shard_bytes,
         };
         let resp = self.runtime.block_on(async {
-            self.client
-                .lock()
-                .await
+            self.client()
                 .publish_batch(req)
                 .await
                 .map_err(status_to_err)
@@ -1714,9 +2079,7 @@ where
             label: label.clone(),
         };
         let resp = self.runtime.block_on(async {
-            self.client
-                .lock()
-                .await
+            self.client()
                 .find_label_slot(req)
                 .await
                 .map_err(status_to_err)
@@ -1729,14 +2092,33 @@ where
         Ok(Some((slot_bits, inner.slot_ctr)))
     }
 
+    fn fetch_label_proof_trail(
+        &self,
+        label: &super::types::Label,
+    ) -> Result<Option<super::sharded::LabelProofTrail<E, P>>, AegonError> {
+        let req = FetchLabelProofTrailRequest {
+            label: label.clone(),
+        };
+        let resp = self.runtime.block_on(async {
+            self.client()
+                .fetch_label_proof_trail(req)
+                .await
+                .map_err(status_to_err)
+        })?;
+        let inner = resp.into_inner();
+        if !inner.found {
+            return Ok(None);
+        }
+        let trail: super::sharded::LabelProofTrail<E, P> = decode(&inner.trail_uncompressed)?;
+        Ok(Some(trail))
+    }
+
     fn apply_persistence_ops(&self, ops_bytes: &[u8]) -> Result<(), AegonError> {
         let req = ApplyPersistenceOpsRequest {
             ops_bytes: ops_bytes.to_vec(),
         };
         let _resp = self.runtime.block_on(async {
-            self.client
-                .lock()
-                .await
+            self.client()
                 .apply_persistence_ops(req)
                 .await
                 .map_err(status_to_err)
@@ -1752,9 +2134,7 @@ where
             label: label.clone(),
         };
         let resp = self.runtime.block_on(async {
-            self.client
-                .lock()
-                .await
+            self.client()
                 .fetch_value(req)
                 .await
                 .map_err(status_to_err)
@@ -1771,14 +2151,38 @@ where
             label: label.clone(),
         };
         let resp = self.runtime.block_on(async {
-            self.client
-                .lock()
-                .await
+            self.client()
                 .fetch_value_history(req)
                 .await
                 .map_err(status_to_err)
         })?;
         Ok(resp.into_inner().entries)
+    }
+
+    fn fetch_full_value_history(
+        &self,
+        label: &super::types::Label,
+    ) -> Result<super::sharded::FullValueHistory<E, P>, AegonError> {
+        let req = proto::FetchFullValueHistoryRequest {
+            label: label.clone(),
+        };
+        let resp = self.runtime.block_on(async {
+            self.client()
+                .fetch_full_value_history(req)
+                .await
+                .map_err(status_to_err)
+        })?;
+        let inner = resp.into_inner();
+        if !inner.found {
+            return Ok(super::sharded::FullValueHistory {
+                entries: Vec::new(),
+                freshness_eval: None,
+                freshness_proof: None,
+            });
+        }
+        let full: super::sharded::FullValueHistory<E, P> =
+            decode(&inner.history_uncompressed)?;
+        Ok(full)
     }
 
     fn fetch_label_placement(
@@ -1789,9 +2193,7 @@ where
             label: label.clone(),
         };
         let resp = self.runtime.block_on(async {
-            self.client
-                .lock()
-                .await
+            self.client()
                 .fetch_label_placement(req)
                 .await
                 .map_err(status_to_err)
@@ -1804,12 +2206,32 @@ where
         })
     }
 
+    fn fetch_full_label_history(
+        &self,
+        label: &super::types::Label,
+    ) -> Result<Option<super::sharded::FullLabelHistory<E, P>>, AegonError> {
+        let req = proto::FetchFullLabelHistoryRequest {
+            label: label.clone(),
+        };
+        let resp = self.runtime.block_on(async {
+            self.client()
+                .fetch_full_label_history(req)
+                .await
+                .map_err(status_to_err)
+        })?;
+        let inner = resp.into_inner();
+        if !inner.found {
+            return Ok(None);
+        }
+        let full: super::sharded::FullLabelHistory<E, P> =
+            decode(&inner.full_uncompressed)?;
+        Ok(Some(full))
+    }
+
     fn fetch_history_openings(&self, epoch: u64) -> Result<Option<Vec<u8>>, AegonError> {
         let req = FetchHistoryOpeningsRequest { epoch };
         let resp = self.runtime.block_on(async {
-            self.client
-                .lock()
-                .await
+            self.client()
                 .fetch_history_openings(req)
                 .await
                 .map_err(status_to_err)

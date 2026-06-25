@@ -81,6 +81,14 @@ BATCH_SIZES="${BATCH_SIZES:-2,4,8,16,32,64,128,256,512,1024,2048,4096,8192,16384
 SAMPLES_PER_BATCH="${SAMPLES_PER_BATCH:-1}"
 SETUP_SEED="${SETUP_SEED:-42}"
 PREFILL_SEED="${PREFILL_SEED:-1}"
+# Cap on concurrent gcloud SSH/IAP sessions across phases that fan out
+# over N_SHARDS (deploy, setup-bench SRS gen, start-shards). At N=128
+# in us-west1-a we observed ~60% of SSH sessions timing out at the
+# 900s wait_for_ssh ceiling because IAP throttles per-project tunnel
+# concurrency. Default 32 is well under the per-project IAP limit and
+# keeps each phase's wall-clock comparable to medium (4 shards × 1
+# round ≈ 128 shards / 32 × 4 rounds).
+MAX_CONCURRENT_SSH="${MAX_CONCURRENT_SSH:-32}"
 # Bumped from n2-standard-16 (64 GB) to n2-highmem-16 (128 GB) after
 # observing shard RSS climb to ~40 GB at fill=30% on the streaming
 # ladder (~14 GB → 38.8 GB across 8 M entries written, then dropping
@@ -290,6 +298,19 @@ wait_for_ssh() {
     sleep 5
   done
   die "[$instance] SSH not ready after $((max_tries * (per_try_secs + 5)))s"
+}
+
+# Block until fewer than MAX_CONCURRENT_SSH background jobs of THIS shell
+# are still running. Call right before backgrounding a subshell that
+# opens a gcloud SSH/IAP session. Uses `jobs -pr` (running PIDs only) so
+# completed-but-unreaped children don't count against the cap — the
+# existing `for pid in pids; wait $pid` failure-tracking loop still
+# retrieves their exit status correctly.
+wait_for_slot() {
+  local max="${MAX_CONCURRENT_SSH:-32}"
+  while (( $(jobs -pr 2>/dev/null | wc -l) >= max )); do
+    sleep 1
+  done
 }
 
 remote() {
@@ -698,23 +719,40 @@ start_shard() {
   # SPAWNED), but the IAP-tunnel setup + teardown can each take
   # tens of seconds. 120s wasn't enough headroom — slower IAP setup
   # could eat the entire budget before the remote bash even started.
+  # Retry on transient gcloud SSH races. At N_SHARDS=128 with 32-way
+  # parallelism, gcloud's writes to ~/.ssh/google_compute_known_hosts
+  # collide and one in ~5-20 spawns aborts with "Host key verification
+  # failed" (rc=255) BEFORE the inner ssh even runs — UserKnownHostsFile
+  # only covers the inner ssh, not gcloud's own host-key fetch. The
+  # race is transient: a 5s wait lets the other writers finish, and
+  # subsequent attempts almost always succeed.
   local spawn_out spawn_rc=0
-  spawn_out="$(timeout 300 gcloud compute ssh "$name" --zone="$ZONE" \
-    --tunnel-through-iap --quiet \
-    --ssh-flag="-o UserKnownHostsFile=/dev/null" \
-    --ssh-flag="-o StrictHostKeyChecking=no" \
-    --ssh-flag="-o LogLevel=ERROR" \
-    --command="$spawn_cmd" 2>&1)" \
-    || spawn_rc=$?
-  if [[ "$spawn_out" == *"FAILED: SRS file not present"* ]]; then
-    printf '%s\n' "$spawn_out"
-    return 1
-  fi
-  if ! grep -qE '^SPAWNED$' <<<"$spawn_out"; then
-    log "[$name] spawn ssh did not report SPAWNED (rc=$spawn_rc); output:"
+  local attempt
+  for attempt in 1 2 3 4; do
+    spawn_rc=0
+    spawn_out="$(timeout 300 gcloud compute ssh "$name" --zone="$ZONE" \
+      --tunnel-through-iap --quiet \
+      --ssh-flag="-o UserKnownHostsFile=/dev/null" \
+      --ssh-flag="-o StrictHostKeyChecking=no" \
+      --ssh-flag="-o LogLevel=ERROR" \
+      --command="$spawn_cmd" 2>&1)" \
+      || spawn_rc=$?
+    if [[ "$spawn_out" == *"FAILED: SRS file not present"* ]]; then
+      printf '%s\n' "$spawn_out"
+      return 1
+    fi
+    if grep -qE '^SPAWNED$' <<<"$spawn_out"; then
+      break
+    fi
+    if (( attempt < 4 )) && [[ "$spawn_out" == *"Host key verification failed"* ]]; then
+      log "[$name] spawn hit known_hosts race (attempt $attempt/4); retrying in 5s"
+      sleep 5
+      continue
+    fi
+    log "[$name] spawn ssh did not report SPAWNED (rc=$spawn_rc) after $attempt attempt(s); output:"
     printf '%s\n' "$spawn_out"
     return "$spawn_rc"
-  fi
+  done
   log "[$name] spawn OK; polling for :$SHARD_PORT"
   wait_for_shard_ready "$name"
 }
@@ -844,6 +882,7 @@ cmd_deploy() {
   local -a deploy_pids=()
   for ((i = 0; i < N_SHARDS; i++)); do
     local name; name="$(shard_name "$i")"
+    wait_for_slot
     (
       wait_for_ssh "$name"
       log "[$name] uploading aegon_shard_server + aegon_srs_gen"
@@ -998,6 +1037,7 @@ cmd_start_shards() {
   local -a pids=()
   for ((i = 0; i < N_SHARDS; i++)); do
     local name; name="$(shard_name "$i")"
+    wait_for_slot
     (
       start_shard "$name" "$i" "$masking_eps_joined"
       log "[$name] start done"
@@ -1336,6 +1376,7 @@ cmd_setup_bench() {
   local -a gen_pids=()
   for ((i = 0; i < N_SHARDS; i++)); do
     local name; name="$(shard_name "$i")"
+    wait_for_slot
     (
       local outfile="$tmp_dir/$i.sec"
       # `time -p` (POSIX) emits "real X.XX" on stderr, robust across
@@ -1635,6 +1676,9 @@ cmd_publish_bench() {
   # Poll-loop on the LOCAL side. Each iteration is a short, recoverable
   # ssh command. When the systemd unit deactivates, we exit the loop.
   log "[$cname] polling $unit + streaming $remote_log -> $local_log (resilient to SSH death)"
+  # See cmd_lookup_bench for the rationale on disabling -e in the
+  # poll region — same set-e/pipefail bug applies here.
+  set +e
   local printed_bytes=0
   local poll_rc=0
   while true; do
@@ -1665,19 +1709,31 @@ cmd_publish_bench() {
       --ssh-flag="-o LogLevel=ERROR" \
       --command="systemctl is-active $unit 2>/dev/null || true" 2>/dev/null \
       | tr -d '[:space:]')"
-    if [[ "$active" != "active" && "$active" != "activating" ]]; then
-      log "[$cname] $unit final state: '$active' ($total_bytes bytes printed)"
-      local exit_code
-      exit_code="$(timeout 60 gcloud compute ssh "$cname" \
-        --zone="$ZONE" --tunnel-through-iap --strict-host-key-checking=no --quiet \
-        --ssh-flag="-o UserKnownHostsFile=/dev/null" \
-        --ssh-flag="-o StrictHostKeyChecking=no" \
-        --ssh-flag="-o LogLevel=ERROR" \
-        --command="systemctl show $unit --property=ExecMainStatus --value 2>/dev/null || echo 0" 2>/dev/null \
-        | tr -d '[:space:]')"
-      poll_rc="${exit_code:-1}"
-      break
-    fi
+    # See cmd_lookup_bench for the rationale on whitelisting terminal
+    # states only — empty `active` means the SSH probe failed, NOT
+    # that the unit terminated.
+    case "$active" in
+      inactive|failed|deactivating|dead)
+        log "[$cname] $unit final state: '$active' ($total_bytes bytes printed)"
+        local exit_code
+        exit_code="$(timeout 60 gcloud compute ssh "$cname" \
+          --zone="$ZONE" --tunnel-through-iap --strict-host-key-checking=no --quiet \
+          --ssh-flag="-o UserKnownHostsFile=/dev/null" \
+          --ssh-flag="-o StrictHostKeyChecking=no" \
+          --ssh-flag="-o LogLevel=ERROR" \
+          --command="systemctl show $unit --property=ExecMainStatus --value 2>/dev/null || echo 0" 2>/dev/null \
+          | tr -d '[:space:]')"
+        poll_rc="${exit_code:-1}"
+        break
+        ;;
+      active|activating)
+        # normal — keep polling
+        ;;
+      *)
+        # empty or unknown — SSH probe failed; don't exit, just retry
+        log "[$cname] $unit state probe returned '$active' (likely SSH transient); retrying"
+        ;;
+    esac
     sleep 60
   done
 
@@ -1700,6 +1756,8 @@ cmd_publish_bench() {
       --command="tail -c +$((printed_bytes + 1)) $remote_log 2>/dev/null" 2>/dev/null \
       | tee -a "$local_log" >&2
   fi
+  # End of resilient polling region — restore set -e.
+  set -e
 
   # Always try to fetch the JSON — even on failure, the bench may have
   # flushed partial data (one stage per completed fill_percent).
@@ -2078,6 +2136,11 @@ LOOKUP_THROUGHPUT_CONCURRENCIES="${LOOKUP_THROUGHPUT_CONCURRENCIES:-}"
 LOOKUP_THROUGHPUT_WINDOW_SECS="${LOOKUP_THROUGHPUT_WINDOW_SECS:-20}"
 LOOKUP_THROUGHPUT_WARMUP_SECS="${LOOKUP_THROUGHPUT_WARMUP_SECS:-3}"
 LOOKUP_THROUGHPUT_LOOKUP_KIND="${LOOKUP_THROUGHPUT_LOOKUP_KIND:-value}"
+# Number of independent tonic Channels (HTTP/2 connections) the bench
+# opens to the coord and round-robins requests across. Default 1
+# matches legacy behaviour. Raise (e.g. 4-16) when investigating a
+# single-channel bench↔coord bottleneck.
+LOOKUP_THROUGHPUT_CHANNELS="${LOOKUP_THROUGHPUT_CHANNELS:-1}"
 LOCAL_LOOKUP_BENCH_DIR="${LOCAL_LOOKUP_BENCH_DIR:-/tmp/aegon-lookup-bench}"
 cmd_lookup_bench() {
   require_project
@@ -2210,6 +2273,7 @@ cmd_lookup_bench() {
           --throughput-window-secs $LOOKUP_THROUGHPUT_WINDOW_SECS \
           --throughput-warmup-secs $LOOKUP_THROUGHPUT_WARMUP_SECS \
           --throughput-lookup-kind $LOOKUP_THROUGHPUT_LOOKUP_KIND \
+          --throughput-channels $LOOKUP_THROUGHPUT_CHANNELS \
           --output $remote_out > $remote_log 2>&1
       '
     echo LAUNCHED
@@ -2223,6 +2287,18 @@ cmd_lookup_bench() {
   mkdir -p "$LOCAL_LOOKUP_BENCH_DIR"
   : > "$local_log"   # truncate
   log "[$cname] polling $unit + streaming $remote_log -> $local_log (resilient to SSH death)"
+  # The polling region is INTENTIONALLY tolerant of transient SSH/IAP
+  # failures: a single `timeout 60 gcloud ssh` returning 124 (slow IAP
+  # tunnel handshake) under `set -euo pipefail` would propagate as
+  # pipeline-failure and abort the entire script — even though the
+  # remote bench process is still healthy on the bench-client. This
+  # was observed at 00:12:56 UTC 2026-06-18 (large bench v1): a 60s
+  # poll-loop SSH timed out, the script returned rc=124, run-cluster
+  # auto-ran `down`, and we lost 4.5h of cluster setup. Disable -e in
+  # the poll region so transient SSH errors just skip the iteration;
+  # the loop relies on the next iteration succeeding and on the unit's
+  # final-state check to decide when to stop.
+  set +e
   local printed_bytes=0
   local poll_rc=0
   while true; do
@@ -2248,7 +2324,15 @@ cmd_lookup_bench() {
       printed_bytes=$total_bytes
     fi
 
-    # Check unit status. is-active prints active|inactive|failed.
+    # Check unit status. is-active prints active|inactive|failed|deactivating|
+    # activating. Empty/unknown means the systemctl probe ITSELF failed
+    # (SSH timeout, IAP throttling) — NOT that the unit terminated.
+    # Observed at 03:03:46 UTC 2026-06-18: bench was still healthy on
+    # the remote (postmortem PID 3184 confirmed) but `is-active` returned
+    # empty for 17 minutes worth of consecutive polls, the empty string
+    # fell through `!= "active" && != "activating"` and we falsely
+    # treated the unit as terminated, exiting the poll loop and tearing
+    # down a healthy cluster. Whitelist only KNOWN terminal states.
     local active
     active="$(timeout 60 gcloud compute ssh "$cname" \
       --zone="$ZONE" --tunnel-through-iap --strict-host-key-checking=no --quiet \
@@ -2257,20 +2341,29 @@ cmd_lookup_bench() {
       --ssh-flag="-o LogLevel=ERROR" \
       --command="systemctl is-active $unit 2>/dev/null || true" 2>/dev/null \
       | tr -d '[:space:]')"
-    if [[ "$active" != "active" && "$active" != "activating" ]]; then
-      log "[$cname] $unit final state: '$active' (started=$total_bytes bytes printed)"
-      # Capture the unit's exit code.
-      local exit_code
-      exit_code="$(timeout 60 gcloud compute ssh "$cname" \
-        --zone="$ZONE" --tunnel-through-iap --strict-host-key-checking=no --quiet \
-        --ssh-flag="-o UserKnownHostsFile=/dev/null" \
-        --ssh-flag="-o StrictHostKeyChecking=no" \
-        --ssh-flag="-o LogLevel=ERROR" \
-        --command="systemctl show $unit --property=ExecMainStatus --value 2>/dev/null || echo 0" 2>/dev/null \
-        | tr -d '[:space:]')"
-      poll_rc="${exit_code:-1}"
-      break
-    fi
+    case "$active" in
+      inactive|failed|deactivating|dead)
+        log "[$cname] $unit final state: '$active' (started=$total_bytes bytes printed)"
+        # Capture the unit's exit code.
+        local exit_code
+        exit_code="$(timeout 60 gcloud compute ssh "$cname" \
+          --zone="$ZONE" --tunnel-through-iap --strict-host-key-checking=no --quiet \
+          --ssh-flag="-o UserKnownHostsFile=/dev/null" \
+          --ssh-flag="-o StrictHostKeyChecking=no" \
+          --ssh-flag="-o LogLevel=ERROR" \
+          --command="systemctl show $unit --property=ExecMainStatus --value 2>/dev/null || echo 0" 2>/dev/null \
+          | tr -d '[:space:]')"
+        poll_rc="${exit_code:-1}"
+        break
+        ;;
+      active|activating)
+        # normal — keep polling
+        ;;
+      *)
+        # empty or unknown — SSH probe failed; don't exit, just retry
+        log "[$cname] $unit state probe returned '$active' (likely SSH transient); retrying"
+        ;;
+    esac
     sleep 60
   done
 
@@ -2293,6 +2386,8 @@ cmd_lookup_bench() {
       --command="tail -c +$((printed_bytes + 1)) $remote_log 2>/dev/null" 2>/dev/null \
       | tee -a "$local_log" >&2
   fi
+  # End of resilient polling region — restore set -e.
+  set -e
 
   # Always try to fetch the JSON — even on failure, the bench may have
   # flushed partial data (one entry per completed fill level). Losing
@@ -2429,6 +2524,75 @@ cmd_watchdog() {
   fi
   log "watchdog: all $((N_SHARDS + 1)) hosts OK"
   return 0
+}
+
+cmd_reset() {
+  # Factory-reset every aegon_* service back to fresh state without
+  # touching VMs, binaries, SRS, VPC, or firewalls. Runs the existing
+  # start-masking → start-shards → start-coord chain in sequence;
+  # each phase kills any running aegon_* process, wipes its on-disk
+  # state directory, and starts a fresh process. Use between
+  # iterations: ~30 min total (vs ~90 min for a fresh up→deploy→setup
+  # → start chain, or ~5 min for stop/start which doesn't actually
+  # reset service state).
+  #
+  # If you've changed code, run `deploy` BEFORE this so the fresh
+  # processes pick up the new binaries; otherwise reset just restarts
+  # the existing binaries against clean state.
+  log "factory-reset: start-masking → start-shards → start-coord"
+  cmd_start_masking
+  cmd_start_shards
+  cmd_start_coord
+  log "factory-reset complete — services fresh, state wiped, VMs/SRS retained"
+}
+
+cmd_stop() {
+  # Park the cluster: stop every aegon-bench-* VM in parallel, but
+  # leave VPC / firewalls / boot disks intact. Compute meter stops;
+  # boot-disk storage keeps billing (~$0.17/GB-month for pd-ssd → ~$15/hr
+  # for a 128-shard 500 GB-disk fleet). Use this between back-to-back
+  # bench iterations: bringing the cluster back up via `start` takes
+  # ~5 min vs ~40 min for a fresh `up`, paying for itself over any
+  # iteration cadence under ~30 min. For overnight breaks, use `down`
+  # instead so you also stop paying for boot-disk storage.
+  require_project
+  log "stopping aegon-bench-* VMs in $ZONE (boot disks retained)"
+  local insts
+  insts="$(gcloud compute instances list \
+    --filter="name~^aegon-bench- AND status=RUNNING" \
+    --zones="$ZONE" \
+    --format='value(name)' 2>/dev/null | tr '\n' ' ')"
+  if [[ -z "$insts" ]]; then
+    log "no RUNNING aegon-bench-* instances in $ZONE"
+    return 0
+  fi
+  log "stopping $(echo "$insts" | wc -w) instance(s) in parallel"
+  gcloud compute instances stop $insts --zone="$ZONE" --quiet >/dev/null || \
+    log "WARN: some instance stops failed; check console"
+  log "stop complete"
+}
+
+cmd_start_vms() {
+  # Resume a parked cluster: start every aegon-bench-* VM that's
+  # currently TERMINATED. Companion to `stop`. After this returns
+  # the VMs are up but no aegon_* daemons are running — re-run
+  # `start-masking`, `start-shards`, `start-coord` to bring services
+  # back online, then `lookup-bench` (or whatever) as usual.
+  require_project
+  log "starting parked aegon-bench-* VMs in $ZONE"
+  local insts
+  insts="$(gcloud compute instances list \
+    --filter="name~^aegon-bench- AND status=TERMINATED" \
+    --zones="$ZONE" \
+    --format='value(name)' 2>/dev/null | tr '\n' ' ')"
+  if [[ -z "$insts" ]]; then
+    log "no TERMINATED aegon-bench-* instances in $ZONE"
+    return 0
+  fi
+  log "starting $(echo "$insts" | wc -w) instance(s) in parallel"
+  gcloud compute instances start $insts --zone="$ZONE" --quiet >/dev/null || \
+    die "instance start failed; check console"
+  log "VMs started — re-run start-masking / start-shards / start-coord to bring services up"
 }
 
 cmd_down() {
@@ -2584,6 +2748,9 @@ main() {
     watchdog)       cmd_watchdog ;;
     logs)           cmd_logs "$@" ;;
     down)           cmd_down ;;
+    stop)           cmd_stop ;;
+    start)          cmd_start_vms ;;
+    reset)          cmd_reset ;;
     ""|-h|--help|help) usage ;;
     *) usage; die "unknown subcommand: $sub" ;;
   esac

@@ -1,0 +1,10 @@
+[2026-06-24T22:39:35+0000] host: instance-20260503-131121
+[2026-06-24T22:39:35+0000] PROJECT=jbonneau-mwalfish-9a0c  N_SHARDS=128  SHARD_LOG_CAPACITY=27  KZH_K=9  ZONE=us-west1-a
+[2026-06-24T22:39:35+0000] PUBLISH_BATCH_SIZES=4096,8192,16384,32768,65536,131072
+[2026-06-24T22:39:35+0000] MIGRATION_REGIME=large
+[2026-06-24T22:39:35+0000] results dir: /home/alrshir/aegon/bench-results
+[2026-06-24T22:39:35+0000] PUBLISH_WARMUP_BATCH_SIZE not set; using migration-best K=1048576 from /home/alrshir/aegon/bench-results/migration/large_best_k.txt
+[2026-06-24T22:39:35+0000] PUBLISH_WARMUP_BATCH_SIZE=1048576 (used by lookup-bench for between-fill preload climbs)
+[2026-06-24T22:39:35+0000] starting watchdog loop (per-shard probe every 60s) -> /home/alrshir/aegon/bench-results/large-watchdog.log
+[2026-06-24T22:39:35+0000] watchdog PID=3026113
+[2026-06-24T22:39:35+0000] ==== large-lookup-bench START ====

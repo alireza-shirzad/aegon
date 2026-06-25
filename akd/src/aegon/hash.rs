@@ -474,6 +474,60 @@ impl VrfProver {
         let bits = output_to_bits(&output.to_bytes(), num_vars);
         (bits, proof.to_bytes())
     }
+
+    /// Bits-only variant of `prove_h_shard`. The VRF output is bit-
+    /// identical to what `prove_h_shard` would derive from its proof,
+    /// but skips the ZK proof generation entirely — `evaluate` costs
+    /// one scalar multiplication versus `prove`'s three plus a Fiat-
+    /// Shamir hash. Use this on the publish path where the proof is
+    /// never serialized to the wire.
+    pub fn evaluate_h_shard(
+        &self,
+        shard_ctr: u64,
+        label: &[u8],
+        num_vars: usize,
+    ) -> Vec<bool> {
+        if num_vars == 0 {
+            return Vec::new();
+        }
+        self.evaluate_with_tag(b"aegon.h_shard", shard_ctr, label, num_vars)
+    }
+
+    /// Bits-only variant of `prove_h_slot`. See `evaluate_h_shard` for
+    /// the rationale — used by the shard's open-addressing probe loop
+    /// where the slot bits are recomputable by anyone re-running the
+    /// VRF, so the proof is never persisted.
+    pub fn evaluate_h_slot(
+        &self,
+        slot_ctr: u64,
+        label: &[u8],
+        num_vars: usize,
+    ) -> Vec<bool> {
+        self.evaluate_with_tag(b"aegon.h_slot", slot_ctr, label, num_vars)
+    }
+
+    /// Bits-only variant of `prove_h_bits` — used by the legacy single-
+    /// layer code paths when the proof would be discarded.
+    pub fn evaluate_h_bits(
+        &self,
+        ctr: u64,
+        label: &[u8],
+        num_vars: usize,
+    ) -> Vec<bool> {
+        self.evaluate_with_tag(b"aegon.h_bits", ctr, label, num_vars)
+    }
+
+    fn evaluate_with_tag(
+        &self,
+        tag: &[u8],
+        ctr: u64,
+        label: &[u8],
+        num_vars: usize,
+    ) -> Vec<bool> {
+        let alpha = vrf_alpha_with_tag(tag, ctr, label);
+        let output = self.sk.evaluate(&alpha);
+        output_to_bits(&output.to_bytes(), num_vars)
+    }
 }
 
 /// Client-side VRF verifier. Holds the public key and verifies that
@@ -670,26 +724,43 @@ impl EcVrfHash {
         let bits = output_to_bits(&output.to_bytes(), num_vars);
         (bits, proof.to_bytes())
     }
+
+    /// Bits-only variant of `prove_with_tag` — `evaluate` runs one
+    /// scalar mul vs `prove`'s three plus a Fiat-Shamir hash. The
+    /// VRF output is bit-identical (both derive from the same
+    /// `gamma = h_point * sk`), so any caller that discards the
+    /// proof can use this directly.
+    fn evaluate_with_tag(
+        tag: &[u8],
+        ctr: u64,
+        label: &[u8],
+        num_vars: usize,
+    ) -> Vec<bool> {
+        let alpha = vrf_alpha_with_tag(tag, ctr, label);
+        let output = vrf_secret_key().evaluate(&alpha);
+        output_to_bits(&output.to_bytes(), num_vars)
+    }
 }
 
 impl<F: PrimeField> HashSuite<F> for EcVrfHash {
     fn h_bits(ctr: u64, label: &[u8], num_vars: usize) -> Vec<bool> {
-        // Pays the full prove cost so benches reflect the real ECVRF
-        // overhead; the proof itself is discarded because the trait
-        // signature is static. Production call sites surface the
-        // proof via `VrfProver` / `EcVrfHash::prove_h_bits` instead.
-        let (bits, _proof) = Self::prove_h_bits(ctr, label, num_vars);
-        bits
+        // The trait signature returns bits only — no caller of
+        // `h_bits` can use the proof, so skipping it (one scalar mul
+        // vs three plus a Fiat-Shamir hash) is pure win. Call sites
+        // that need the proof use `VrfProver::prove_h_bits` or
+        // `EcVrfHash::prove_h_bits` directly.
+        Self::evaluate_with_tag(b"aegon.h_bits", ctr, label, num_vars)
     }
 
     fn h_shard(shard_ctr: u64, label: &[u8], num_vars: usize) -> Vec<bool> {
-        let (bits, _proof) = Self::prove_h_shard(shard_ctr, label, num_vars);
-        bits
+        if num_vars == 0 {
+            return Vec::new();
+        }
+        Self::evaluate_with_tag(b"aegon.h_shard", shard_ctr, label, num_vars)
     }
 
     fn h_slot(slot_ctr: u64, label: &[u8], num_vars: usize) -> Vec<bool> {
-        let (bits, _proof) = Self::prove_h_slot(slot_ctr, label, num_vars);
-        bits
+        Self::evaluate_with_tag(b"aegon.h_slot", slot_ctr, label, num_vars)
     }
 
     fn h_f(label: &[u8]) -> F {
