@@ -1,0 +1,22 @@
+[2026-06-26T02:27:27+0000] host: instance-20260503-131121
+[2026-06-26T02:27:27+0000] PROJECT=jbonneau-mwalfish-9a0c  N_SHARDS=1  SHARD_LOG_CAPACITY=22  KZH_K=7
+[2026-06-26T02:27:27+0000] PUBLISH_BATCH_SIZES=2,4,8,16,32,64
+[2026-06-26T02:27:27+0000] results dir: /home/alrshir/aegon/bench-results
+[2026-06-26T02:27:27+0000] ==== small-up START ====
+[2026-06-26T02:30:44+0000] ==== small-up OK in 197s ====
+[2026-06-26T02:30:44+0000] ==== small-deploy START ====
+[2026-06-26T02:33:10+0000] ==== small-deploy OK in 146s ====
+[2026-06-26T02:33:10+0000] ==== small-setup-bench START ====
+[2026-06-26T02:33:23+0000] ==== small-setup-bench OK in 13s ====
+[2026-06-26T02:33:23+0000] ==== small-start-masking START ====
+[2026-06-26T02:35:41+0000] ==== small-start-masking OK in 138s ====
+[2026-06-26T02:35:41+0000] ==== small-start-shards START ====
+[2026-06-26T02:40:56+0000] ==== small-start-shards OK in 315s ====
+[2026-06-26T02:40:56+0000] ==== small-lookup-bench START ====
+[2026-06-26T03:01:16+0000] ==== small-lookup-bench OK in 1220s ====
+[2026-06-26T03:01:16+0000] ==== small-down START ====
+[2026-06-26T03:04:12+0000] ==== small-down OK in 176s ====
+[2026-06-26T03:04:12+0000] ==== SMALL CLUSTER DONE ====
+[2026-06-26T03:04:12+0000] JSON outputs:
+/home/alrshir/aegon/bench-results/lookup/small-combined.json
+/home/alrshir/aegon/bench-results/setup/small_cluster.json
