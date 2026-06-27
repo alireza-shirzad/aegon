@@ -60,7 +60,7 @@ run_phase() {
 
 # Medium-regime cluster config — passed through to bench-cluster.sh.
 export PROJECT
-export N_SHARDS="${N_SHARDS:-2}"
+export N_SHARDS="${N_SHARDS:-8}"
 export SHARD_LOG_CAPACITY="${SHARD_LOG_CAPACITY:-27}"
 export KZH_K="${KZH_K:-9}"
 # PUBLISH_TRUE_LOG_CAP / LOOKUP_TRUE_LOG_CAP are now auto-derived
@@ -104,6 +104,17 @@ export LOOKUP_THROUGHPUT_CONCURRENCIES="${LOOKUP_THROUGHPUT_CONCURRENCIES:-1,4,1
 # Set USE_REMOTE_COORD=0 to fall back to the legacy in-process coord
 # topology if you need to compare against pre-refactor bench numbers.
 export USE_REMOTE_COORD="${USE_REMOTE_COORD:-1}"
+
+# Commodity hardware: all roles on n2-standard-16 (16 vCPU / 64 GB).
+# Medium per-shard load at N_SHARDS=8 is half of what N=4 would carry
+# (5M entries/shard at fill=30%, 10M at fill=60%, 15M at fill=90%).
+# The 60%/90% peaks may flirt with the 64 GB ceiling — watchdog will
+# surface OOM if it triggers; cap fills via PUBLISH_FILL_PERCENTS/
+# LOOKUP_FILL_PERCENTS overrides if needed.
+export SHARD_MACHINE_TYPE="${SHARD_MACHINE_TYPE:-n2-standard-16}"
+export COORD_MACHINE_TYPE="${COORD_MACHINE_TYPE:-n2-standard-16}"
+export BENCH_CLIENT_MACHINE_TYPE="${BENCH_CLIENT_MACHINE_TYPE:-n2-standard-16}"
+export MASKING_MACHINE_TYPE="${MASKING_MACHINE_TYPE:-n2-standard-16}"
 
 # Outputs — distinct filenames so medium and large don't overwrite
 # each other in the same results dirs.

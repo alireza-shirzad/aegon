@@ -15,6 +15,7 @@ All assumptions live in the constants block. Override at the CLI:
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import math
 from dataclasses import dataclass
 from pathlib import Path
@@ -83,12 +84,22 @@ class ClusterConfig:
     # has to fit the deepest fill the bench will reach; sizing for
     # 100% gives a steady-state operational estimate.
     max_fill_percent: float = 100.0
+    # Explicit cluster sizing overrides. When set, take precedence over
+    # the auto-derivation in n_shards_for(). Used by MEASURED_REGIMES to
+    # pin the actual cluster shape we benchmarked (e.g. medium runs at
+    # N_SHARDS=8 even though the auto-derivation would say 2 because
+    # bench-cluster.sh oversizes for headroom and per-shard memory).
+    n_shards_override: int | None = None
+    n_masking_servers: int = 1
 
     def entries_per_shard(self) -> int:
         return (1 << self.shard_log_capacity) // self.overprov_factor
 
     def n_shards_for(self, dict_capacity: float) -> int:
-        """Round up to a power of two — the bench requires it."""
+        """Round up to a power of two — the bench requires it.
+        Honors n_shards_override if set."""
+        if self.n_shards_override is not None:
+            return self.n_shards_override
         raw = max(1.0, dict_capacity / self.entries_per_shard())
         return 1 << max(0, math.ceil(math.log2(raw)))
 
@@ -116,7 +127,7 @@ def compute_cost(dict_capacity: float, cfg: ClusterConfig) -> tuple[CostBreakdow
     coord_disk_gb = cfg.coord_disk_gb_for(dict_capacity)
     shards = n * MACHINE_USD_PER_HOUR[cfg.shard_machine]
     coord = MACHINE_USD_PER_HOUR[cfg.coord_machine]
-    masking = MACHINE_USD_PER_HOUR[cfg.masking_machine]
+    masking = cfg.n_masking_servers * MACHINE_USD_PER_HOUR[cfg.masking_machine]
     coord_disk = coord_disk_gb * disk_usd_per_gb_hour(cfg.coord_disk_kind)
     shard_disks = n * cfg.shard_boot_disk_gb * disk_usd_per_gb_hour(cfg.shard_boot_disk_kind)
     nat = NAT_USD_PER_HOUR
@@ -127,22 +138,83 @@ def compute_cost(dict_capacity: float, cfg: ClusterConfig) -> tuple[CostBreakdow
     )
 
 
-# Three measured-regime markers — pinned to the bench's actual configs.
+# Three measured-regime markers — pinned to the bench's actual configs
+# as of v16 (commodity n2-standard-16 across the board; medium upsized
+# to N_SHARDS=8 to fit fill=90% per-shard data in 64 GB).
 MEASURED_REGIMES = [
-    ("small",  1 << 20, ClusterConfig(shard_log_capacity=22)),
-    ("medium", 1 << 26, ClusterConfig(shard_log_capacity=27)),
-    ("large",  1 << 32, ClusterConfig(shard_log_capacity=27)),
+    ("small",  1 << 20, ClusterConfig(
+        shard_log_capacity=22,
+        n_shards_override=1,
+        n_masking_servers=4,
+    )),
+    ("medium", 1 << 26, ClusterConfig(
+        shard_log_capacity=27,
+        n_shards_override=8,
+        n_masking_servers=4,
+    )),
+    ("large",  1 << 32, ClusterConfig(
+        shard_log_capacity=27,
+        n_shards_override=128,
+        n_masking_servers=16,
+    )),
 ]
+
+
+def _cluster_config_for_capacity(cap: float, cfg: ClusterConfig) -> ClusterConfig:
+    """Pick the realistic cluster sizing for a given capacity. Uses the same
+    per-regime (n_shards, n_masking, shard_log_capacity) choices as MEASURED_REGIMES
+    so the continuous cost curve passes through the measured points exactly.
+    Below 'small': use small's config. Between regimes: use the upper regime's
+    config (oversize, never undersize). Above 'large': extrapolate large's
+    config (scale n_shards & n_masking with cap)."""
+    small_cap = MEASURED_REGIMES[0][1]
+    medium_cap = MEASURED_REGIMES[1][1]
+    large_cap = MEASURED_REGIMES[2][1]
+    _, _, small_cfg = MEASURED_REGIMES[0]
+    _, _, medium_cfg = MEASURED_REGIMES[1]
+    _, _, large_cfg = MEASURED_REGIMES[2]
+
+    if cap <= small_cap:
+        regime_cfg = small_cfg
+    elif cap <= medium_cap:
+        regime_cfg = medium_cfg
+    elif cap <= large_cap:
+        regime_cfg = large_cfg
+    else:
+        # Extrapolate past large: scale shards & masking with capacity (power of 2)
+        scale_factor = cap / large_cap
+        n_shards = 1 << math.ceil(math.log2(large_cfg.n_shards_override * scale_factor))
+        n_masking = max(large_cfg.n_masking_servers,
+                        int(large_cfg.n_masking_servers * scale_factor))
+        return dataclasses.replace(
+            large_cfg,
+            n_shards_override=n_shards,
+            n_masking_servers=n_masking,
+            shard_machine=cfg.shard_machine,
+            coord_machine=cfg.coord_machine,
+            masking_machine=cfg.masking_machine,
+        )
+
+    # Inherit machine types from the user-provided cfg so --shard-machine etc. still work.
+    return dataclasses.replace(
+        regime_cfg,
+        shard_machine=cfg.shard_machine,
+        coord_machine=cfg.coord_machine,
+        masking_machine=cfg.masking_machine,
+    )
 
 
 def plot_cost_vs_capacity(cfg: ClusterConfig, out_path: Path) -> Path:
     # Continuous capacity sweep — 2^20 (1M) to 2^40 (~1T) entries.
+    # Each sampled capacity uses the realistic per-regime cluster sizing
+    # (matching MEASURED_REGIMES) so the curve passes through the measured points.
     log_caps = np.arange(20, 41)
     capacities = 2.0 ** log_caps
     breakdowns: list[CostBreakdown] = []
     n_shards_list: list[int] = []
     for cap in capacities:
-        bd, n, _ = compute_cost(cap, cfg)
+        cap_cfg = _cluster_config_for_capacity(cap, cfg)
+        bd, n, _ = compute_cost(cap, cap_cfg)
         breakdowns.append(bd)
         n_shards_list.append(n)
 

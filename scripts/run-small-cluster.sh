@@ -80,6 +80,15 @@ export N_MASKING_SERVERS="${N_MASKING_SERVERS:-4}"
 # saturation region with the new 4-masking-server headroom.
 export LOOKUP_THROUGHPUT_CONCURRENCIES="${LOOKUP_THROUGHPUT_CONCURRENCIES:-1,4,16,64,256,512,1024}"
 
+# Commodity hardware: all roles on n2-standard-16 (16 vCPU / 64 GB).
+# Small-regime per-shard load tops out ~4M entries (fill=90% @ log_cap=22)
+# which fits in <10 GB RSS — no need for the highmem default that
+# bench-cluster.sh sets for medium's 30%/60%/90% fills.
+export SHARD_MACHINE_TYPE="${SHARD_MACHINE_TYPE:-n2-standard-16}"
+export COORD_MACHINE_TYPE="${COORD_MACHINE_TYPE:-n2-standard-16}"
+export BENCH_CLIENT_MACHINE_TYPE="${BENCH_CLIENT_MACHINE_TYPE:-n2-standard-16}"
+export MASKING_MACHINE_TYPE="${MASKING_MACHINE_TYPE:-n2-standard-16}"
+
 # Outputs — distinct filenames so small/medium/large don't collide.
 export LOCAL_SETUP_BENCH_OUT="$RESULTS_DIR/setup/small_cluster.json"
 export LOCAL_PUBLISH_BENCH_DIR="$RESULTS_DIR/publish"
