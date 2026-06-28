@@ -28,6 +28,11 @@ SMALL_LOOKUP_DIR = REPO_ROOT / "bench-results" / "_remote-small" / "lookup"
 PUBLISH_DIR = REPO_ROOT / "bench-results" / "publish"
 MIGRATION_DIR = REPO_ROOT / "bench-results" / "migration"
 PLOTS_DIR = REPO_ROOT / "bench-results" / "plots"
+# Facebook AKD (MySQL backend) overlay data. Same bench harness wrote
+# these, so the JSON layout matches aegon's exactly; load_akd_* just
+# rebrands the result so the plot helpers can overlay it as a distinct
+# "system" alongside the aegon regimes.
+AKD_DIR = REPO_ROOT / "bench-results" / "akd-mysql"
 
 # Lookup operations and the JSON field stems for each.
 LOOKUP_KINDS = [
@@ -57,6 +62,24 @@ REGIME_STYLES = {
     "small": {"color": "#1f77b4", "marker": "o", "label": "small (1 shard, log capacity = 22)"},
     "medium": {"color": "#d62728", "marker": "s", "label": "medium (2 shards, log capacity = 27)"},
     "large": {"color": "#2ca02c", "marker": "^", "label": "large (128 shards, log capacity = 27)"},
+}
+
+# AKD overlay styles. Color matches the corresponding aegon regime so
+# the eye groups by capacity tier; the dashed line + hollow marker
+# encodes "system = AKD-MySQL" so a reader can read aegon-vs-AKD on
+# linestyle alone. Keys match the regime they pair with so plot
+# helpers can look them up by the same name as the aegon regime.
+AKD_STYLES = {
+    "small": {
+        "color": REGIME_STYLES["small"]["color"],
+        "marker": "D", "linestyle": "--",
+        "label": "AKD-MySQL small",
+    },
+    "medium": {
+        "color": REGIME_STYLES["medium"]["color"],
+        "marker": "D", "linestyle": "--",
+        "label": "AKD-MySQL medium",
+    },
 }
 
 # Regime subsets we render. Every top-level plot function is called
@@ -563,6 +586,67 @@ def load_large() -> list[LevelStats]:
     return out
 
 
+def _load_akd_json(path: Path) -> list[LevelStats]:
+    """Load one AKD-MySQL JSON (same layout as aegon's lookup JSON;
+    written by the same harness) into LevelStats. Differs from
+    load_medium() only in path and the fact that AKD reports the same
+    proof-size value for each (regime, fill) — i.e. percentile bands
+    collapse to a point — but the helpers handle that already."""
+    if not path.exists():
+        return []
+    with path.open() as fh:
+        d = json.load(fh)
+    fill_pcts = d["params"]["fill_percents"]
+    levels = d["levels"]
+    tlc = int(d["params"]["true_log_capacity"])
+    out: list[LevelStats] = []
+    for fp, lvl in zip(fill_pcts, levels):
+        samples = lvl.get("lookup", {}).get("samples", [])
+        if not samples:
+            continue
+        server_ms = {
+            k: [s[f"server_lookup_{k}_ns"] / 1e6 for s in samples]
+            for k, _label, _title in LOOKUP_KINDS
+        }
+        client_ms = {
+            k: [s[f"client_lookup_{k}_ns"] / 1e6 for s in samples]
+            for k, _label, _title in LOOKUP_KINDS
+        }
+        proof_bytes = {
+            k: [s[PROOF_FIELDS[k]] for s in samples]
+            for k, _label, _title in LOOKUP_KINDS
+        }
+        publish_ms: dict[int, list[float]] = {}
+        for b in lvl.get("publish_bench", {}).get("batches", []):
+            publish_ms[int(b["batch_size"])] = list(b.get("samples_ms", []))
+        audit_samples = lvl.get("audit", {}).get("samples", [])
+        audit_ms = [s["audit_invariance_ns"] / 1e6 for s in audit_samples]
+        audit_bytes = [s["audit_proof_bytes"] for s in audit_samples]
+        cs_kind, cs_samples = _extract_concurrency_sweep(lvl)
+        out.append(LevelStats(
+            fill_percent=float(fp),
+            true_log_capacity=tlc,
+            server_ms=server_ms,
+            client_ms=client_ms,
+            proof_bytes=proof_bytes,
+            publish_ms=publish_ms,
+            audit_ms=audit_ms,
+            audit_bytes=audit_bytes,
+            concurrency_sweep_kind=cs_kind,
+            concurrency_sweep=cs_samples,
+        ))
+    out.sort(key=lambda x: x.fill_percent)
+    return out
+
+
+def load_akd_small() -> list[LevelStats]:
+    return _load_akd_json(AKD_DIR / "small.json")
+
+
+def load_akd_medium() -> list[LevelStats]:
+    return _load_akd_json(AKD_DIR / "medium.json")
+
+
 def percentile(vs: list[float], q: float) -> float:
     if not vs:
         return float("nan")
@@ -693,6 +777,7 @@ def plot_audit_vs_fill(
     large: list[LevelStats],
     subset: tuple[str, ...],
     agg: str = AGG_MEDIAN,
+    akd: dict[str, list[LevelStats]] | None = None,
 ) -> Path:
     """Audit figure: 2 side-by-side panels.
 
@@ -819,6 +904,40 @@ def plot_audit_vs_fill(
     ax_size.grid(True, which="both", alpha=0.3)
     ax_size.set_xticks([1, 30, 60, 90])
 
+    # AKD-MySQL overlay. Audit proofs in AKD are an entire epoch's
+    # cross-shard merkle data (~13 MB) vs aegon's per-shard
+    # commitments (~640 B for medium), so the y-axis switches to log
+    # when AKD is present to keep both readable.
+    if akd:
+        akd_regimes = [(n, akd[n]) for n in subset if n in akd and akd[n]]
+        for akd_name, akd_levels in akd_regimes:
+            astyle = AKD_STYLES[akd_name]
+            lvls_time = [lvl for lvl in akd_levels if lvl.audit_ms]
+            if lvls_time:
+                xs = np.array([lvl.fill_percent for lvl in lvls_time])
+                central = np.array([percentile(lvl.audit_ms, q_mid) for lvl in lvls_time])
+                ax_time.plot(
+                    xs, central,
+                    color=astyle["color"], marker=astyle["marker"],
+                    linestyle=astyle["linestyle"], markerfacecolor="none",
+                    linewidth=1.6, markersize=6, label=astyle["label"],
+                )
+            lvls_size = [lvl for lvl in akd_levels if lvl.audit_bytes]
+            if lvls_size:
+                xs = np.array([lvl.fill_percent for lvl in lvls_size])
+                central = np.array([percentile(lvl.audit_bytes, q_mid) for lvl in lvls_size]) / 1024.0
+                ax_size.plot(
+                    xs, central,
+                    color=astyle["color"], marker=astyle["marker"],
+                    linestyle=astyle["linestyle"], markerfacecolor="none",
+                    linewidth=1.6, markersize=6, label=astyle["label"],
+                )
+        # Aegon audit costs are O(shards) bytes / ~1 ms; AKD's are
+        # O(epoch delta) MB / ~100 ms. Linear axes would collapse the
+        # aegon curves into the x-axis — log lets both regimes read.
+        ax_time.set_yscale("log")
+        ax_size.set_yscale("log")
+
     # Two-row shared legend (matches the server / client / proof-size
     # layout): small + medium on top, large + large-extrapolated below.
     handles, labels = ax_time.get_legend_handles_labels()
@@ -880,6 +999,7 @@ def plot_publish_vs_batch(
     large: list[LevelStats],
     subset: tuple[str, ...],
     agg: str = AGG_MEDIAN,
+    akd: dict[str, list[LevelStats]] | None = None,
 ) -> Path:
     """Publish time vs. batch size, faceted by regime, one curve per
     fill level (color = fill %).
@@ -1061,6 +1181,29 @@ def plot_publish_vs_batch(
                         label=f"{f:g}% (extrapolated)",
                     )
 
+        # AKD-MySQL overlay for this panel's regime. Color matches the
+        # corresponding fill in the aegon panel (so a reader can
+        # vertically align AKD's fill=30% curve with aegon's fill=30%
+        # curve), linestyle is dashed and marker hollow to encode
+        # "system = AKD-MySQL". No per-fill labels — they'd duplicate
+        # aegon's legend rows; a single sentinel handle is appended
+        # below the panel loop instead.
+        if akd and regime_name in akd:
+            for lvl in sorted(akd[regime_name], key=lambda l: l.fill_percent):
+                if not lvl.publish_ms:
+                    continue
+                if lvl.fill_percent not in fill_to_color:
+                    continue
+                color = cmap(fill_to_color[lvl.fill_percent])
+                batch_sizes = np.array(sorted(lvl.publish_ms))
+                xs_a = batch_sizes.astype(float)
+                ys_a = np.array([percentile(lvl.publish_ms[b], q_mid) for b in batch_sizes]) / 1000.0
+                ax.plot(
+                    xs_a, ys_a,
+                    color=color, marker="D", markerfacecolor="none",
+                    linestyle="--", linewidth=1.4, markersize=5,
+                )
+
         ax.set_xlabel("publish batch size (updates)")
         ax.grid(True, which="both", alpha=0.3)
         # No per-panel legend — handles roll up into one shared legend
@@ -1078,6 +1221,17 @@ def plot_publish_vs_batch(
     for ax in axes:
         for handle, label in zip(*ax.get_legend_handles_labels()):
             seen.setdefault(label, handle)
+    if akd and any(akd.get(n) for n in subset):
+        # Single sentinel handle that explains the dashed/hollow
+        # lines. Drawing it as a Line2D so the legend marker matches
+        # what the reader sees in the panels (dashed line + diamond
+        # marker, neutral grey since the AKD curves themselves are
+        # fill-colored).
+        from matplotlib.lines import Line2D
+        seen["AKD-MySQL (dashed)"] = Line2D(
+            [0], [0], color="#555555", linestyle="--", marker="D",
+            markerfacecolor="none", markersize=6, linewidth=1.6,
+        )
     def _label_sort_key(lbl: str) -> tuple[float, int]:
         # "30% (extrap.)" sorts after measured 30%; uses the numeric
         # prefix and a tiebreaker bit so measured comes before extrap.
@@ -1094,7 +1248,7 @@ def plot_publish_vs_batch(
         # different vertical positions; the panel-area rect leaves
         # enough room at the bottom for all three.
         def _row_index(lbl: str) -> int:
-            if "extrap" in lbl:
+            if "extrap" in lbl or lbl.startswith("AKD"):
                 return 1
             try:
                 num = float(lbl.split("%")[0])
@@ -1531,6 +1685,7 @@ def plot_lookup_per_operation(
     large: list[LevelStats],
     subset: tuple[str, ...],
     agg: str = AGG_MEDIAN,
+    akd: dict[str, list[LevelStats]] | None = None,
 ) -> list[Path]:
     """One figure per lookup kind, with server-time, client-time, and
     proof-size panels side by side (same audit-style layout: all
@@ -1543,7 +1698,7 @@ def plot_lookup_per_operation(
     """
     paths: list[Path] = []
     for key, _short, title in LOOKUP_KINDS:
-        paths.append(_plot_one_lookup_op(small, medium, large, key, title, subset, agg))
+        paths.append(_plot_one_lookup_op(small, medium, large, key, title, subset, agg, akd))
     return paths
 
 
@@ -1555,6 +1710,7 @@ def _plot_one_lookup_op(
     title: str,
     subset: tuple[str, ...],
     agg: str = AGG_MEDIAN,
+    akd: dict[str, list[LevelStats]] | None = None,
 ) -> Path:
     """Render a 3-panel figure (server time | client time | proof size)
     for a single lookup operation. Mirrors the audit_vs_fill layout but
@@ -1685,6 +1841,42 @@ def _plot_one_lookup_op(
     ax_size.grid(True, which="both", alpha=0.3)
     ax_size.set_xticks([1, 30, 60, 90])
 
+    # AKD-MySQL overlay across all three panels. Matches the aegon
+    # regime's color (so the eye groups small-AKD with small-aegon),
+    # dashed + hollow marker for "system = AKD". Proof-size axis
+    # switches to log because AKD value proofs (~14 KB) dwarf aegon
+    # small (~340 B) by ~40×; linear would collapse aegon to zero.
+    #
+    # AKD only physically measures two operations — `Directory::lookup`
+    # (binds label↔value) and `Directory::key_history` (value history).
+    # The bench harness duplicates them into the four aegon-style
+    # fields so the JSON shape matches, but `label` ≡ `value` and
+    # `label_history` ≡ `history` in the AKD JSON. Plotting AKD on
+    # the label/label-history figures would print the same numbers
+    # twice under different axes; restrict to the operations AKD
+    # actually distinguishes.
+    AKD_MEASURED_KINDS = {"value", "history"}
+    if akd and key in AKD_MEASURED_KINDS:
+        akd_in_subset = [(n, akd[n]) for n in subset if n in akd and akd[n]]
+        for akd_name, akd_levels in akd_in_subset:
+            astyle = AKD_STYLES[akd_name]
+            lvls = sorted(akd_levels, key=lambda l: l.fill_percent)
+            xs = np.array([lvl.fill_percent for lvl in lvls])
+            srv = np.array([percentile(lvl.server_ms.get(key, []), q_mid) for lvl in lvls])
+            cli = np.array([percentile(lvl.client_ms.get(key, []), q_mid) for lvl in lvls])
+            sz = np.array([percentile(lvl.proof_bytes.get(key, []), q_mid) for lvl in lvls]) * proof_scale
+            srv = np.maximum(srv, 1e-4)
+            cli = np.maximum(cli, 1e-4)
+            for ax, ys in ((ax_srv, srv), (ax_cli, cli), (ax_size, sz)):
+                ax.plot(
+                    xs, ys,
+                    color=astyle["color"], marker=astyle["marker"],
+                    linestyle=astyle["linestyle"], markerfacecolor="none",
+                    linewidth=1.6, markersize=6, label=astyle["label"],
+                )
+        if akd_in_subset:
+            ax_size.set_yscale("log")
+
     # Two-row shared legend (small/medium on top, large/extrapolated below).
     handles, labels = ax_srv.get_legend_handles_labels()
     pairs = list(zip(handles, labels))
@@ -1714,6 +1906,7 @@ def plot_latency_knee(
     large: list[LevelStats],
     subset: tuple[str, ...],
     agg: str = AGG_MEDIAN,
+    akd: dict[str, list[LevelStats]] | None = None,
 ) -> Path:
     """Latency-knee figure — one panel per regime in `subset`.
 
@@ -1776,6 +1969,25 @@ def plot_latency_knee(
                 markersize=5, label=f"{lvl.fill_percent:g}%",
             )
 
+        # AKD-MySQL overlay for this regime. Same fill→color mapping,
+        # dashed line with diamond marker for the "system = AKD"
+        # encoding. Single sentinel handle added below the loop.
+        if akd and regime_name in akd:
+            for lvl in sorted(akd[regime_name], key=lambda l: l.fill_percent):
+                if not lvl.concurrency_sweep:
+                    continue
+                if lvl.fill_percent not in fill_to_color:
+                    continue
+                samples = sorted(lvl.concurrency_sweep, key=lambda s: s["concurrency"])
+                qps = np.array([s["qps"] for s in samples])
+                ys = np.array([s[lat_key] for s in samples])
+                color = cmap(fill_to_color[lvl.fill_percent])
+                ax.plot(
+                    qps, ys,
+                    color=color, marker="D", markerfacecolor="none",
+                    linestyle="--", linewidth=1.4, markersize=5,
+                )
+
         ax.set_xlabel("achieved QPS")
         ax.grid(True, which="both", alpha=0.3)
 
@@ -1791,6 +2003,12 @@ def plot_latency_knee(
     for ax in axes:
         for handle, label in zip(*ax.get_legend_handles_labels()):
             seen.setdefault(label, handle)
+    if akd and any(akd.get(n) for n in subset):
+        from matplotlib.lines import Line2D
+        seen["AKD-MySQL (dashed)"] = Line2D(
+            [0], [0], color="#555555", linestyle="--", marker="D",
+            markerfacecolor="none", markersize=6, linewidth=1.6,
+        )
 
     def _label_sort_key(lbl: str) -> tuple[float, int]:
         try:
@@ -1801,7 +2019,7 @@ def plot_latency_knee(
     ordered = sorted(seen.items(), key=lambda kv: _label_sort_key(kv[0]))
     if ordered:
         def _row_index(lbl: str) -> int:
-            if "extrap" in lbl:
+            if "extrap" in lbl or lbl.startswith("AKD"):
                 return 1
             try:
                 num = float(lbl.split("%")[0])
@@ -1973,6 +2191,18 @@ def main() -> None:
     medium_runs = load_migration_runs("medium")
     large_runs = load_migration_runs("large")
 
+    # Facebook AKD (MySQL backend) overlay. Same JSON shape as aegon's
+    # lookup JSONs, so it threads through every plot helper via the
+    # `akd=` kwarg. Only the small+medium subset gets the overlay —
+    # we haven't benched AKD at large yet.
+    akd_overlay: dict[str, list[LevelStats]] = {}
+    akd_small = load_akd_small()
+    akd_medium = load_akd_medium()
+    if akd_small:
+        akd_overlay["small"] = akd_small
+    if akd_medium:
+        akd_overlay["medium"] = akd_medium
+
     # Every per-data-point figure is rendered TWICE — once per
     # subset (SMALL+MEDIUM vs LARGE) to keep the qualitatively-
     # different large regime from compressing small/medium's y-axis.
@@ -1981,10 +2211,11 @@ def main() -> None:
     #   <name>_large.pdf              <- large
     written: list[Path] = []
     for subset in (SMALL_MEDIUM, LARGE_ONLY):
-        written.extend(plot_lookup_per_operation(small, medium, large, subset, AGG_MEDIAN))
-        written.append(plot_publish_vs_batch(small, medium, large, subset, AGG_MEDIAN))
-        written.append(plot_audit_vs_fill(small, medium, large, subset, AGG_MEDIAN))
-        written.append(plot_latency_knee(small, medium, large, subset, AGG_MEDIAN))
+        akd_for_subset = akd_overlay if subset == SMALL_MEDIUM else None
+        written.extend(plot_lookup_per_operation(small, medium, large, subset, AGG_MEDIAN, akd=akd_for_subset))
+        written.append(plot_publish_vs_batch(small, medium, large, subset, AGG_MEDIAN, akd=akd_for_subset))
+        written.append(plot_audit_vs_fill(small, medium, large, subset, AGG_MEDIAN, akd=akd_for_subset))
+        written.append(plot_latency_knee(small, medium, large, subset, AGG_MEDIAN, akd=akd_for_subset))
         written.append(plot_migration_curves(small_runs, medium_runs, large_runs, subset))
 
     for p in written:
