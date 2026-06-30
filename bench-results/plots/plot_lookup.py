@@ -33,6 +33,12 @@ PLOTS_DIR = REPO_ROOT / "bench-results" / "plots"
 # rebrands the result so the plot helpers can overlay it as a distinct
 # "system" alongside the aegon regimes.
 AKD_DIR = REPO_ROOT / "bench-results" / "akd-mysql"
+# irondict (single-shard VKD with KZH-K commitments) overlay. The
+# irondict bench has no fill_percent dimension — every operation is
+# measured on a near-empty tree — so irondict overlays render as
+# horizontal lines spanning the fill axis. Layout below in
+# IRONDICT_STYLES / IronStats / load_irondict_*().
+IRONDICT_DIR = REPO_ROOT / "bench-results" / "irondict"
 
 # Lookup operations and the JSON field stems for each.
 LOOKUP_KINDS = [
@@ -59,9 +65,9 @@ PROOF_FIELDS = {
 }
 
 REGIME_STYLES = {
-    "small": {"color": "#1f77b4", "marker": "o", "label": "small (1 shard, log capacity = 22)"},
-    "medium": {"color": "#d62728", "marker": "s", "label": "medium (2 shards, log capacity = 27)"},
-    "large": {"color": "#2ca02c", "marker": "^", "label": "large (128 shards, log capacity = 27)"},
+    "small": {"color": "#1f77b4", "marker": "o", "label": "aegon small"},
+    "medium": {"color": "#d62728", "marker": "o", "label": "aegon medium"},
+    "large": {"color": "#2ca02c", "marker": "^", "label": "aegon large"},
 }
 
 # AKD overlay styles. Color matches the corresponding aegon regime so
@@ -72,13 +78,40 @@ REGIME_STYLES = {
 AKD_STYLES = {
     "small": {
         "color": REGIME_STYLES["small"]["color"],
-        "marker": "D", "linestyle": "--",
-        "label": "AKD-MySQL small",
+        "marker": "D", "linestyle": "-",
+        "label": "AKD small",
     },
     "medium": {
         "color": REGIME_STYLES["medium"]["color"],
-        "marker": "D", "linestyle": "--",
-        "label": "AKD-MySQL medium",
+        "marker": "D", "linestyle": "-",
+        "label": "AKD medium",
+    },
+    "large": {
+        "color": REGIME_STYLES["large"]["color"],
+        "marker": "D", "linestyle": "-",
+        "label": "AKD large",
+    },
+}
+
+# irondict overlay styles. Dash-DOT (vs AKD's dash) so a glance at the
+# linestyle alone tells aegon / AKD / irondict apart; square marker so
+# it doesn't collide with AKD's diamond. Color matches the
+# corresponding aegon regime, same logic as AKD_STYLES.
+IRONDICT_STYLES = {
+    "small": {
+        "color": REGIME_STYLES["small"]["color"],
+        "marker": "s", "linestyle": "-",
+        "label": "irondict small",
+    },
+    "medium": {
+        "color": REGIME_STYLES["medium"]["color"],
+        "marker": "s", "linestyle": "-",
+        "label": "irondict medium",
+    },
+    "large": {
+        "color": REGIME_STYLES["large"]["color"],
+        "marker": "s", "linestyle": "-",
+        "label": "irondict large",
     },
 }
 
@@ -89,6 +122,11 @@ AKD_STYLES = {
 # behaviour) and shouldn't squish small/medium's y-axis.
 SMALL_MEDIUM: tuple[str, ...] = ("small", "medium")
 LARGE_ONLY: tuple[str, ...] = ("large",)
+# All three regimes on a single figure — used only by the merged
+# migration_curves plot, since throughput-vs-K sweeps are
+# qualitatively similar across regimes (same shape, different
+# absolute scale) and benefit from a side-by-side comparison.
+ALL_REGIMES: tuple[str, ...] = ("small", "medium", "large")
 
 
 def _subset_suffix(subset: tuple[str, ...]) -> str:
@@ -602,7 +640,10 @@ def _load_akd_json(path: Path) -> list[LevelStats]:
     out: list[LevelStats] = []
     for fp, lvl in zip(fill_pcts, levels):
         samples = lvl.get("lookup", {}).get("samples", [])
-        if not samples:
+        publish_batches = lvl.get("publish_bench", {}).get("batches", [])
+        # Keep a level if it has lookup OR publish data — the
+        # extrapolated AKD-large JSON has only publish_bench entries.
+        if not samples and not publish_batches:
             continue
         server_ms = {
             k: [s[f"server_lookup_{k}_ns"] / 1e6 for s in samples]
@@ -617,7 +658,7 @@ def _load_akd_json(path: Path) -> list[LevelStats]:
             for k, _label, _title in LOOKUP_KINDS
         }
         publish_ms: dict[int, list[float]] = {}
-        for b in lvl.get("publish_bench", {}).get("batches", []):
+        for b in publish_batches:
             publish_ms[int(b["batch_size"])] = list(b.get("samples_ms", []))
         audit_samples = lvl.get("audit", {}).get("samples", [])
         audit_ms = [s["audit_invariance_ns"] / 1e6 for s in audit_samples]
@@ -645,6 +686,96 @@ def load_akd_small() -> list[LevelStats]:
 
 def load_akd_medium() -> list[LevelStats]:
     return _load_akd_json(AKD_DIR / "medium.json")
+
+
+def load_akd_large() -> list[LevelStats]:
+    """AKD-large publish numbers are extrapolated from small/medium
+    (see akd-mysql/large.json `_note`). Bench was not measurable
+    end-to-end before credits ran out."""
+    return _load_akd_json(AKD_DIR / "large.json")
+
+
+@dataclass
+class IronStats:
+    """Per-regime irondict measurements. irondict has no fill axis,
+    so each regime is summarised by a single set of scalars (lookup
+    time, audit time, proof bytes, …) and a per-batch-size publish
+    table — much flatter than aegon's `LevelStats`. Plot helpers
+    overlay these as horizontal lines on the fill-axis plots and as
+    direct curves on the publish-vs-batch plot.
+    """
+    log_capacity: int
+    regime: str
+    setup_ms: float | None
+    server_lookup_ms: float | None
+    client_lookup_ms: float | None
+    proof_bytes: int | None
+    client_key_bytes: int | None
+    audit_ms: float | None
+    audit_bytes: int | None
+    publish_keys: list[tuple[int, float, int | None]]  # (batch_size, median_ms, bulletin_bytes)
+    publish_reg: list[tuple[int, float, int | None]]
+
+
+def _load_irondict_json(path: Path) -> IronStats | None:
+    """Load one irondict JSON written by `bench-results/irondict/parse_divan.py`.
+    Returns None if the file is missing or has no measured rows yet
+    (e.g. the large.json file is empty until the m1-megamem bench
+    finishes). The plot helpers skip None overlays gracefully.
+    """
+    if not path.exists():
+        return None
+    with path.open() as fh:
+        d = json.load(fh)
+    params = d.get("params", {})
+    lookup = d.get("lookup", {}) or {}
+    audit = d.get("audit", {}) or {}
+    pk_rows = (d.get("publish_keys") or {}).get("by_batch", []) or []
+    pr_rows = (d.get("publish_reg") or {}).get("by_batch", []) or []
+    pk = [
+        (int(r["batch_size"]), float(r["median_ms"]), r.get("bulletin_bytes"))
+        for r in pk_rows if r.get("median_ms") is not None
+    ]
+    pr = [
+        (int(r["batch_size"]), float(r["median_ms"]), r.get("bulletin_bytes"))
+        for r in pr_rows if r.get("median_ms") is not None
+    ]
+    # If literally nothing is populated, treat as "no irondict data
+    # for this regime" — so the plot helpers can short-circuit.
+    has_any = any([
+        d.get("setup_ms") is not None,
+        audit.get("audit_ms") is not None,
+        lookup.get("server_ms") is not None,
+        lookup.get("client_ms") is not None,
+        pk, pr,
+    ])
+    if not has_any:
+        return None
+    return IronStats(
+        log_capacity=int(params.get("log_capacity", 0)),
+        regime=str(params.get("regime", "")),
+        setup_ms=d.get("setup_ms"),
+        server_lookup_ms=lookup.get("server_ms"),
+        client_lookup_ms=lookup.get("client_ms"),
+        proof_bytes=lookup.get("proof_bytes"),
+        client_key_bytes=lookup.get("client_key_bytes"),
+        audit_ms=audit.get("audit_ms"),
+        audit_bytes=audit.get("audit_bytes"),
+        publish_keys=pk,
+        publish_reg=pr,
+    )
+
+
+def load_irondict_small() -> IronStats | None:
+    return _load_irondict_json(IRONDICT_DIR / "small.json")
+
+
+def load_irondict_medium() -> IronStats | None:
+    return _load_irondict_json(IRONDICT_DIR / "medium.json")
+
+
+def load_irondict_large() -> IronStats | None:
+    return _load_irondict_json(IRONDICT_DIR / "large.json")
 
 
 def percentile(vs: list[float], q: float) -> float:
@@ -737,7 +868,7 @@ def _plot_server_lookup_panels(
                 linewidth=1.4,
                 markersize=6,
                 alpha=0.85,
-                label="large (extrapolated)",
+                label="aegon large (extrapolated)",
             )
 
         ax.set_xlabel("preload fill (% of true capacity)")
@@ -778,6 +909,7 @@ def plot_audit_vs_fill(
     subset: tuple[str, ...],
     agg: str = AGG_MEDIAN,
     akd: dict[str, list[LevelStats]] | None = None,
+    irondict: dict[str, IronStats] | None = None,
 ) -> Path:
     """Audit figure: 2 side-by-side panels.
 
@@ -850,7 +982,7 @@ def plot_audit_vs_fill(
                 xs_full, ys_full,
                 color=large_style["color"], marker=large_style["marker"],
                 markerfacecolor="none", linestyle="--", linewidth=1.4,
-                markersize=6, alpha=0.85, label="large (extrapolated)",
+                markersize=6, alpha=0.85, label="aegon large (extrapolated)",
             )
 
     ax_time.set_xlabel("preload fill (% of true capacity)")
@@ -896,7 +1028,7 @@ def plot_audit_vs_fill(
             xs_full, ys_full / 1024.0,
             color=large_style["color"], marker=large_style["marker"],
             markerfacecolor="none", linestyle="--", linewidth=1.4,
-            markersize=6, alpha=0.85, label="large (extrapolated)",
+            markersize=6, alpha=0.85, label="aegon large (extrapolated)",
         )
 
     ax_size.set_xlabel("preload fill (% of true capacity)")
@@ -937,6 +1069,50 @@ def plot_audit_vs_fill(
         # aegon curves into the x-axis — log lets both regimes read.
         ax_time.set_yscale("log")
         ax_size.set_yscale("log")
+
+    # irondict overlay. irondict has no fill axis — every audit is
+    # measured on a near-empty tree — so each metric reads as a
+    # horizontal dash-dot line spanning the panel. The audit
+    # payload size is derived from the publish bulletin sizes
+    # (verify_update checks one publish_reg msg + one publish_keys
+    # msg per epoch; see parse_divan.py _derive_audit_bytes).
+    if irondict:
+        iron_xlim_time = ax_time.get_xlim()
+        iron_xlim_size = ax_size.get_xlim()
+        # Same as the lookup plot: irondict has one measurement and
+        # we render it at each of aegon's fill x-positions so the
+        # marker reads on the panel and the legend handle matches.
+        iron_xs = np.array([1.0, 30.0, 60.0, 90.0])
+        any_iron_time = False
+        any_iron_size = False
+        for iron_name in subset:
+            iron = irondict.get(iron_name)
+            if iron is None:
+                continue
+            istyle = IRONDICT_STYLES[iron_name]
+            if iron.audit_ms is not None:
+                ax_time.plot(
+                    iron_xs, np.full_like(iron_xs, iron.audit_ms),
+                    color=istyle["color"], linestyle=istyle["linestyle"],
+                    marker=istyle["marker"], markerfacecolor="none",
+                    linewidth=1.6, markersize=6, label=istyle["label"],
+                )
+                any_iron_time = True
+            if iron.audit_bytes is not None:
+                v_kb = iron.audit_bytes / 1024.0
+                ax_size.plot(
+                    iron_xs, np.full_like(iron_xs, v_kb),
+                    color=istyle["color"], linestyle=istyle["linestyle"],
+                    marker=istyle["marker"], markerfacecolor="none",
+                    linewidth=1.6, markersize=6, label=istyle["label"],
+                )
+                any_iron_size = True
+        ax_time.set_xlim(iron_xlim_time)
+        ax_size.set_xlim(iron_xlim_size)
+        if any_iron_time:
+            ax_time.set_yscale("log")
+        if any_iron_size:
+            ax_size.set_yscale("log")
 
     # Two-row shared legend (matches the server / client / proof-size
     # layout): small + medium on top, large + large-extrapolated below.
@@ -1000,6 +1176,7 @@ def plot_publish_vs_batch(
     subset: tuple[str, ...],
     agg: str = AGG_MEDIAN,
     akd: dict[str, list[LevelStats]] | None = None,
+    irondict: dict[str, IronStats] | None = None,
 ) -> Path:
     """Publish time vs. batch size, faceted by regime, one curve per
     fill level (color = fill %).
@@ -1076,13 +1253,20 @@ def plot_publish_vs_batch(
     # colour across the small+medium and large figures, since each
     # figure's available fill set is different. The legend in every
     # panel labels lines by fill % so this is unambiguous.
+    # Aegon-large derives fill_percent from preload_count / true_cap,
+    # so values arrive as e.g. 0.9999999776 instead of exactly 1.0.
+    # Round every fill key to 4 decimals so AKD's exact 1.0/30.0/etc.
+    # find the matching colormap slot.
+    def _fkey(f: float) -> float:
+        return round(float(f), 4)
+
     all_fills_global: set[float] = set()
     for _name, _lvls in populated:
         for _lvl in _lvls:
             if _lvl.publish_ms:
-                all_fills_global.add(_lvl.fill_percent)
+                all_fills_global.add(_fkey(_lvl.fill_percent))
         if _name == "large":
-            all_fills_global.update(EXTRAP_FILLS_PUBLISH)
+            all_fills_global.update(_fkey(f) for f in EXTRAP_FILLS_PUBLISH)
     global_fills_sorted = sorted(all_fills_global)
     n_fills = len(global_fills_sorted)
     if n_fills <= 1:
@@ -1091,6 +1275,8 @@ def plot_publish_vs_batch(
         fill_to_color = {f: i / (n_fills - 1) for i, f in enumerate(global_fills_sorted)}
 
     for ax, (regime_name, regime_levels) in zip(axes, populated):
+        if subset == SMALL_MEDIUM:
+            ax.set_title(regime_name.capitalize())
         levels_sorted = sorted(regime_levels, key=lambda l: l.fill_percent)
         measured_fills = [lvl.fill_percent for lvl in levels_sorted if lvl.publish_ms]
         if not measured_fills:
@@ -1100,7 +1286,7 @@ def plot_publish_vs_batch(
         extra_fills = list(EXTRAP_FILLS_PUBLISH) if regime_name == "large" else []
 
         for lvl in [l for l in levels_sorted if l.publish_ms]:
-            color = cmap(fill_to_color[lvl.fill_percent])
+            color = cmap(fill_to_color[_fkey(lvl.fill_percent)])
             batch_sizes = np.array(sorted(lvl.publish_ms))
             xs = batch_sizes.astype(float)
             central = np.array([percentile(lvl.publish_ms[b], q_mid) for b in batch_sizes]) / 1000.0
@@ -1114,7 +1300,7 @@ def plot_publish_vs_batch(
                 marker="o",
                 linewidth=1.8,
                 markersize=5,
-                label=f"{lvl.fill_percent:g}%",
+                label=f"aegon {lvl.fill_percent:g}%",
             )
 
         # Theoretical open-addressing extrapolation for large.
@@ -1167,7 +1353,7 @@ def plot_publish_vs_batch(
                     alpha = f / (100.0 * OVER_PROV)
                     slope_f = slope_zero / (1.0 - alpha)
                     ys = slope_f * xs + c_anchor
-                    color = cmap(fill_to_color[f])
+                    color = cmap(fill_to_color[_fkey(f)])
                     ax.plot(
                         xs,
                         ys,
@@ -1178,7 +1364,50 @@ def plot_publish_vs_batch(
                         markersize=5,
                         linestyle="--",
                         alpha=0.9,
-                        label=f"{f:g}% (extrapolated)",
+                        label=f"aegon {f:g}% (extrapolated)",
+                    )
+
+        # irondict overlay for this panel's regime. irondict has no
+        # fill axis — every publish is measured on a near-empty tree
+        # — so we get ONE curve per regime spanning the batch range.
+        # Plotted in neutral grey (since aegon already paints every
+        # fill in the rainbow palette and there's no fill it
+        # naturally pairs with), dash-dot + open square so a single
+        # sentinel handle below the panel loop explains the line.
+        #
+        # irondict's batches span 16..131072 — wider than any single
+        # aegon regime's range (small: 2..64, medium: 64..2048,
+        # large: 4096..131072) — so we clip to the union of aegon's
+        # measured batches in THIS panel, with one batch of padding
+        # on each side. Without the clip, the small panel's x-axis
+        # auto-scales from 2 → 131072 and the aegon curves collapse
+        # into the leftmost ~5% of the panel.
+        if irondict and regime_name in irondict:
+            iron = irondict[regime_name]
+            if iron is not None and iron.publish_keys:
+                aegon_batches = set()
+                for lvl in levels_sorted:
+                    aegon_batches.update(lvl.publish_ms.keys())
+                if aegon_batches:
+                    bs_min = min(aegon_batches)
+                    bs_max = max(aegon_batches)
+                    pts = [
+                        (bs, ms) for bs, ms, _ in iron.publish_keys
+                        if bs_min <= bs <= bs_max
+                    ]
+                else:
+                    pts = [(bs, ms) for bs, ms, _ in iron.publish_keys]
+                if pts:
+                    xs_iron = np.array([bs for bs, _ in pts], dtype=float)
+                    ys_iron = np.array([ms for _, ms in pts]) / 1000.0
+                    istyle = IRONDICT_STYLES[regime_name]
+                    ax.plot(
+                        xs_iron, ys_iron,
+                        color="#444444",
+                        marker=istyle["marker"], markerfacecolor="none",
+                        linestyle=istyle["linestyle"],
+                        linewidth=1.6, markersize=5,
+                        label="irondict 0%",
                     )
 
         # AKD-MySQL overlay for this panel's regime. Color matches the
@@ -1189,19 +1418,24 @@ def plot_publish_vs_batch(
         # aegon's legend rows; a single sentinel handle is appended
         # below the panel loop instead.
         if akd and regime_name in akd:
+            # AKD-large is extrapolated from small+medium (see
+            # akd-mysql/large.json _note); flag it in the legend so
+            # the reader can distinguish from measured AKD curves.
+            akd_suffix = " (extrapolation)" if regime_name == "large" else ""
             for lvl in sorted(akd[regime_name], key=lambda l: l.fill_percent):
                 if not lvl.publish_ms:
                     continue
-                if lvl.fill_percent not in fill_to_color:
+                if _fkey(lvl.fill_percent) not in fill_to_color:
                     continue
-                color = cmap(fill_to_color[lvl.fill_percent])
+                color = cmap(fill_to_color[_fkey(lvl.fill_percent)])
                 batch_sizes = np.array(sorted(lvl.publish_ms))
                 xs_a = batch_sizes.astype(float)
                 ys_a = np.array([percentile(lvl.publish_ms[b], q_mid) for b in batch_sizes]) / 1000.0
                 ax.plot(
                     xs_a, ys_a,
                     color=color, marker="D", markerfacecolor="none",
-                    linestyle="--", linewidth=1.4, markersize=5,
+                    linestyle="-", linewidth=1.4, markersize=5,
+                    label=f"AKD {lvl.fill_percent:g}%{akd_suffix}",
                 )
 
         ax.set_xlabel("publish batch size (updates)")
@@ -1210,71 +1444,71 @@ def plot_publish_vs_batch(
         # below all panels (see fig.legend after the loop).
 
     for ax in axes:
-        ax.set_ylabel(f"{_agg_label(agg)} publish latency (s)")
+        ax.set_ylabel("publish latency (s)")
+    # Large publish spans ~5 orders of magnitude with the manual
+    # irondict 15-min entry; linear y collapses the aegon curves to
+    # the x-axis. Use log y for the large subset.
+    if "large" in subset:
+        for ax in axes:
+            ax.set_yscale("log")
 
     # One shared legend below the row of panels. Collect handles from
     # every axis, then dedupe by label so a fill that appears in two
-    # regimes (e.g. 1%, 30%, 60%, 90% in both small and medium) is
-    # only shown once. Order by ascending fill so the legend reads
-    # in the same direction as the colormap.
+    # regimes is only shown once. Labels are now system-prefixed
+    # ("aegon 30%", "AKD 30%", "irondict 0%") so they group by system
+    # row and sort by fill within each row.
     seen: dict[str, "matplotlib.artist.Artist"] = {}
     for ax in axes:
         for handle, label in zip(*ax.get_legend_handles_labels()):
             seen.setdefault(label, handle)
-    if akd and any(akd.get(n) for n in subset):
-        # Single sentinel handle that explains the dashed/hollow
-        # lines. Drawing it as a Line2D so the legend marker matches
-        # what the reader sees in the panels (dashed line + diamond
-        # marker, neutral grey since the AKD curves themselves are
-        # fill-colored).
-        from matplotlib.lines import Line2D
-        seen["AKD-MySQL (dashed)"] = Line2D(
-            [0], [0], color="#555555", linestyle="--", marker="D",
-            markerfacecolor="none", markersize=6, linewidth=1.6,
-        )
-    def _label_sort_key(lbl: str) -> tuple[float, int]:
-        # "30% (extrap.)" sorts after measured 30%; uses the numeric
-        # prefix and a tiebreaker bit so measured comes before extrap.
-        try:
-            num = float(lbl.split("%")[0])
-        except ValueError:
-            num = float("inf")
-        return (num, 1 if "extrap" in lbl else 0)
-    ordered = sorted(seen.items(), key=lambda kv: _label_sort_key(kv[0]))
+
+    def _parse_label(lbl: str) -> tuple[int, float, int]:
+        """(system_rank, fill_percent, extrap_tiebreak). Rows are
+        keyed by system_rank (aegon=0, AKD=1, irondict=2)."""
+        if lbl.startswith("aegon"):
+            sys_rank = 0
+        elif lbl.startswith("AKD"):
+            sys_rank = 1
+        elif lbl.startswith("irondict"):
+            sys_rank = 2
+        else:
+            sys_rank = 9
+        extrap = 1 if "extrap" in lbl else 0
+        # Pull the first "<num>%" token.
+        import re as _re
+        m = _re.search(r"(\d+(?:\.\d+)?)%", lbl)
+        num = float(m.group(1)) if m else float("inf")
+        return (sys_rank, num, extrap)
+
+    ordered = sorted(seen.items(), key=lambda kv: _parse_label(kv[0]))
     if ordered:
-        # Group entries onto three rows: single-digit measured (1–9%),
-        # double-digit measured (10/30/60/90%), and extrapolated. Each
-        # row gets its own fig.legend so we can centre them at slightly
-        # different vertical positions; the panel-area rect leaves
-        # enough room at the bottom for all three.
-        def _row_index(lbl: str) -> int:
-            if "extrap" in lbl or lbl.startswith("AKD"):
-                return 1
-            try:
-                num = float(lbl.split("%")[0])
-            except ValueError:
-                return -1
-            return 2 if num < 10 else 0
-        rows: list[list[tuple[str, object]]] = [[], [], []]
+        # One row per system (aegon, AKD, irondict). Then chunk each
+        # row into pieces of at most MAX_NCOL so a system with many
+        # entries (e.g. aegon-large has 10 measured + 3 extrapolated)
+        # wraps cleanly instead of overflowing horizontally.
+        MAX_NCOL = 7
+        per_system: list[list[tuple[str, object]]] = [[], [], []]
         for label, handle in ordered:
-            idx = _row_index(label)
-            if idx >= 0:
-                rows[idx].append((label, handle))
-        # 0.26 reserves space for three legend rows at fontsize 9.
-        fig.tight_layout(rect=(0, 0.26, 1, 1))
-        row_y = [0.18, 0.10, 0.02]  # top row → bottom row, figure-relative
-        for row_idx, row in enumerate(rows):
-            if not row:
+            sys_rank, _, _ = _parse_label(label)
+            if sys_rank <= 2:
+                per_system[sys_rank].append((label, handle))
+        rows: list[list[tuple[str, object]]] = []
+        for system_row in per_system:
+            if not system_row:
                 continue
+            for i in range(0, len(system_row), MAX_NCOL):
+                rows.append(system_row[i : i + MAX_NCOL])
+        rect_map = {1: 0.10, 2: 0.18, 3: 0.26, 4: 0.32, 5: 0.38}
+        fig.tight_layout(rect=(0, rect_map.get(len(rows), 0.10), 1, 1))
+        y_per_row = 0.08
+        y_start = 0.02 + y_per_row * (len(rows) - 1)
+        for i, row in enumerate(rows):
             row_labels, row_handles = zip(*row)
             fig.legend(
-                row_handles,
-                row_labels,
+                row_handles, row_labels,
                 loc="lower center",
-                bbox_to_anchor=(0.5, row_y[row_idx]),
-                ncol=len(row_labels),
-                frameon=False,
-                fontsize=9,
+                bbox_to_anchor=(0.5, y_start - i * y_per_row),
+                ncol=len(row_labels), frameon=False, fontsize=9,
             )
     else:
         fig.tight_layout()
@@ -1361,7 +1595,7 @@ def _plot_client_lookup_panels(
                 linewidth=1.4,
                 markersize=6,
                 alpha=0.85,
-                label="large (extrapolated)",
+                label="aegon large (extrapolated)",
             )
 
         ax.set_xlabel("preload fill (% of true capacity)")
@@ -1645,7 +1879,7 @@ def _plot_proof_size_panels(
                 linewidth=1.4,
                 markersize=6,
                 alpha=0.85,
-                label="large (extrapolated)",
+                label="aegon large (extrapolated)",
             )
 
         ax.set_xlabel("preload fill (% of true capacity)")
@@ -1686,6 +1920,7 @@ def plot_lookup_per_operation(
     subset: tuple[str, ...],
     agg: str = AGG_MEDIAN,
     akd: dict[str, list[LevelStats]] | None = None,
+    irondict: dict[str, IronStats] | None = None,
 ) -> list[Path]:
     """One figure per lookup kind, with server-time, client-time, and
     proof-size panels side by side (same audit-style layout: all
@@ -1698,7 +1933,7 @@ def plot_lookup_per_operation(
     """
     paths: list[Path] = []
     for key, _short, title in LOOKUP_KINDS:
-        paths.append(_plot_one_lookup_op(small, medium, large, key, title, subset, agg, akd))
+        paths.append(_plot_one_lookup_op(small, medium, large, key, title, subset, agg, akd, irondict))
     return paths
 
 
@@ -1711,6 +1946,7 @@ def _plot_one_lookup_op(
     subset: tuple[str, ...],
     agg: str = AGG_MEDIAN,
     akd: dict[str, list[LevelStats]] | None = None,
+    irondict: dict[str, IronStats] | None = None,
 ) -> Path:
     """Render a 3-panel figure (server time | client time | proof size)
     for a single lookup operation. Mirrors the audit_vs_fill layout but
@@ -1768,9 +2004,9 @@ def _plot_one_lookup_op(
         ax_srv.plot(xs_full, np.maximum(ys_full, 1e-4),
                     color=large_style["color"], marker=large_style["marker"],
                     markerfacecolor="none", linestyle="--", linewidth=1.4,
-                    markersize=6, alpha=0.85, label="large (extrapolated)")
+                    markersize=6, alpha=0.85, label="aegon large (extrapolated)")
     ax_srv.set_xlabel("preload fill (% of true capacity)")
-    ax_srv.set_ylabel(f"{agg_lbl} {title}\nserver latency (ms)")
+    ax_srv.set_ylabel("server latency (ms)")
     ax_srv.grid(True, which="both", alpha=0.3)
     ax_srv.set_xticks([1, 30, 60, 90])
 
@@ -1802,9 +2038,9 @@ def _plot_one_lookup_op(
         ax_cli.plot(xs_full, np.maximum(ys_full, 1e-4),
                     color=large_style["color"], marker=large_style["marker"],
                     markerfacecolor="none", linestyle="--", linewidth=1.4,
-                    markersize=6, alpha=0.85, label="large (extrapolated)")
+                    markersize=6, alpha=0.85, label="aegon large (extrapolated)")
     ax_cli.set_xlabel("preload fill (% of true capacity)")
-    ax_cli.set_ylabel(f"{agg_lbl} {title}\nclient verify latency (ms)")
+    ax_cli.set_ylabel("client verify latency (ms)")
     ax_cli.grid(True, which="both", alpha=0.3)
     ax_cli.set_xticks([1, 30, 60, 90])
 
@@ -1835,9 +2071,9 @@ def _plot_one_lookup_op(
         ax_size.plot(xs_full, ys_full,
                      color=large_style["color"], marker=large_style["marker"],
                      markerfacecolor="none", linestyle="--", linewidth=1.4,
-                     markersize=6, alpha=0.85, label="large (extrapolated)")
+                     markersize=6, alpha=0.85, label="aegon large (extrapolated)")
     ax_size.set_xlabel("preload fill (% of true capacity)")
-    ax_size.set_ylabel(f"{agg_lbl} {title}\nproof size ({proof_unit})")
+    ax_size.set_ylabel(f"proof size ({proof_unit})")
     ax_size.grid(True, which="both", alpha=0.3)
     ax_size.set_xticks([1, 30, 60, 90])
 
@@ -1848,18 +2084,22 @@ def _plot_one_lookup_op(
     # small (~340 B) by ~40×; linear would collapse aegon to zero.
     #
     # AKD only physically measures two operations — `Directory::lookup`
-    # (binds label↔value) and `Directory::key_history` (value history).
-    # The bench harness duplicates them into the four aegon-style
-    # fields so the JSON shape matches, but `label` ≡ `value` and
-    # `label_history` ≡ `history` in the AKD JSON. Plotting AKD on
-    # the label/label-history figures would print the same numbers
-    # twice under different axes; restrict to the operations AKD
-    # actually distinguishes.
-    AKD_MEASURED_KINDS = {"value", "history"}
-    if akd and key in AKD_MEASURED_KINDS:
+    # (binds label↔value) and `Directory::key_history` (value history)
+    # — so in the AKD JSON `label` ≡ `value` and `label_history` ≡
+    # `history`. We overlay on every panel anyway (matching the
+    # irondict convention) so the reader can compare like-for-like
+    # against aegon on whichever operation they care about; the AKD
+    # numbers on label vs value panels are identical by construction.
+    if akd:
         akd_in_subset = [(n, akd[n]) for n in subset if n in akd and akd[n]]
         for akd_name, akd_levels in akd_in_subset:
             astyle = AKD_STYLES[akd_name]
+            # AKD-large lookup samples are extrapolated from small+
+            # medium (see akd-mysql/large.json _lookup_note); flag it
+            # in the legend so the reader can tell apart from measured.
+            akd_label = astyle["label"] + (
+                " (extrapolation)" if akd_name == "large" else ""
+            )
             lvls = sorted(akd_levels, key=lambda l: l.fill_percent)
             xs = np.array([lvl.fill_percent for lvl in lvls])
             srv = np.array([percentile(lvl.server_ms.get(key, []), q_mid) for lvl in lvls])
@@ -1872,9 +2112,65 @@ def _plot_one_lookup_op(
                     xs, ys,
                     color=astyle["color"], marker=astyle["marker"],
                     linestyle=astyle["linestyle"], markerfacecolor="none",
-                    linewidth=1.6, markersize=6, label=astyle["label"],
+                    linewidth=1.6, markersize=6, label=akd_label,
                 )
         if akd_in_subset:
+            ax_size.set_yscale("log")
+
+    # irondict overlay. irondict doesn't distinguish label/value/
+    # history (one single `lookup_prove` method) — the same measured
+    # numbers apply to all four aegon kinds. We overlay on every
+    # panel so the reader can compare like-for-like on whichever
+    # operation they care about; the value on every panel is the
+    # same irondict measurement.
+    if irondict:
+        srv_xlim = ax_srv.get_xlim()
+        cli_xlim = ax_cli.get_xlim()
+        size_xlim = ax_size.get_xlim()
+        # Plot irondict's single measurement at each of aegon's
+        # measured fill x-positions so the marker is visible (and so
+        # the reader sees a row of markers rather than a continuous
+        # curve — irondict has no fill axis, so the value is the same
+        # at every x).
+        iron_xs = np.array([1.0, 30.0, 60.0, 90.0])
+        any_iron_value = False
+        for iron_name in subset:
+            iron = irondict.get(iron_name)
+            if iron is None:
+                continue
+            istyle = IRONDICT_STYLES[iron_name]
+            if iron.server_lookup_ms is not None:
+                ax_srv.plot(
+                    iron_xs, np.full_like(iron_xs, iron.server_lookup_ms),
+                    color=istyle["color"], linestyle=istyle["linestyle"],
+                    marker=istyle["marker"], markerfacecolor="none",
+                    linewidth=1.6, markersize=6, label=istyle["label"],
+                )
+                any_iron_value = True
+            if iron.client_lookup_ms is not None:
+                ax_cli.plot(
+                    iron_xs, np.full_like(iron_xs, iron.client_lookup_ms),
+                    color=istyle["color"], linestyle=istyle["linestyle"],
+                    marker=istyle["marker"], markerfacecolor="none",
+                    linewidth=1.6, markersize=6, label=istyle["label"],
+                )
+                any_iron_value = True
+            if iron.proof_bytes is not None:
+                v = iron.proof_bytes * proof_scale
+                ax_size.plot(
+                    iron_xs, np.full_like(iron_xs, v),
+                    color=istyle["color"], linestyle=istyle["linestyle"],
+                    marker=istyle["marker"], markerfacecolor="none",
+                    linewidth=1.6, markersize=6, label=istyle["label"],
+                )
+                any_iron_value = True
+        ax_srv.set_xlim(srv_xlim)
+        ax_cli.set_xlim(cli_xlim)
+        ax_size.set_xlim(size_xlim)
+        if any_iron_value:
+            # irondict's lookup proof at small (~4.8 KB) is ~10× the
+            # smallest aegon `value` proof (~340 B), so without log
+            # the small aegon curve gets compressed.
             ax_size.set_yscale("log")
 
     # Two-row shared legend (small/medium on top, large/extrapolated below).
@@ -1985,7 +2281,7 @@ def plot_latency_knee(
                 ax.plot(
                     qps, ys,
                     color=color, marker="D", markerfacecolor="none",
-                    linestyle="--", linewidth=1.4, markersize=5,
+                    linestyle="-", linewidth=1.4, markersize=5,
                 )
 
         ax.set_xlabel("achieved QPS")
@@ -2005,8 +2301,8 @@ def plot_latency_knee(
             seen.setdefault(label, handle)
     if akd and any(akd.get(n) for n in subset):
         from matplotlib.lines import Line2D
-        seen["AKD-MySQL (dashed)"] = Line2D(
-            [0], [0], color="#555555", linestyle="--", marker="D",
+        seen["AKD-MySQL"] = Line2D(
+            [0], [0], color="#555555", linestyle="-", marker="D",
             markerfacecolor="none", markersize=6, linewidth=1.6,
         )
 
@@ -2018,15 +2314,17 @@ def plot_latency_knee(
         return (num, 0)
     ordered = sorted(seen.items(), key=lambda kv: _label_sort_key(kv[0]))
     if ordered:
+        # Two rows: measured fill percentages (ascending) on top, then
+        # extrapolated + system sentinels below.
         def _row_index(lbl: str) -> int:
             if "extrap" in lbl or lbl.startswith("AKD"):
                 return 1
             try:
-                num = float(lbl.split("%")[0])
+                float(lbl.split("%")[0])
             except ValueError:
                 return -1
-            return 2 if num < 10 else 0
-        rows: list[list[tuple[str, object]]] = [[], [], []]
+            return 0
+        rows: list[list[tuple[str, object]]] = [[], []]
         for label, handle in ordered:
             idx = _row_index(label)
             if idx >= 0:
@@ -2123,24 +2421,6 @@ def plot_migration_curves(
             markersize=7,
             label=label,
         )
-        # Mark the peak so the optimal K reads off the figure
-        # without doing arithmetic in your head.
-        peak_idx = int(np.argmax(ys))
-        peak_k = xs[peak_idx]
-        peak_y = ys[peak_idx]
-        ax.scatter(
-            [peak_k], [peak_y],
-            facecolor="white", edgecolor=color,
-            s=160, linewidths=2.0, zorder=5,
-        )
-        ax.annotate(
-            f"peak: K={int(peak_k):,}\n{peak_y:.2f}k users/s",
-            xy=(peak_k, peak_y), xytext=(8, 0),
-            textcoords="offset points",
-            fontsize=8, color=color, ha="left", va="center",
-            bbox=dict(boxstyle="round,pad=0.3", facecolor="white",
-                      edgecolor=color, alpha=0.9, linewidth=0.8),
-        )
         # `{regime}_best_k.txt` is what the cluster bench reads to
         # pick PUBLISH_WARMUP_BATCH_SIZE. Drop a dashed guide at
         # that K so a reader can confirm the chosen K matches the
@@ -2155,8 +2435,6 @@ def plot_migration_curves(
     ax.set_xscale("log", base=2)
     ax.set_xlabel("publish chunk size K (log scale)")
     ax.set_ylabel("end-to-end throughput (×10³ users / sec)")
-    ax.set_title("Migration throughput vs chunk size\n"
-                 "(dashed line = best_k.txt; circled = sweep peak)")
     ax.grid(True, which="both", axis="both", alpha=0.3)
     ax.set_axisbelow(True)
     # Format x ticks as raw K values (the default 2^N labels are
@@ -2198,10 +2476,28 @@ def main() -> None:
     akd_overlay: dict[str, list[LevelStats]] = {}
     akd_small = load_akd_small()
     akd_medium = load_akd_medium()
+    akd_large = load_akd_large()
     if akd_small:
         akd_overlay["small"] = akd_small
     if akd_medium:
         akd_overlay["medium"] = akd_medium
+    if akd_large:
+        akd_overlay["large"] = akd_large
+
+    # irondict overlay. Same kwarg shape as AKD; threads through
+    # plot_audit_vs_fill / plot_publish_vs_batch / lookup_per_operation
+    # via `irondict=`. Per-regime — small.json, medium.json, large.json
+    # are written by bench-results/irondict/parse_divan.py.
+    irondict_overlay: dict[str, IronStats] = {}
+    iron_small = load_irondict_small()
+    iron_medium = load_irondict_medium()
+    iron_large = load_irondict_large()
+    if iron_small is not None:
+        irondict_overlay["small"] = iron_small
+    if iron_medium is not None:
+        irondict_overlay["medium"] = iron_medium
+    if iron_large is not None:
+        irondict_overlay["large"] = iron_large
 
     # Every per-data-point figure is rendered TWICE — once per
     # subset (SMALL+MEDIUM vs LARGE) to keep the qualitatively-
@@ -2211,12 +2507,22 @@ def main() -> None:
     #   <name>_large.pdf              <- large
     written: list[Path] = []
     for subset in (SMALL_MEDIUM, LARGE_ONLY):
-        akd_for_subset = akd_overlay if subset == SMALL_MEDIUM else None
-        written.extend(plot_lookup_per_operation(small, medium, large, subset, AGG_MEDIAN, akd=akd_for_subset))
-        written.append(plot_publish_vs_batch(small, medium, large, subset, AGG_MEDIAN, akd=akd_for_subset))
-        written.append(plot_audit_vs_fill(small, medium, large, subset, AGG_MEDIAN, akd=akd_for_subset))
+        # AKD and irondict are filtered to just the regimes in the
+        # current subset, so the small_medium figure doesn't try to
+        # render "AKD large" and vice-versa.
+        akd_for_subset = {n: akd_overlay[n] for n in subset if n in akd_overlay} or None
+        iron_for_subset = {n: irondict_overlay[n] for n in subset if n in irondict_overlay} or None
+        written.extend(plot_lookup_per_operation(small, medium, large, subset, AGG_MEDIAN, akd=akd_for_subset, irondict=iron_for_subset))
+        written.append(plot_publish_vs_batch(small, medium, large, subset, AGG_MEDIAN, akd=akd_for_subset, irondict=iron_for_subset))
+        written.append(plot_audit_vs_fill(small, medium, large, subset, AGG_MEDIAN, akd=akd_for_subset, irondict=iron_for_subset))
         written.append(plot_latency_knee(small, medium, large, subset, AGG_MEDIAN, akd=akd_for_subset))
         written.append(plot_migration_curves(small_runs, medium_runs, large_runs, subset))
+
+    # Merged migration-curves figure: small + medium + large on one
+    # plot for a single-glance throughput-vs-K comparison across
+    # regimes. The per-subset variants above are kept for paper
+    # sections that prefer the regime-separated view.
+    written.append(plot_migration_curves(small_runs, medium_runs, large_runs, ALL_REGIMES))
 
     for p in written:
         size = p.stat().st_size

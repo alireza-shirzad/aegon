@@ -1,0 +1,96 @@
+{
+  "params": {
+    "log_capacity": 34,
+    "regime": "large",
+    "_note": "publish_keys median_ms values below are MANUAL estimates from the irondict paper (15 min per publish at log_capacity=34), not bench-measured. Real bench OOMed on c3-highmem-176 (needed >1.41 TB)."
+  },
+  "setup_ms": 3600000,
+  "prover_param_bytes": 375809638400,
+  "lookup": {
+    "server_ms": 30.0,
+    "client_ms": 30.0,
+    "proof_bytes": 5632,
+    "client_key_bytes": 1048576,
+    "_notes": {
+      "server_ms": "manual estimate; 30 ms per lookup at log_capacity=34 (prover side)",
+      "client_ms": "manual estimate; 30 ms per lookup at log_capacity=34 (verifier side)",
+      "proof_bytes": "manual estimate; 5.5 KiB lookup proof at log_capacity=34",
+      "client_key_bytes": "manual estimate; 1 MiB verifier key at log_capacity=34"
+    },
+    "_setup_notes": {
+      "setup_ms": "manual estimate; 1 hour setup at log_capacity=34 = 3,600,000 ms",
+      "prover_param_bytes": "manual estimate; 350 GiB SRS at log_capacity=34 = 350 * 1024^3 bytes"
+    }
+  },
+  "audit": {
+    "audit_ms": null,
+    "audit_bytes": null
+  },
+  "publish_keys": {
+    "by_batch": [
+      {
+        "log_update": 12,
+        "batch_size": 4096,
+        "median_ms": 900000.0,
+        "fastest_ms": 900000.0,
+        "slowest_ms": 900000.0,
+        "mean_ms": 900000.0,
+        "bulletin_bytes": null,
+        "_source": "manual_estimate_from_paper"
+      },
+      {
+        "log_update": 13,
+        "batch_size": 8192,
+        "median_ms": 900000.0,
+        "fastest_ms": 900000.0,
+        "slowest_ms": 900000.0,
+        "mean_ms": 900000.0,
+        "bulletin_bytes": null,
+        "_source": "manual_estimate_from_paper"
+      },
+      {
+        "log_update": 14,
+        "batch_size": 16384,
+        "median_ms": 900000.0,
+        "fastest_ms": 900000.0,
+        "slowest_ms": 900000.0,
+        "mean_ms": 900000.0,
+        "bulletin_bytes": null,
+        "_source": "manual_estimate_from_paper"
+      },
+      {
+        "log_update": 15,
+        "batch_size": 32768,
+        "median_ms": 900000.0,
+        "fastest_ms": 900000.0,
+        "slowest_ms": 900000.0,
+        "mean_ms": 900000.0,
+        "bulletin_bytes": null,
+        "_source": "manual_estimate_from_paper"
+      },
+      {
+        "log_update": 16,
+        "batch_size": 65536,
+        "median_ms": 900000.0,
+        "fastest_ms": 900000.0,
+        "slowest_ms": 900000.0,
+        "mean_ms": 900000.0,
+        "bulletin_bytes": null,
+        "_source": "manual_estimate_from_paper"
+      },
+      {
+        "log_update": 17,
+        "batch_size": 131072,
+        "median_ms": 900000.0,
+        "fastest_ms": 900000.0,
+        "slowest_ms": 900000.0,
+        "mean_ms": 900000.0,
+        "bulletin_bytes": null,
+        "_source": "manual_estimate_from_paper"
+      }
+    ]
+  },
+  "publish_reg": {
+    "by_batch": []
+  }
+}

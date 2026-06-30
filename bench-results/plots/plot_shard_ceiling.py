@@ -75,7 +75,7 @@ def plot_shard_ceiling(out_path: Path) -> Path:
     for name, cap, n_actual in MEASURED_REGIMES:
         ax.scatter([cap], [n_actual], s=80, color="black", zorder=5, edgecolors="white", linewidths=1.5)
         ax.annotate(
-            f"{name}\nN={n_actual} deployed",
+            name,
             xy=(cap, n_actual),
             xytext=(8, 8),
             textcoords="offset points",
@@ -88,12 +88,6 @@ def plot_shard_ceiling(out_path: Path) -> Path:
     ax.set_yscale("log", base=2)
     ax.set_xlabel("dictionary capacity (entries, log₂)")
     ax.set_ylabel("approximate cluster size (N_SHARDS, log₂)")
-    ax.set_title(
-        f"Approximate cluster size at fill={FILL_PCT}% on {MACHINE_LABEL}\n"
-        f"(model: ~{GB_PER_M_ENTRIES:.2f} GB peak RSS per 1M per-shard entries, "
-        f"derived from v16 medium watchdog data)"
-    )
-
     # x-axis ticks at every 4th power of 2
     tick_caps = [2 ** k for k in range(20, 41, 4)]
     ax.set_xticks(tick_caps)

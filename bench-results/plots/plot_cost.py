@@ -262,12 +262,6 @@ def plot_cost_vs_capacity(cfg: ClusterConfig, out_path: Path) -> Path:
     ax.set_yscale("log")
     ax.set_xlabel("dictionary capacity (entries, log₂)")
     ax.set_ylabel("deployment cost (USD/hour, log)")
-    ax.set_title(
-        "Aegon cluster cost vs. dictionary capacity\n"
-        f"(shard={cfg.shard_machine}, coord={cfg.coord_machine}, "
-        f"shard_log_cap={cfg.shard_log_capacity}, disk sized for {cfg.max_fill_percent:g}% fill)"
-    )
-
     # x-axis ticks at every 4th power of 2 for readability.
     tick_caps = [2 ** k for k in range(20, 41, 4)]
     ax.set_xticks(tick_caps)

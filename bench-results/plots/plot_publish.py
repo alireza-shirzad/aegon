@@ -116,7 +116,6 @@ def plot_publish_time(regime: str, data: dict) -> Path:
     ax.get_xaxis().set_major_formatter(matplotlib.ticker.ScalarFormatter())
     ax.grid(True, which="both", linestyle=":", alpha=0.5)
     ax.set_axisbelow(True)
-    ax.set_title(REGIME_TITLE.get(regime, f"Regime: {regime}"))
     ax.legend(frameon=False, loc="best", fontsize=9, title="Preload level")
 
     # Footnote: shaded band = min/max across samples_per_batch.
