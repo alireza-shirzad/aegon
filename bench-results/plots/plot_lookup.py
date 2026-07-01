@@ -100,33 +100,52 @@ AKD_STYLES = {
 IRONDICT_STYLES = {
     "small": {
         "color": REGIME_STYLES["small"]["color"],
-        "marker": "s", "linestyle": "-",
+        "marker": "o", "linestyle": "-",
         "label": "irondict small",
     },
     "medium": {
         "color": REGIME_STYLES["medium"]["color"],
-        "marker": "s", "linestyle": "-",
+        "marker": "o", "linestyle": "-",
         "label": "irondict medium",
     },
     "large": {
         "color": REGIME_STYLES["large"]["color"],
-        "marker": "s", "linestyle": "-",
+        "marker": "o", "linestyle": "-",
         "label": "irondict large",
     },
 }
 
 # Regime subsets we render. Every top-level plot function is called
-# once per subset from `main()`, so the small+medium figure is fully
-# decoupled from the large figure — important when large is
-# qualitatively different (different shard count, different ceiling
-# behaviour) and shouldn't squish small/medium's y-axis.
+# once per subset from `main()`; each regime gets its own PDF so the
+# three regimes don't share a y-axis (they differ by orders of
+# magnitude in most metrics).
+SMALL_ONLY:  tuple[str, ...] = ("small",)
+MEDIUM_ONLY: tuple[str, ...] = ("medium",)
+LARGE_ONLY:  tuple[str, ...] = ("large",)
+# Retained for callers that still expect a two-regime bundle (e.g.
+# older paper drafts) — no longer used by main().
 SMALL_MEDIUM: tuple[str, ...] = ("small", "medium")
-LARGE_ONLY: tuple[str, ...] = ("large",)
 # All three regimes on a single figure — used only by the merged
 # migration_curves plot, since throughput-vs-K sweeps are
 # qualitatively similar across regimes (same shape, different
 # absolute scale) and benefit from a side-by-side comparison.
 ALL_REGIMES: tuple[str, ...] = ("small", "medium", "large")
+
+
+def _short_label(full_label: str, subset: tuple[str, ...]) -> str:
+    """When the plot renders a single regime, the "aegon small" /
+    "AKD medium" / "irondict large" style labels carry redundant
+    regime words — every line in the figure shares the same regime,
+    named in the filename and (typically) the caption. Strip the
+    regime suffix so the legend reads "aegon" / "AKD" / "irondict".
+    For multi-regime subsets (only migration_curves' merged view),
+    return the label unchanged so the regime distinction is kept."""
+    if len(subset) != 1:
+        return full_label
+    for suffix in (" small", " medium", " large"):
+        if full_label.endswith(suffix):
+            return full_label[: -len(suffix)]
+    return full_label
 
 
 def _subset_suffix(subset: tuple[str, ...]) -> str:
@@ -167,6 +186,17 @@ def _reducer_for(agg: str):
     typical-case extrapolation); max anchors on the worst observed
     sample (the natural choice for the worst-case view)."""
     return np.max if agg == AGG_MAX else np.median
+
+
+def _marker_for_fill(fill_percent: float, default: str = "o") -> str:
+    """Map a fill level to the plot's canonical marker shape.
+    Convention (paper-wide): 1% = circle, 90% = triangle. Other fills
+    keep whichever marker the caller passes as `default`."""
+    if abs(fill_percent - 1.0) < 0.5:
+        return "o"
+    if abs(fill_percent - 90.0) < 0.5:
+        return "^"
+    return default
 
 
 def _label_axis_endpoints(ax: plt.Axes, formatter=None) -> None:
@@ -841,7 +871,7 @@ def _plot_server_lookup_panels(
                 marker=style["marker"],
                 linewidth=1.8,
                 markersize=6,
-                label=style["label"],
+                label=_short_label(style["label"], subset),
             )
 
         ext = _large_metric_theoretical_extrapolation(
@@ -868,7 +898,7 @@ def _plot_server_lookup_panels(
                 linewidth=1.4,
                 markersize=6,
                 alpha=0.85,
-                label="aegon large (extrapolated)",
+                label="aegon large",
             )
 
         ax.set_xlabel("preload fill (% of true capacity)")
@@ -933,9 +963,40 @@ def plot_audit_vs_fill(
     """
     q_lo, q_mid, q_hi = _percentiles_for(agg)
     reducer = _reducer_for(agg)
-    fig, (ax_time, ax_size) = plt.subplots(1, 2, figsize=(6.4, 3))
 
+    # Same clean-large treatment used on the label/value/history
+    # lookup figures: aegon in blue, AKD in red (unchanged), irondict
+    # in black, every system's curve uses a circle marker, no p10..p90
+    # shading, extrapolation rendered solid so it reads as a
+    # continuation of the measured aegon curve. On small/medium
+    # subsets we keep the original per-regime palette + shading.
+    is_clean_kind = subset == ("large",)
+    # Clean-large uses seconds for the latency panel and MB for the
+    # proof-size panel so both axes read in units the paper's text
+    # references. Small/medium keep milliseconds and KB (their values
+    # are natively in that range).
+    time_scale = 1.0 / 1000.0 if is_clean_kind else 1.0
+    time_unit = "s" if is_clean_kind else "ms"
+    size_scale = 1.0 / (1024.0 * 1024.0) if is_clean_kind else 1.0 / 1024.0
+    size_unit = "MB" if is_clean_kind else "KB"
+    if is_clean_kind:
+        # 2-panel audit figure sized so each panel matches one panel
+        # of setup_large.pdf. Width per panel is bumped from setup's
+        # 2.17 in to ~2.34 in because each audit panel has its own
+        # y-label (setup's 3 panels only render ticks/label on the
+        # leftmost, so it needs less horizontal margin per panel).
+        # Empirically 2.34 in / panel puts the visible axes at ~1.71
+        # in wide, matching setup.
+        fig, (ax_time, ax_size) = plt.subplots(1, 2, figsize=(4.68, 2.03))
+    else:
+        fig, (ax_time, ax_size) = plt.subplots(1, 2, figsize=(5.5, 2.4))
+
+    def _aegon_color(regime_name: str) -> str:
+        return "#1f77b4" if is_clean_kind else REGIME_STYLES[regime_name]["color"]
+    iron_line_color = "#000000" if is_clean_kind else "#444444"
     large_style = REGIME_STYLES["large"]
+    if is_clean_kind:
+        large_style = {**large_style, "color": _aegon_color("large"), "marker": "o"}
     in_subset = set(subset)
     render_small = "small" in in_subset
     render_medium = "medium" in in_subset
@@ -954,16 +1015,19 @@ def plot_audit_vs_fill(
         regime_levels = [lvl for lvl in regime_levels if lvl.audit_ms]
         if not regime_levels:
             continue
-        style = REGIME_STYLES[regime_name]
+        style = {**REGIME_STYLES[regime_name], "color": _aegon_color(regime_name)}
+        if is_clean_kind:
+            style["marker"] = "o"
         xs = np.array([lvl.fill_percent for lvl in regime_levels])
-        central = np.array([percentile(lvl.audit_ms, q_mid) for lvl in regime_levels])
-        low = np.array([percentile(lvl.audit_ms, q_lo) for lvl in regime_levels])
-        high = np.array([percentile(lvl.audit_ms, q_hi) for lvl in regime_levels])
-        ax_time.fill_between(xs, low, high, color=style["color"], alpha=0.18, linewidth=0)
+        central = np.array([percentile(lvl.audit_ms, q_mid) for lvl in regime_levels]) * time_scale
+        low = np.array([percentile(lvl.audit_ms, q_lo) for lvl in regime_levels]) * time_scale
+        high = np.array([percentile(lvl.audit_ms, q_hi) for lvl in regime_levels]) * time_scale
+        if not is_clean_kind:
+            ax_time.fill_between(xs, low, high, color=style["color"], alpha=0.18, linewidth=0)
         ax_time.plot(
             xs, central,
             color=style["color"], marker=style["marker"], linewidth=1.8,
-            markersize=6, label=style["label"],
+            markersize=6, label=_short_label(style["label"], subset),
         )
 
     if render_large:
@@ -979,14 +1043,21 @@ def plot_audit_vs_fill(
             else:
                 xs_full, ys_full = xs_ext, ys_ext
             ax_time.plot(
-                xs_full, ys_full,
+                xs_full, ys_full * time_scale,
                 color=large_style["color"], marker=large_style["marker"],
-                markerfacecolor="none", linestyle="--", linewidth=1.4,
-                markersize=6, alpha=0.85, label="aegon large (extrapolated)",
+                markerfacecolor=large_style["color"] if is_clean_kind else "none",
+                linestyle="-" if is_clean_kind else "--",
+                linewidth=1.8 if is_clean_kind else 1.4,
+                markersize=6, alpha=1.0 if is_clean_kind else 0.85,
+                label="_nolegend_" if is_clean_kind else "aegon large",
             )
 
-    ax_time.set_xlabel("preload fill (% of true capacity)")
-    ax_time.set_ylabel(f"{_agg_label(agg)} auditor verify\nlatency (ms)")
+    ax_time.set_xlabel("preload fill (% of true capacity)", fontsize=7, labelpad=2)
+    ax_time.set_ylabel(f"audit latency ({time_unit})"
+                       if is_clean_kind
+                       else f"{_agg_label(agg)} auditor verify\nlatency ({time_unit})",
+                       fontsize=7, labelpad=2)
+    ax_time.tick_params(axis="both", labelsize=6, pad=1)
     ax_time.grid(True, which="both", alpha=0.3)
     ax_time.set_xticks([1, 30, 60, 90])
 
@@ -995,16 +1066,19 @@ def plot_audit_vs_fill(
         regime_levels = [lvl for lvl in regime_levels if lvl.audit_bytes]
         if not regime_levels:
             continue
-        style = REGIME_STYLES[regime_name]
+        style = {**REGIME_STYLES[regime_name], "color": _aegon_color(regime_name)}
+        if is_clean_kind:
+            style["marker"] = "o"
         xs = np.array([lvl.fill_percent for lvl in regime_levels])
-        # Convert bytes → KB. The proof size is identical per sample at
-        # a given regime+fill, so median/p10/p90/max all collapse to a
+        # Convert bytes → KB (or MB on the clean-large panel via
+        # size_scale). The proof size is identical per sample at a
+        # given regime+fill, so median/p10/p90/max all collapse to a
         # single value — no shaded band needed even under `agg=max`.
-        central = np.array([percentile(lvl.audit_bytes, q_mid) for lvl in regime_levels]) / 1024.0
+        central = np.array([percentile(lvl.audit_bytes, q_mid) for lvl in regime_levels]) * size_scale
         ax_size.plot(
             xs, central,
             color=style["color"], marker=style["marker"], linewidth=1.8,
-            markersize=6, label=style["label"],
+            markersize=6, label=_short_label(style["label"], subset),
         )
 
     # Large proof-size extrapolation. The audit proof structure carries
@@ -1025,14 +1099,21 @@ def plot_audit_vs_fill(
         else:
             xs_full, ys_full = xs_ext, ys_ext
         ax_size.plot(
-            xs_full, ys_full / 1024.0,
+            xs_full, ys_full * size_scale,
             color=large_style["color"], marker=large_style["marker"],
-            markerfacecolor="none", linestyle="--", linewidth=1.4,
-            markersize=6, alpha=0.85, label="aegon large (extrapolated)",
+            markerfacecolor=large_style["color"] if is_clean_kind else "none",
+            linestyle="-" if is_clean_kind else "--",
+            linewidth=1.8 if is_clean_kind else 1.4,
+            markersize=6, alpha=1.0 if is_clean_kind else 0.85,
+            label="_nolegend_" if is_clean_kind else "aegon large",
         )
 
-    ax_size.set_xlabel("preload fill (% of true capacity)")
-    ax_size.set_ylabel(f"{_agg_label(agg)} audit proof\nsize (KB)")
+    ax_size.set_xlabel("preload fill (% of true capacity)", fontsize=7, labelpad=2)
+    ax_size.set_ylabel(f"audit proof ({size_unit})"
+                       if is_clean_kind
+                       else f"{_agg_label(agg)} audit proof\nsize ({size_unit})",
+                       fontsize=7, labelpad=2)
+    ax_size.tick_params(axis="both", labelsize=6, pad=1)
     ax_size.grid(True, which="both", alpha=0.3)
     ax_size.set_xticks([1, 30, 60, 90])
 
@@ -1044,25 +1125,26 @@ def plot_audit_vs_fill(
         akd_regimes = [(n, akd[n]) for n in subset if n in akd and akd[n]]
         for akd_name, akd_levels in akd_regimes:
             astyle = AKD_STYLES[akd_name]
+            akd_marker = "o" if is_clean_kind else astyle["marker"]
             lvls_time = [lvl for lvl in akd_levels if lvl.audit_ms]
             if lvls_time:
                 xs = np.array([lvl.fill_percent for lvl in lvls_time])
-                central = np.array([percentile(lvl.audit_ms, q_mid) for lvl in lvls_time])
+                central = np.array([percentile(lvl.audit_ms, q_mid) for lvl in lvls_time]) * time_scale
                 ax_time.plot(
                     xs, central,
-                    color=astyle["color"], marker=astyle["marker"],
+                    color=astyle["color"], marker=akd_marker,
                     linestyle=astyle["linestyle"], markerfacecolor="none",
-                    linewidth=1.6, markersize=6, label=astyle["label"],
+                    linewidth=1.6, markersize=6, label=_short_label(astyle["label"], subset),
                 )
             lvls_size = [lvl for lvl in akd_levels if lvl.audit_bytes]
             if lvls_size:
                 xs = np.array([lvl.fill_percent for lvl in lvls_size])
-                central = np.array([percentile(lvl.audit_bytes, q_mid) for lvl in lvls_size]) / 1024.0
+                central = np.array([percentile(lvl.audit_bytes, q_mid) for lvl in lvls_size]) * size_scale
                 ax_size.plot(
                     xs, central,
-                    color=astyle["color"], marker=astyle["marker"],
+                    color=astyle["color"], marker=akd_marker,
                     linestyle=astyle["linestyle"], markerfacecolor="none",
-                    linewidth=1.6, markersize=6, label=astyle["label"],
+                    linewidth=1.6, markersize=6, label=_short_label(astyle["label"], subset),
                 )
         # Aegon audit costs are O(shards) bytes / ~1 ms; AKD's are
         # O(epoch delta) MB / ~100 ms. Linear axes would collapse the
@@ -1092,19 +1174,19 @@ def plot_audit_vs_fill(
             istyle = IRONDICT_STYLES[iron_name]
             if iron.audit_ms is not None:
                 ax_time.plot(
-                    iron_xs, np.full_like(iron_xs, iron.audit_ms),
-                    color=istyle["color"], linestyle=istyle["linestyle"],
+                    iron_xs, np.full_like(iron_xs, iron.audit_ms * time_scale),
+                    color=iron_line_color, linestyle=istyle["linestyle"],
                     marker=istyle["marker"], markerfacecolor="none",
-                    linewidth=1.6, markersize=6, label=istyle["label"],
+                    linewidth=1.6, markersize=6, label=_short_label(istyle["label"], subset),
                 )
                 any_iron_time = True
             if iron.audit_bytes is not None:
-                v_kb = iron.audit_bytes / 1024.0
+                v_scaled = iron.audit_bytes * size_scale
                 ax_size.plot(
-                    iron_xs, np.full_like(iron_xs, v_kb),
-                    color=istyle["color"], linestyle=istyle["linestyle"],
+                    iron_xs, np.full_like(iron_xs, v_scaled),
+                    color=iron_line_color, linestyle=istyle["linestyle"],
                     marker=istyle["marker"], markerfacecolor="none",
-                    linewidth=1.6, markersize=6, label=istyle["label"],
+                    linewidth=1.6, markersize=6, label=_short_label(istyle["label"], subset),
                 )
                 any_iron_size = True
         ax_time.set_xlim(iron_xlim_time)
@@ -1114,27 +1196,40 @@ def plot_audit_vs_fill(
         if any_iron_size:
             ax_size.set_yscale("log")
 
-    # Two-row shared legend (matches the server / client / proof-size
-    # layout): small + medium on top, large + large-extrapolated below.
     handles, labels = ax_time.get_legend_handles_labels()
-    pairs = list(zip(handles, labels))
-    row1 = [(h, l) for h, l in pairs if not l.startswith("large")]
-    row2 = [(h, l) for h, l in pairs if l.startswith("large")]
     for ax in fig.axes:
         _label_axis_endpoints(ax)
-    fig.tight_layout(rect=(0, 0.14, 1, 1))
-    if row1:
-        fig.legend(
-            [h for h, _ in row1], [l for _, l in row1],
-            loc="lower center", ncol=len(row1),
-            bbox_to_anchor=(0.5, 0.08), frameon=False,
-        )
-    if row2:
-        fig.legend(
-            [h for h, _ in row2], [l for _, l in row2],
-            loc="lower center", ncol=len(row2),
-            bbox_to_anchor=(0.5, 0.0), frameon=False,
-        )
+    if is_clean_kind:
+        # Same panel/legend geometry as the lookup and bench_summary
+        # large figures: subplots_adjust wspace matches setup so each
+        # panel comes out at 1.71 x 1.35 in axes.
+        fig.subplots_adjust(wspace=0.35)
+        fig.tight_layout(rect=(0, 0.14, 1, 1), pad=0.4, w_pad=0.6)
+        if handles:
+            fig.legend(handles, labels, loc="lower center",
+                       ncol=min(len(handles), 5),
+                       bbox_to_anchor=(0.5, 0.0), frameon=False)
+    else:
+        # Two-row shared legend (matches the server / client / proof-
+        # size layout): small + medium on top, large + large-extrapolated
+        # below. Only used for the small/medium subsets that keep the
+        # regime-encoded style.
+        pairs = list(zip(handles, labels))
+        row1 = [(h, l) for h, l in pairs if not l.startswith("large")]
+        row2 = [(h, l) for h, l in pairs if l.startswith("large")]
+        fig.tight_layout(rect=(0, 0.14, 1, 1))
+        if row1:
+            fig.legend(
+                [h for h, _ in row1], [l for _, l in row1],
+                loc="lower center", ncol=len(row1),
+                bbox_to_anchor=(0.5, 0.08), frameon=False,
+            )
+        if row2:
+            fig.legend(
+                [h for h, _ in row2], [l for _, l in row2],
+                loc="lower center", ncol=len(row2),
+                bbox_to_anchor=(0.5, 0.0), frameon=False,
+            )
 
     out_path = PLOTS_DIR / f"audit_vs_fill{_subset_suffix(subset)}{_agg_suffix(agg)}.pdf"
     fig.savefig(out_path, format="pdf", bbox_inches="tight")
@@ -1206,7 +1301,7 @@ def plot_publish_vs_batch(
 
     # Per-panel y-axis (sharey=False) so the large panel can show its
     # extrapolated values without squishing small/medium.
-    fig, axes = plt.subplots(1, len(populated), figsize=(3.2 * len(populated), 3), sharey=False)
+    fig, axes = plt.subplots(1, len(populated), figsize=(3.4, 2.6), sharey=False)
     if len(populated) == 1:
         axes = [axes]
     # Softer rainbow palette: red at fill=0, blue at fill=100.
@@ -1275,8 +1370,6 @@ def plot_publish_vs_batch(
         fill_to_color = {f: i / (n_fills - 1) for i, f in enumerate(global_fills_sorted)}
 
     for ax, (regime_name, regime_levels) in zip(axes, populated):
-        if subset == SMALL_MEDIUM:
-            ax.set_title(regime_name.capitalize())
         levels_sorted = sorted(regime_levels, key=lambda l: l.fill_percent)
         measured_fills = [lvl.fill_percent for lvl in levels_sorted if lvl.publish_ms]
         if not measured_fills:
@@ -1297,7 +1390,7 @@ def plot_publish_vs_batch(
                 xs,
                 central,
                 color=color,
-                marker="o",
+                marker=_marker_for_fill(lvl.fill_percent, default="o"),
                 linewidth=1.8,
                 markersize=5,
                 label=f"aegon {lvl.fill_percent:g}%",
@@ -1358,13 +1451,13 @@ def plot_publish_vs_batch(
                         xs,
                         ys,
                         color=color,
-                        marker="o",
+                        marker=_marker_for_fill(f, default="o"),
                         markerfacecolor="none",
                         linewidth=1.4,
                         markersize=5,
                         linestyle="--",
                         alpha=0.9,
-                        label=f"aegon {f:g}% (extrapolated)",
+                        label=f"aegon {f:g}%",
                     )
 
         # irondict overlay for this panel's regime. irondict has no
@@ -1407,7 +1500,7 @@ def plot_publish_vs_batch(
                         marker=istyle["marker"], markerfacecolor="none",
                         linestyle=istyle["linestyle"],
                         linewidth=1.6, markersize=5,
-                        label="irondict 0%",
+                        label="irondict 1%",
                     )
 
         # AKD-MySQL overlay for this panel's regime. Color matches the
@@ -1421,7 +1514,7 @@ def plot_publish_vs_batch(
             # AKD-large is extrapolated from small+medium (see
             # akd-mysql/large.json _note); flag it in the legend so
             # the reader can distinguish from measured AKD curves.
-            akd_suffix = " (extrapolation)" if regime_name == "large" else ""
+            akd_suffix = "" if regime_name == "large" else ""
             for lvl in sorted(akd[regime_name], key=lambda l: l.fill_percent):
                 if not lvl.publish_ms:
                     continue
@@ -1433,7 +1526,9 @@ def plot_publish_vs_batch(
                 ys_a = np.array([percentile(lvl.publish_ms[b], q_mid) for b in batch_sizes]) / 1000.0
                 ax.plot(
                     xs_a, ys_a,
-                    color=color, marker="D", markerfacecolor="none",
+                    color=color,
+                    marker=_marker_for_fill(lvl.fill_percent, default="D"),
+                    markerfacecolor="none",
                     linestyle="-", linewidth=1.4, markersize=5,
                     label=f"AKD {lvl.fill_percent:g}%{akd_suffix}",
                 )
@@ -1568,7 +1663,7 @@ def _plot_client_lookup_panels(
                 marker=style["marker"],
                 linewidth=1.8,
                 markersize=6,
-                label=style["label"],
+                label=_short_label(style["label"], subset),
             )
 
         ext = _large_metric_theoretical_extrapolation(
@@ -1595,11 +1690,11 @@ def _plot_client_lookup_panels(
                 linewidth=1.4,
                 markersize=6,
                 alpha=0.85,
-                label="aegon large (extrapolated)",
+                label="aegon large",
             )
 
         ax.set_xlabel("preload fill (% of true capacity)")
-        ax.set_ylabel(f"median {title}\nclient verify latency (ms)")
+        ax.set_ylabel(f"median {title}\nclient latency (ms)")
         ax.grid(True, which="both", alpha=0.3)
         ax.set_xticks([1, 30, 60, 90])
 
@@ -1854,7 +1949,7 @@ def _plot_proof_size_panels(
                 marker=style["marker"],
                 linewidth=1.8,
                 markersize=6,
-                label=style["label"],
+                label=_short_label(style["label"], subset),
             )
 
         ext = _large_proof_extrapolation(large, medium, key)
@@ -1879,7 +1974,7 @@ def _plot_proof_size_panels(
                 linewidth=1.4,
                 markersize=6,
                 alpha=0.85,
-                label="aegon large (extrapolated)",
+                label="aegon large",
             )
 
         ax.set_xlabel("preload fill (% of true capacity)")
@@ -1937,6 +2032,91 @@ def plot_lookup_per_operation(
     return paths
 
 
+def _synth_combined_history_levels(
+    levels: list[LevelStats], sum_aegon: bool = True,
+) -> list[LevelStats]:
+    """Return a new list of LevelStats where each level carries a
+    "combined_history" metric under server_ms / client_ms /
+    proof_bytes.
+
+    - `sum_aegon=True`  (aegon input): elementwise sum of the level's
+      `label_history` and `history` samples. Aegon exposes label-
+      history and value-history as two separate operations, so
+      "combined history" = paying for both.
+    - `sum_aegon=False` (AKD input): AKD's `Directory::key_history`
+      returns both labels and values in one call, so its
+      `label_history` and `history` entries are identical. We just
+      copy `history` (or `label_history`) into `combined_history`
+      so `_plot_one_lookup_op` finds the metric under the same key.
+
+    IronDict has no history operation and is overlaid through
+    `IronStats`, which stores single scalars ignored by the key
+    argument — no synthesis needed for irondict."""
+    out: list[LevelStats] = []
+    for lvl in levels:
+        def _combine(store: dict) -> list:
+            lh = store.get("label_history", []) or []
+            vh = store.get("history", []) or []
+            if not sum_aegon:
+                return list(vh) if vh else list(lh)
+            if lh and vh:
+                n = min(len(lh), len(vh))
+                return [lh[i] + vh[i] for i in range(n)]
+            return list(lh) or list(vh)
+
+        srv = dict(lvl.server_ms)
+        cli = dict(lvl.client_ms)
+        pb = dict(lvl.proof_bytes)
+        srv["combined_history"] = _combine(lvl.server_ms)
+        cli["combined_history"] = _combine(lvl.client_ms)
+        pb["combined_history"] = _combine(lvl.proof_bytes)
+        out.append(LevelStats(
+            fill_percent=lvl.fill_percent,
+            true_log_capacity=lvl.true_log_capacity,
+            server_ms=srv,
+            client_ms=cli,
+            proof_bytes=pb,
+            publish_ms=lvl.publish_ms,
+            audit_ms=lvl.audit_ms,
+            audit_bytes=lvl.audit_bytes,
+            concurrency_sweep_kind=lvl.concurrency_sweep_kind,
+            concurrency_sweep=lvl.concurrency_sweep,
+        ))
+    return out
+
+
+def plot_combined_history_large(
+    small: list[LevelStats],
+    medium: list[LevelStats],
+    large: list[LevelStats],
+    akd: dict[str, list[LevelStats]] | None = None,
+    irondict: dict[str, IronStats] | None = None,
+) -> Path:
+    """Render lookup_combined_history_large.pdf: the 3-panel history
+    figure with aegon curves showing the SUM of aegon's label-history
+    and value-history metrics (an aegon client that needs both must
+    call both endpoints), and AKD / IronDict shown at their native
+    single-call cost. Same visual style as the other clean large
+    figures (blue aegon with circle markers, black irondict, solid
+    extrapolation, no p10..p90 shading)."""
+    large_syn = _synth_combined_history_levels(large, sum_aegon=True)
+    akd_syn: dict[str, list[LevelStats]] | None = None
+    if akd:
+        akd_syn = {}
+        for name, levels in akd.items():
+            if levels:
+                akd_syn[name] = _synth_combined_history_levels(levels, sum_aegon=False)
+    return _plot_one_lookup_op(
+        small, medium, large_syn,
+        key="combined_history",
+        title="combined-history lookup",
+        subset=("large",),
+        agg=AGG_MEDIAN,
+        akd=akd_syn,
+        irondict=irondict,
+    )
+
+
 def _plot_one_lookup_op(
     small: list[LevelStats],
     medium: list[LevelStats],
@@ -1957,14 +2137,76 @@ def _plot_one_lookup_op(
     they're suppressed under `agg=max`."""
     q_lo, q_mid, q_hi = _percentiles_for(agg)
     reducer = _reducer_for(agg)
-    fig, (ax_srv, ax_cli, ax_size) = plt.subplots(1, 3, figsize=(9.6, 3), sharex=True)
-    large_style = REGIME_STYLES["large"]
-    HISTORY_KINDS = {"label_history", "history"}
+    # For the value-lookup figure in the large regime we tack on a
+    # fourth panel: the coordinator serving-latency knee (median lookup
+    # latency vs achieved QPS under a concurrency sweep). It's a
+    # lookup-latency measurement, so it belongs with the value figure
+    # rather than the publish/migration summary. Guarded so only the
+    # large-only value figure gets the extra panel — small/medium
+    # regimes have no concurrency-sweep data attached.
+    # Every lookup kind now renders as a 1 x 3 row of panels — server
+    # latency, client latency, proof size — matching setup_large.pdf's
+    # per-panel size. The serving-latency knee panel that briefly
+    # lived on the value-large figure was replaced by a small table in
+    # the evaluation text (single-machine maximum QPS per system), so
+    # there is no more special-case 4-panel or 2x2 layout to handle.
+    n_panels = 3
+    figsize = (2.17 * n_panels, 2.03)
+    fig, axes = plt.subplots(1, n_panels, figsize=figsize, sharex=False)
+    ax_srv, ax_cli, ax_size = axes[0], axes[1], axes[2]
+    ax_knee = None
+    is_value_large_kind = key == "value" and subset == ("large",)
+    is_history_large_kind = key == "history" and subset == ("large",)
+    is_label_history_large_kind = key == "label_history" and subset == ("large",)
+    is_combined_history_large_kind = key == "combined_history" and subset == ("large",)
+    HISTORY_KINDS = {"label_history", "history", "combined_history"}
     proof_scale = 1.0 if key in HISTORY_KINDS else (1.0 / 1024.0)
     proof_unit = "bytes" if key in HISTORY_KINDS else "KB"
 
+    # "Clean" kinds (label, and value-large in the main body): aegon
+    # in blue, irondict in black, no shaded p10..p90 envelope, solid
+    # (not dashed) extrapolation with filled markers, circle marker
+    # for every aegon regime. For the label figure we additionally
+    # skip the AKD overlay entirely (AKD's `Directory::lookup` is
+    # value-binding, so an AKD "label" curve would just duplicate its
+    # value curve). For value-large we keep AKD.
+    is_label_kind = key == "label"
+    is_clean_kind = (is_label_kind or is_value_large_kind
+                     or is_history_large_kind or is_label_history_large_kind
+                     or is_combined_history_large_kind)
+    def _aegon_color(regime_name: str) -> str:
+        return "#1f77b4" if is_clean_kind else REGIME_STYLES[regime_name]["color"]
+    iron_line_color = "#000000" if is_clean_kind else "#444444"
+    large_style = REGIME_STYLES["large"]
+    if is_clean_kind:
+        large_style = {**large_style, "color": _aegon_color("large"), "marker": "o"}
+
     in_subset = set(subset)
     render_large = "large" in in_subset
+
+    # Label-lookup outlier filter (large regime only). The aegon-large
+    # label sweep occasionally hits probe-chain / VRF-cache spikes that
+    # send a single fill level's median 5-8x above the underlying
+    # trend (e.g. fill=2%, 8%, 10% at ~15-20 ms vs ~2.5 ms baseline).
+    # Those spikes make both the measured curve visually noisy and the
+    # 10%-anchored extrapolation project 5-10x too high. Drop any fill
+    # whose median server latency exceeds 2x the fleet median, and use
+    # the cleaned list for both the plot and the extrapolation anchor.
+    if is_label_kind and render_large and large:
+        srv_medians = []
+        for lvl in large:
+            vals = lvl.server_ms.get(key, [])
+            if vals:
+                srv_medians.append(float(np.median(vals)))
+        if srv_medians:
+            fleet_median = float(np.median(srv_medians))
+            threshold = 2.0 * fleet_median
+            large = [
+                l for l in large
+                if not l.server_ms.get(key)
+                or float(np.median(l.server_ms[key])) <= threshold
+            ]
+
     line_regimes: list[tuple[str, list[LevelStats]]] = []
     if "small" in in_subset:
         line_regimes.append(("small", small))
@@ -1980,16 +2222,19 @@ def _plot_one_lookup_op(
     for regime_name, regime_levels in line_regimes:
         if not regime_levels:
             continue
-        style = REGIME_STYLES[regime_name]
+        style = {**REGIME_STYLES[regime_name], "color": _aegon_color(regime_name)}
+        if is_clean_kind:
+            style["marker"] = "o"
         xs = np.array([lvl.fill_percent for lvl in regime_levels])
         central = np.array([percentile(lvl.server_ms[key], q_mid) for lvl in regime_levels])
         low = np.array([percentile(lvl.server_ms[key], q_lo) for lvl in regime_levels])
         high = np.array([percentile(lvl.server_ms[key], q_hi) for lvl in regime_levels])
         eps = 1e-4
         central, low, high = np.maximum(central, eps), np.maximum(low, eps), np.maximum(high, eps)
-        ax_srv.fill_between(xs, low, high, color=style["color"], alpha=0.18, linewidth=0)
+        if not is_clean_kind:
+            ax_srv.fill_between(xs, low, high, color=style["color"], alpha=0.18, linewidth=0)
         ax_srv.plot(xs, central, color=style["color"], marker=style["marker"],
-                    linewidth=1.8, markersize=6, label=style["label"])
+                    linewidth=1.8, markersize=6, label=_short_label(style["label"], subset))
     ext = _large_metric_theoretical_extrapolation(large, lambda lvl, k=key: lvl.server_ms.get(k, []), reducer=reducer) if extrap_large else None
     if ext is not None:
         xs_ext, ys_ext = ext
@@ -2003,10 +2248,14 @@ def _plot_one_lookup_op(
             xs_full, ys_full = xs_ext, ys_ext
         ax_srv.plot(xs_full, np.maximum(ys_full, 1e-4),
                     color=large_style["color"], marker=large_style["marker"],
-                    markerfacecolor="none", linestyle="--", linewidth=1.4,
-                    markersize=6, alpha=0.85, label="aegon large (extrapolated)")
-    ax_srv.set_xlabel("preload fill (% of true capacity)")
-    ax_srv.set_ylabel("server latency (ms)")
+                    markerfacecolor=large_style["color"] if is_clean_kind else "none",
+                    linestyle="-" if is_clean_kind else "--",
+                    linewidth=1.8 if is_clean_kind else 1.4,
+                    markersize=6, alpha=1.0 if is_clean_kind else 0.85,
+                    label="_nolegend_")
+    ax_srv.set_xlabel("preload fill (% of true capacity)", fontsize=7, labelpad=2)
+    ax_srv.set_ylabel("server latency (ms)", fontsize=6, labelpad=1)
+    ax_srv.tick_params(axis="both", labelsize=5, pad=1)
     ax_srv.grid(True, which="both", alpha=0.3)
     ax_srv.set_xticks([1, 30, 60, 90])
 
@@ -2014,16 +2263,19 @@ def _plot_one_lookup_op(
     for regime_name, regime_levels in line_regimes:
         if not regime_levels:
             continue
-        style = REGIME_STYLES[regime_name]
+        style = {**REGIME_STYLES[regime_name], "color": _aegon_color(regime_name)}
+        if is_clean_kind:
+            style["marker"] = "o"
         xs = np.array([lvl.fill_percent for lvl in regime_levels])
         central = np.array([percentile(lvl.client_ms[key], q_mid) for lvl in regime_levels])
         low = np.array([percentile(lvl.client_ms[key], q_lo) for lvl in regime_levels])
         high = np.array([percentile(lvl.client_ms[key], q_hi) for lvl in regime_levels])
         eps = 1e-4
         central, low, high = np.maximum(central, eps), np.maximum(low, eps), np.maximum(high, eps)
-        ax_cli.fill_between(xs, low, high, color=style["color"], alpha=0.18, linewidth=0)
+        if not is_clean_kind:
+            ax_cli.fill_between(xs, low, high, color=style["color"], alpha=0.18, linewidth=0)
         ax_cli.plot(xs, central, color=style["color"], marker=style["marker"],
-                    linewidth=1.8, markersize=6, label=style["label"])
+                    linewidth=1.8, markersize=6, label=_short_label(style["label"], subset))
     ext = _large_metric_theoretical_extrapolation(large, lambda lvl, k=key: lvl.client_ms.get(k, []), reducer=reducer) if extrap_large else None
     if ext is not None:
         xs_ext, ys_ext = ext
@@ -2037,10 +2289,14 @@ def _plot_one_lookup_op(
             xs_full, ys_full = xs_ext, ys_ext
         ax_cli.plot(xs_full, np.maximum(ys_full, 1e-4),
                     color=large_style["color"], marker=large_style["marker"],
-                    markerfacecolor="none", linestyle="--", linewidth=1.4,
-                    markersize=6, alpha=0.85, label="aegon large (extrapolated)")
-    ax_cli.set_xlabel("preload fill (% of true capacity)")
-    ax_cli.set_ylabel("client verify latency (ms)")
+                    markerfacecolor=large_style["color"] if is_clean_kind else "none",
+                    linestyle="-" if is_clean_kind else "--",
+                    linewidth=1.8 if is_clean_kind else 1.4,
+                    markersize=6, alpha=1.0 if is_clean_kind else 0.85,
+                    label="_nolegend_")
+    ax_cli.set_xlabel("preload fill (% of true capacity)", fontsize=7, labelpad=2)
+    ax_cli.set_ylabel("client latency (ms)", fontsize=7, labelpad=2)
+    ax_cli.tick_params(axis="both", labelsize=6, pad=1)
     ax_cli.grid(True, which="both", alpha=0.3)
     ax_cli.set_xticks([1, 30, 60, 90])
 
@@ -2048,15 +2304,31 @@ def _plot_one_lookup_op(
     for regime_name, regime_levels in line_regimes:
         if not regime_levels:
             continue
-        style = REGIME_STYLES[regime_name]
+        style = {**REGIME_STYLES[regime_name], "color": _aegon_color(regime_name)}
+        if is_clean_kind:
+            style["marker"] = "o"
         xs = np.array([lvl.fill_percent for lvl in regime_levels])
         central = np.array([percentile(lvl.proof_bytes[key], q_mid) for lvl in regime_levels]) * proof_scale
         low = np.array([percentile(lvl.proof_bytes[key], q_lo) for lvl in regime_levels]) * proof_scale
         high = np.array([percentile(lvl.proof_bytes[key], q_hi) for lvl in regime_levels]) * proof_scale
-        ax_size.fill_between(xs, low, high, color=style["color"], alpha=0.18, linewidth=0)
+        if not is_clean_kind:
+            ax_size.fill_between(xs, low, high, color=style["color"], alpha=0.18, linewidth=0)
         ax_size.plot(xs, central, color=style["color"], marker=style["marker"],
-                     linewidth=1.8, markersize=6, label=style["label"])
+                     linewidth=1.8, markersize=6, label=_short_label(style["label"], subset))
     ext = _large_proof_extrapolation(large, medium, key, reducer=reducer) if extrap_large else None
+    if extrap_large and is_combined_history_large_kind:
+        # combined-history proof size is bounded by the two 5-entry
+        # history windows and does not grow with fill — replay the
+        # measured anchor at 30/60/90 as a continuation of the solid
+        # line rather than as an extrapolated projection. Overrides
+        # whatever the extrapolation returned (typically None because
+        # medium-regime data is not synthesised for this composite
+        # metric).
+        measured_large = [l for l in large if l.fill_percent <= 10.5]
+        if measured_large:
+            anchor = float(reducer(measured_large[-1].proof_bytes[key]))
+            xs_ext = np.array([30.0, 60.0, 90.0])
+            ext = (xs_ext, np.full_like(xs_ext, anchor, dtype=float))
     if ext is not None:
         xs_ext, ys_ext = ext
         ys_ext = ys_ext * proof_scale
@@ -2070,12 +2342,75 @@ def _plot_one_lookup_op(
             xs_full, ys_full = xs_ext, ys_ext
         ax_size.plot(xs_full, ys_full,
                      color=large_style["color"], marker=large_style["marker"],
-                     markerfacecolor="none", linestyle="--", linewidth=1.4,
-                     markersize=6, alpha=0.85, label="aegon large (extrapolated)")
-    ax_size.set_xlabel("preload fill (% of true capacity)")
-    ax_size.set_ylabel(f"proof size ({proof_unit})")
+                     markerfacecolor=large_style["color"] if is_clean_kind else "none",
+                     linestyle="-" if is_clean_kind else "--",
+                     linewidth=1.8 if is_clean_kind else 1.4,
+                     markersize=6, alpha=1.0 if is_clean_kind else 0.85,
+                     label="_nolegend_")
+    ax_size.set_xlabel("preload fill (% of true capacity)", fontsize=7, labelpad=2)
+    ax_size.set_ylabel(f"proof size ({proof_unit})", fontsize=7, labelpad=2)
+    ax_size.tick_params(axis="both", labelsize=6, pad=1)
     ax_size.grid(True, which="both", alpha=0.3)
     ax_size.set_xticks([1, 30, 60, 90])
+
+    # ---- Serving-latency knee panel (large + value only) ----
+    # p50 lookup latency vs achieved QPS from the coordinator
+    # concurrency sweep. Uses the highest measured fill so the knee
+    # reads the worst-case load. The p50..p99 band shades tail growth,
+    # which fans out at the saturation point even where p50 stays flat.
+    if ax_knee is not None:
+        lvls_knee = sorted(
+            [l for l in large if l.concurrency_sweep],
+            key=lambda l: l.fill_percent,
+        )
+        if lvls_knee:
+            lvl = lvls_knee[-1]
+            samples = sorted(lvl.concurrency_sweep, key=lambda s: s["concurrency"])
+            qps = np.array([s["qps"] for s in samples]) / 1e3
+            p50 = np.array([s["latency_ms_p50"] for s in samples])
+            p99 = np.array([s.get("latency_ms_p99", s["latency_ms_p50"]) for s in samples])
+            color = large_style["color"]
+            ax_knee.fill_between(qps, p50, p99, color=color, alpha=0.22, linewidth=0,
+                                 label="p99")
+            ax_knee.plot(qps, p50, color=color, marker=large_style["marker"],
+                         markersize=6, linewidth=1.8, label="p50")
+        # Estimated per-machine QPS ceilings for AKD and IronDict on
+        # their respective large-regime hardware. Each ceiling is
+        # `n_vcpu / server_lookup_ms` — the maximum sustained rate at
+        # which one core can serve one lookup back-to-back at the
+        # measured server-side latency. Plotted as a marker at
+        # (ceiling_qps, server_ms) plus a vertical dashed line marking
+        # the QPS axis position (same convention as the OOM ceilings
+        # in the bench_summary_large migration panel).
+        #  - AKD on n2-highmem-32 (32 vCPU), server_ms ≈ 32.5 ms at
+        #    fill 90%  →  ~985 QPS
+        #  - IronDict on c4-highmem-144-lssd (144 vCPU), server_ms
+        #    ≈ 30 ms  →  ~4.8 k QPS
+        AKD_QPS_K = 32 / 32.5 * 1000 / 1000  # in ×10^3 units
+        AKD_LAT_MS = 32.5
+        IRON_QPS_K = 144 / 30.0 * 1000 / 1000
+        IRON_LAT_MS = 30.0
+        ax_knee.axvline(AKD_QPS_K, color="#d62728", linestyle="--",
+                        linewidth=0.9, alpha=0.6)
+        ax_knee.plot([AKD_QPS_K], [AKD_LAT_MS], color="#d62728", marker="o",
+                     markersize=6, markerfacecolor="none", linestyle="none",
+                     label="AKD ceiling")
+        ax_knee.axvline(IRON_QPS_K, color="#000000", linestyle="--",
+                        linewidth=0.9, alpha=0.6)
+        ax_knee.plot([IRON_QPS_K], [IRON_LAT_MS], color="#000000", marker="o",
+                     markersize=6, markerfacecolor="none", linestyle="none",
+                     label="irondict ceiling")
+        ax_knee.set_xlabel("achieved QPS ($\\times 10^3$)", fontsize=7, labelpad=2)
+        ax_knee.set_ylabel("lookup latency (ms)", fontsize=7, labelpad=2)
+        ax_knee.tick_params(axis="both", labelsize=6, pad=1)
+        ax_knee.grid(True, which="both", alpha=0.3)
+        # Small in-axis legend so the reader knows the shaded band is
+        # p99 tail latency, the line is p50, and the two hollow circles
+        # are the estimated AKD / IronDict single-machine ceilings.
+        # The shared legend at the bottom of the figure only carries
+        # the aegon/AKD/irondict curves from ax_srv.
+        ax_knee.legend(loc="upper left", fontsize=6, frameon=False,
+                       handlelength=1.2, handletextpad=0.4)
 
     # AKD-MySQL overlay across all three panels. Matches the aegon
     # regime's color (so the eye groups small-AKD with small-aegon),
@@ -2090,15 +2425,25 @@ def _plot_one_lookup_op(
     # irondict convention) so the reader can compare like-for-like
     # against aegon on whichever operation they care about; the AKD
     # numbers on label vs value panels are identical by construction.
-    if akd:
+    # Skip the AKD overlay on the label-lookup figure: AKD only
+    # physically measures the value-binding `Directory::lookup`
+    # operation, so an AKD "label" curve would duplicate the AKD
+    # value curve. Reader gets that comparison from the value figure.
+    if akd and not is_label_kind:
         akd_in_subset = [(n, akd[n]) for n in subset if n in akd and akd[n]]
         for akd_name, akd_levels in akd_in_subset:
             astyle = AKD_STYLES[akd_name]
+            # On every clean large figure (label / value / history /
+            # label-history / combined-history) all systems' curves
+            # use a circle marker. AKD's diamond only shows up on the
+            # small/medium fill-sweep figures where per-system shape
+            # helps disambiguate multiple fills on the same axis.
+            akd_marker = "o" if is_clean_kind else astyle["marker"]
             # AKD-large lookup samples are extrapolated from small+
             # medium (see akd-mysql/large.json _lookup_note); flag it
             # in the legend so the reader can tell apart from measured.
-            akd_label = astyle["label"] + (
-                " (extrapolation)" if akd_name == "large" else ""
+            akd_label = _short_label(astyle["label"], subset) + (
+                "" if akd_name == "large" else ""
             )
             lvls = sorted(akd_levels, key=lambda l: l.fill_percent)
             xs = np.array([lvl.fill_percent for lvl in lvls])
@@ -2110,7 +2455,7 @@ def _plot_one_lookup_op(
             for ax, ys in ((ax_srv, srv), (ax_cli, cli), (ax_size, sz)):
                 ax.plot(
                     xs, ys,
-                    color=astyle["color"], marker=astyle["marker"],
+                    color=astyle["color"], marker=akd_marker,
                     linestyle=astyle["linestyle"], markerfacecolor="none",
                     linewidth=1.6, markersize=6, label=akd_label,
                 )
@@ -2142,26 +2487,26 @@ def _plot_one_lookup_op(
             if iron.server_lookup_ms is not None:
                 ax_srv.plot(
                     iron_xs, np.full_like(iron_xs, iron.server_lookup_ms),
-                    color=istyle["color"], linestyle=istyle["linestyle"],
+                    color=iron_line_color, linestyle=istyle["linestyle"],
                     marker=istyle["marker"], markerfacecolor="none",
-                    linewidth=1.6, markersize=6, label=istyle["label"],
+                    linewidth=1.6, markersize=6, label=_short_label(istyle["label"], subset),
                 )
                 any_iron_value = True
             if iron.client_lookup_ms is not None:
                 ax_cli.plot(
                     iron_xs, np.full_like(iron_xs, iron.client_lookup_ms),
-                    color=istyle["color"], linestyle=istyle["linestyle"],
+                    color=iron_line_color, linestyle=istyle["linestyle"],
                     marker=istyle["marker"], markerfacecolor="none",
-                    linewidth=1.6, markersize=6, label=istyle["label"],
+                    linewidth=1.6, markersize=6, label=_short_label(istyle["label"], subset),
                 )
                 any_iron_value = True
             if iron.proof_bytes is not None:
                 v = iron.proof_bytes * proof_scale
                 ax_size.plot(
                     iron_xs, np.full_like(iron_xs, v),
-                    color=istyle["color"], linestyle=istyle["linestyle"],
+                    color=iron_line_color, linestyle=istyle["linestyle"],
                     marker=istyle["marker"], markerfacecolor="none",
-                    linewidth=1.6, markersize=6, label=istyle["label"],
+                    linewidth=1.6, markersize=6, label=_short_label(istyle["label"], subset),
                 )
                 any_iron_value = True
         ax_srv.set_xlim(srv_xlim)
@@ -2173,21 +2518,22 @@ def _plot_one_lookup_op(
             # the small aegon curve gets compressed.
             ax_size.set_yscale("log")
 
-    # Two-row shared legend (small/medium on top, large/extrapolated below).
+    # Shared legend at the bottom, packed inside the figsize so the
+    # saved PDF dimensions match setup_large.pdf's exactly. Merged
+    # into one row (small/medium/large + irondict) since the label
+    # figure drops AKD; this fits the legend in the 14% reserved rect
+    # without needing two rows. subplots_adjust(wspace=0.35) plus
+    # tight_layout(pad=0.4, w_pad=0.6) replicates the exact same
+    # inter-panel geometry that setup_large.pdf uses, so per-panel
+    # axes come out at the same 1.75 x 1.35 in as setup panels.
     handles, labels = ax_srv.get_legend_handles_labels()
-    pairs = list(zip(handles, labels))
-    row1 = [(h, l) for h, l in pairs if not l.startswith("large")]
-    row2 = [(h, l) for h, l in pairs if l.startswith("large")]
     for ax in fig.axes:
         _label_axis_endpoints(ax)
-    fig.tight_layout(rect=(0, 0.14, 1, 1))
-    if row1:
-        fig.legend([h for h, _ in row1], [l for _, l in row1],
-                   loc="lower center", ncol=len(row1),
-                   bbox_to_anchor=(0.5, 0.08), frameon=False)
-    if row2:
-        fig.legend([h for h, _ in row2], [l for _, l in row2],
-                   loc="lower center", ncol=len(row2),
+    fig.subplots_adjust(wspace=0.35)
+    fig.tight_layout(rect=(0, 0.14, 1, 1), pad=0.4, w_pad=0.6)
+    if handles:
+        fig.legend(handles, labels, loc="lower center",
+                   ncol=min(len(handles), 5),
                    bbox_to_anchor=(0.5, 0.0), frameon=False)
 
     out_path = PLOTS_DIR / f"lookup_{key}{_subset_suffix(subset)}{_agg_suffix(agg)}.pdf"
@@ -2229,7 +2575,7 @@ def plot_latency_knee(
         plt.close(fig)
         return out_path
 
-    fig, axes = plt.subplots(1, len(populated), figsize=(3.2 * len(populated), 3), sharey=False)
+    fig, axes = plt.subplots(1, len(populated), figsize=(3.4, 2.6), sharey=False)
     if len(populated) == 1:
         axes = [axes]
     # Same softer rainbow palette as `plot_publish_vs_batch`:
@@ -2381,7 +2727,7 @@ def plot_migration_curves(
 
     out_path = PLOTS_DIR / f"migration_curves{_subset_suffix(subset)}.pdf"
     if not selected:
-        fig, ax = plt.subplots(figsize=(6.0, 3.0))
+        fig, ax = plt.subplots(figsize=(3.6, 2.5))
         ax.text(
             0.5, 0.5,
             "No migration data found.\n"
@@ -2395,7 +2741,7 @@ def plot_migration_curves(
         plt.close(fig)
         return out_path
 
-    fig, ax = plt.subplots(figsize=(6.4, 4.0))
+    fig, ax = plt.subplots(figsize=(3.6, 2.8))
 
     for regime_name, runs in selected:
         # Sort by K so the line connects in K order, not insertion
@@ -2452,6 +2798,297 @@ def plot_migration_curves(
     return out_path
 
 
+def plot_bench_summary(
+    regime_name: str,
+    levels: list[LevelStats],
+    runs: list[MigrationRun],
+    akd_levels: list[LevelStats] | None,
+    iron: IronStats | None,
+) -> Path:
+    """Compact 2-panel summary for one regime — publish latency and
+    migration throughput — designed to fit in one column of a
+    single-column paper (figsize matches setup_{regime}.pdf so the two
+    figures visually pair). The serving-latency knee is reported
+    alongside the value lookup figure (see plot_lookup_value_*) since
+    it is a lookup metric, not a publish one.
+
+    Applies large-regime-specific extrapolation (open-addressing model
+    for aegon 90%, linear model for AKD 1%/90%, hardware-derived OOM
+    ceilings for AKD/IronDict) only when regime_name == 'large'. Small
+    and medium regimes plot only measured data — every fill was
+    directly measured for those regimes."""
+    from matplotlib.lines import Line2D
+    is_large = regime_name == "large"
+
+    # Native figsize chosen so each panel is the SAME absolute width
+    # and height as one panel of setup_large.pdf when both figures are
+    # scaled to the same visual per-panel size in the paper:
+    #   * setup_large.pdf   = 6.5 x 1.75 in, 3 panels, rect y0=0.03
+    #     (per-panel = 2.17 in wide x 1.70 in visible axes)
+    #   * bench_summary_large.pdf = 4.33 x 1.97 in, 2 panels, rect y0=0.14
+    #     (per-panel = 2.17 in wide x 1.70 in visible axes -- match)
+    # The paper then includes setup at width=\linewidth and this
+    # figure at width=0.667\linewidth so the scale factors also match.
+    fig, (ax_pub, ax_mig) = plt.subplots(1, 2, figsize=(4.33, 1.97))
+
+    # ------ Panel 1: publish latency vs batch size (log y) ------
+    # Show a compact story: aegon 1% and aegon 90% as
+    # the measured/theoretical bracketing, plus AKD 90% and irondict
+    # so the reader can eyeball the system separation. Full per-fill
+    # curves are in publish_vs_batch_large.pdf (appendix). Batch size
+    # is plotted in absolute users on a log axis with k-shorthand tick
+    # labels (see throughput panel) so long numbers don't crowd.
+    BATCH_UNIT = 1.0
+    def _lvl_curve(lvl: LevelStats) -> tuple[np.ndarray, np.ndarray] | None:
+        if not lvl.publish_ms:
+            return None
+        bs = np.array(sorted(lvl.publish_ms), dtype=float) / BATCH_UNIT
+        ys = np.array([np.median(lvl.publish_ms[int(b * BATCH_UNIT)]) for b in bs]) / 1000.0
+        return bs, ys
+
+    # ---- aegon: 1% (always measured) + 90% ----
+    # small/medium: 90% is directly measured. large: 90% is
+    # extrapolated from measured 1%-10% under the open-addressing
+    # model since we can't drive the bench-client past ~10% fill on
+    # the large regime.
+    lvls_sorted = sorted(levels, key=lambda l: l.fill_percent)
+    aegon_1 = _lvl_curve(lvls_sorted[0]) if lvls_sorted else None
+    aegon_90: tuple[np.ndarray, np.ndarray] | None = None
+    measured = [l for l in lvls_sorted if l.publish_ms and l.fill_percent > 0]
+    if is_large and measured:
+        anchor = measured[-1]
+        bs_a = sorted(anchor.publish_ms.keys())
+        xs_a_raw = np.array(bs_a, dtype=float)
+        ys_a = np.array([np.median(anchor.publish_ms[b]) for b in bs_a]) / 1000.0
+        m, c = np.polyfit(xs_a_raw, ys_a, 1)
+        alpha_star = anchor.fill_percent / (100.0 * 4.0)
+        slope_zero = m * (1.0 - alpha_star)
+        rho90 = 90.0 / (100.0 * 4.0)
+        slope_90 = slope_zero / (1.0 - rho90)
+        aegon_90 = (xs_a_raw / BATCH_UNIT, slope_90 * xs_a_raw + c)
+    elif not is_large and lvls_sorted:
+        # 90% comes straight from the measured LevelStats.
+        by_fill = {l.fill_percent: l for l in lvls_sorted}
+        top = max(by_fill, key=lambda f: f)
+        # Prefer the exact 90% level if present; otherwise fall back
+        # to the highest measured.
+        target_fill = 90.0 if 90.0 in by_fill else top
+        aegon_90 = _lvl_curve(by_fill[target_fill])
+
+    if aegon_1 is not None and aegon_90 is not None:
+        # Both aegon curves share the large-regime batch grid, so
+        # fill_between spans the operating envelope of fill 1%..90%.
+        common_xs = np.intersect1d(aegon_1[0], aegon_90[0])
+        lo = np.array([aegon_1[1][np.searchsorted(aegon_1[0], x)] for x in common_xs])
+        hi = np.array([aegon_90[1][np.searchsorted(aegon_90[0], x)] for x in common_xs])
+        ax_pub.fill_between(common_xs, lo, hi, color="#1f77b4",
+                            alpha=0.18, linewidth=0)
+    if aegon_1 is not None:
+        ax_pub.plot(*aegon_1, color="#1f77b4", marker="o", linestyle="--",
+                    markerfacecolor="#1f77b4",
+                    linewidth=0.9, markersize=2.5, label="aegon 1%")
+    if aegon_90 is not None:
+        ax_pub.plot(*aegon_90, color="#1f77b4", marker="^", linestyle="--",
+                    markerfacecolor="#1f77b4",
+                    linewidth=0.9, markersize=2.5, label="aegon 90%")
+
+    # ---- AKD: same 1%/90% envelope treatment ----
+    if akd_levels:
+        akd_sorted = sorted(akd_levels, key=lambda l: l.fill_percent)
+        akd_1 = _lvl_curve(akd_sorted[0]) if akd_sorted else None
+        akd_90 = _lvl_curve(akd_sorted[-1]) if len(akd_sorted) > 1 else None
+        if akd_1 is not None and akd_90 is not None:
+            common_xs = np.intersect1d(akd_1[0], akd_90[0])
+            lo = np.array([akd_1[1][np.searchsorted(akd_1[0], x)] for x in common_xs])
+            hi = np.array([akd_90[1][np.searchsorted(akd_90[0], x)] for x in common_xs])
+            ax_pub.fill_between(common_xs, lo, hi, color="#d62728",
+                                alpha=0.18, linewidth=0)
+        if akd_1 is not None:
+            ax_pub.plot(*akd_1, color="#d62728", marker="o", linestyle="--",
+                        markerfacecolor="none",
+                        linewidth=0.9, markersize=2.5, label="AKD 1%")
+        if akd_90 is not None:
+            ax_pub.plot(*akd_90, color="#d62728", marker="^", linestyle="--",
+                        markerfacecolor="none",
+                        linewidth=0.9, markersize=2.5, label="AKD 90%")
+
+    if iron and iron.publish_keys:
+        xs_iron = np.array([bs for bs, _, _ in iron.publish_keys], dtype=float) / BATCH_UNIT
+        ys_iron = np.array([ms for _, ms, _ in iron.publish_keys]) / 1000.0
+        ax_pub.plot(xs_iron, ys_iron, color="#444444", marker="o", linestyle="-",
+                    markerfacecolor="none", linewidth=0.9, markersize=2.5,
+                    label="irondict 1%")
+
+    ax_pub.set_yscale("log")
+    ax_pub.set_xscale("log", base=10)
+    # Regime-specific tick sets. Two-three log-scale ticks with
+    # k-shorthand labels — matches the throughput panel and avoids
+    # crowded multi-digit tick numbers.
+    if is_large:
+        pub_xt = [10_000, 100_000]
+        pub_xt_labels = ["10k", "100k"]
+    elif regime_name == "medium":
+        pub_xt = [100, 1_000]
+        pub_xt_labels = ["100", "1k"]
+    else:  # small
+        pub_xt = [10, 100]
+        pub_xt_labels = ["10", "100"]
+    ax_pub.set_xticks(pub_xt)
+    ax_pub.set_xticklabels(pub_xt_labels, fontsize=6)
+    ax_pub.set_xlabel("batch size", fontsize=7, labelpad=2)
+    ax_pub.set_ylabel("publish latency (s)", fontsize=7, labelpad=2)
+    ax_pub.tick_params(axis="y", labelsize=6, pad=1)
+    ax_pub.grid(True, which="both", axis="both", linestyle=":", alpha=0.4)
+    ax_pub.set_axisbelow(True)
+
+    # ------ Panel 2: migration throughput vs K ------
+    # aegon = measured; AKD = throughput derived from publish_ms at 1%
+    # and 90% fill (per-batch throughput = B / publish_ms, which is
+    # essentially flat because publish_ms scales linearly with B); iron
+    # = derived from the manual 15 min per publish latency
+    # (irondict/large.json) so throughput scales linearly with B until
+    # the amortization ceiling.
+    if runs:
+        runs_sorted = sorted(runs, key=lambda r: r.chunk_size)
+        xs_mig = np.array([r.chunk_size for r in runs_sorted], dtype=float) / 1e3
+        ys_mig = np.array([r.total_throughput_users_per_sec / 1000.0
+                           for r in runs_sorted])
+        # Use the same 1% marker shape (circle) as the publish-latency
+        # panel so the reader recognises the aegon curve across both
+        # panels of the summary figure.
+        ax_mig.plot(xs_mig, ys_mig, color="#1f77b4",
+                    marker="o", linewidth=0.9, markersize=2.5,
+                    label="aegon")
+
+        # Backward extrapolation (large regime only): fit latency-
+        # per-batch as an affine function of K and extend down to the
+        # AKD/IronDict batch-size floor so all three curves share the
+        # same x-range on the small-batch end. For small/medium the
+        # measured sweep already starts at K~1k/4k, so no extrapolation.
+        if is_large:
+            Ks = np.array([r.chunk_size for r in runs_sorted], dtype=float)
+            Ls = Ks / np.array([r.total_throughput_users_per_sec
+                                for r in runs_sorted])
+            m_aegon, c_aegon = np.polyfit(Ks, Ls, 1)
+            K_min_ext = 4096.0
+            Ks_back = np.geomspace(K_min_ext, Ks[0], 60)
+            Ls_back = c_aegon + m_aegon * Ks_back
+            thru_back = (Ks_back / Ls_back) / 1e3
+            ax_mig.plot(Ks_back / 1e3, thru_back, color="#1f77b4",
+                        linewidth=0.9)
+            ax_mig.plot([K_min_ext / 1e3], [thru_back[0]], color="#1f77b4",
+                        marker="o", markersize=2.5, linestyle="none")
+
+        best_k = load_best_k(regime_name)
+        if best_k is not None:
+            ax_mig.axvline(best_k / 1e3, color="#1f77b4",
+                           linestyle="--", linewidth=0.9, alpha=0.6)
+        ax_mig.set_xscale("log", base=10)
+        # x-tick set is regime-specific; only large needs the OOM-
+        # extended 10k..100M span since AKD/IronDict get extrapolated
+        # up to the machine RAM ceiling.
+        if is_large:
+            mig_xt = [10, 1_000, 100_000]
+            mig_xt_labels = ["10k", "1M", "100M"]
+        elif regime_name == "medium":
+            mig_xt = [10, 100, 1_000]
+            mig_xt_labels = ["10k", "100k", "1M"]
+        else:  # small
+            mig_xt = [1, 10, 100]
+            mig_xt_labels = ["1k", "10k", "100k"]
+        ax_mig.set_xticks(mig_xt)
+        ax_mig.set_xticklabels(mig_xt_labels, fontsize=6)
+
+    # Hardware-derived per-batch OOM ceilings (large regime only).
+    # Each system's publish holds per-user working state in RAM;
+    # extending until that state exceeds the machine's usable RAM
+    # gives the batch size beyond which a single publish OOMs.
+    #   AKD on n2-highmem-32 (256 GB, 32 GB MySQL buffer pool,
+    #     ~200 GB usable, observed ~1 KB/user RSS)
+    #     → B_OOM ≈ 200 GB / 1 KB ≈ 200M.
+    #   IronDict on c4-highmem-144-lssd (1.12 TB, 350 GB pk resident,
+    #     ~720 GB usable, ~10 KB/user MSM witness state)
+    #     → B_OOM ≈ 720 GB / 10 KB ≈ 72M.
+    # For small/medium every measured batch is well below the machine
+    # RAM ceiling, so no extension is drawn.
+    AKD_OOM_B = 200_000_000
+    IRON_OOM_B = 70_000_000
+
+    # ---- AKD 1% throughput ----
+    if akd_levels:
+        akd_sorted = sorted(akd_levels, key=lambda l: l.fill_percent)
+        def _thru(lvl):
+            if not lvl.publish_ms:
+                return None
+            bs = np.array(sorted(lvl.publish_ms), dtype=float)
+            ms = np.array([np.median(lvl.publish_ms[int(b)]) for b in bs])
+            return bs / 1e3, (bs / (ms / 1000.0)) / 1e3
+        akd_1 = _thru(akd_sorted[0]) if akd_sorted else None
+        if akd_1 is not None:
+            xs_akd, ys_akd = akd_1
+            if is_large:
+                # Extend the flat throughput asymptote to OOM (one
+                # marker per octave) so the reader reads it as a
+                # continuation of the measured sweep.
+                plateau = ys_akd[-1]
+                xs_akd_ext = np.geomspace(xs_akd[-1] * 2.0,
+                                          AKD_OOM_B / 1e3, 8)
+                ys_akd_ext = np.full_like(xs_akd_ext, plateau)
+                xs_akd_full = np.concatenate([xs_akd, xs_akd_ext])
+                ys_akd_full = np.concatenate([ys_akd, ys_akd_ext])
+            else:
+                xs_akd_full, ys_akd_full = xs_akd, ys_akd
+            ax_mig.plot(xs_akd_full, ys_akd_full, color="#d62728",
+                        marker="o", linestyle="-", markerfacecolor="none",
+                        linewidth=0.9, markersize=2.5, label="AKD 1%")
+            if is_large:
+                ax_mig.axvline(AKD_OOM_B / 1e3, color="#d62728",
+                               linestyle="--", linewidth=0.9, alpha=0.6)
+
+    # ---- IronDict throughput ----
+    if iron and iron.publish_keys:
+        xs_iron = np.array([bs for bs, _, _ in iron.publish_keys], dtype=float)
+        ms_iron = np.array([ms for _, ms, _ in iron.publish_keys])
+        thru_iron = (xs_iron / (ms_iron / 1000.0)) / 1e3
+        if is_large:
+            T_s = ms_iron[-1] / 1000.0
+            xs_iron_ext = np.geomspace(xs_iron[-1] * 2.0, IRON_OOM_B, 8)
+            ys_iron_ext = xs_iron_ext / T_s / 1e3
+            xs_iron_full = np.concatenate([xs_iron, xs_iron_ext])
+            ys_iron_full = np.concatenate([thru_iron, ys_iron_ext])
+        else:
+            xs_iron_full, ys_iron_full = xs_iron, thru_iron
+        ax_mig.plot(xs_iron_full / 1e3, ys_iron_full, color="#444444",
+                    marker="o", linestyle="-", markerfacecolor="none",
+                    linewidth=0.9, markersize=2.5, label="irondict 1%")
+        if is_large:
+            ax_mig.axvline(IRON_OOM_B / 1e3, color="#444444",
+                           linestyle="--", linewidth=0.9, alpha=0.6)
+
+    ax_mig.set_yscale("log")
+    ax_mig.set_xlabel("batch size", fontsize=7, labelpad=2)
+    ax_mig.set_ylabel("throughput ($\\times 10^3$ users/s)", fontsize=7, labelpad=2)
+    ax_mig.tick_params(axis="both", labelsize=6, pad=1)
+    ax_mig.grid(True, which="both", axis="both", linestyle=":", alpha=0.4)
+    ax_mig.set_axisbelow(True)
+
+    fig.tight_layout(pad=0.4, w_pad=0.6, rect=(0, 0.14, 1, 1))
+    # Shared legend at the bottom of the figure, spanning the full
+    # width — pulled from ax_pub since that's the only panel with
+    # multiple labelled curves. Keeps the panels themselves free of
+    # any in-axis text.
+    handles, labels = ax_pub.get_legend_handles_labels()
+    if handles:
+        fig.legend(handles, labels, loc="lower center",
+                   ncol=min(len(handles), 5), fontsize=6,
+                   frameon=False, handlelength=1.6, handletextpad=0.3,
+                   columnspacing=1.2, bbox_to_anchor=(0.5, 0.0))
+    out = PLOTS_DIR / f"bench_summary_{regime_name}.pdf"
+    fig.savefig(out, format="pdf", bbox_inches="tight")
+    plt.close(fig)
+    return out
+
+
 def main() -> None:
     PLOTS_DIR.mkdir(parents=True, exist_ok=True)
     small = load_small()
@@ -2503,10 +3140,11 @@ def main() -> None:
     # subset (SMALL+MEDIUM vs LARGE) to keep the qualitatively-
     # different large regime from compressing small/medium's y-axis.
     # The central line is the median; the band is min..max.
-    #   <name>_small_medium.pdf       <- small+medium
-    #   <name>_large.pdf              <- large
+    #   <name>_small.pdf   <- small
+    #   <name>_medium.pdf  <- medium
+    #   <name>_large.pdf   <- large
     written: list[Path] = []
-    for subset in (SMALL_MEDIUM, LARGE_ONLY):
+    for subset in (SMALL_ONLY, MEDIUM_ONLY, LARGE_ONLY):
         # AKD and irondict are filtered to just the regimes in the
         # current subset, so the small_medium figure doesn't try to
         # render "AKD large" and vice-versa.
@@ -2523,6 +3161,29 @@ def main() -> None:
     # regimes. The per-subset variants above are kept for paper
     # sections that prefer the regime-separated view.
     written.append(plot_migration_curves(small_runs, medium_runs, large_runs, ALL_REGIMES))
+
+    # Compact per-regime summary — large in the paper's main body,
+    # small/medium in the appendix.
+    for name, lv, mig in (("small",  small,  small_runs),
+                          ("medium", medium, medium_runs),
+                          ("large",  large,  large_runs)):
+        written.append(plot_bench_summary(
+            name,
+            lv,
+            mig,
+            akd_overlay.get(name),
+            irondict_overlay.get(name),
+        ))
+
+    # Combined-history figure: aegon must call both label-history and
+    # value-history to reconstruct a user's full record, so its curve
+    # is the SUM of those two operations. AKD's key_history and
+    # IronDict's single lookup_prove are shown at their native cost.
+    written.append(plot_combined_history_large(
+        small, medium, large,
+        akd=akd_overlay,
+        irondict=irondict_overlay,
+    ))
 
     for p in written:
         size = p.stat().st_size

@@ -356,66 +356,170 @@ def fmt_time(t: float) -> str:
 
 # Subsets the combined plot understands. Each maps to the list of
 # `record.label` strings that should appear in that PDF.
+# Bars grouped by system, with a small x-axis gap between groups. Each
+# tuple is (system_display_name, list of record labels in this group).
+# Order within the group determines left-to-right bar order.
 SUBSETS = {
-    "small_medium": ["small", "medium",
-                     "akd-small", "akd-medium",
-                     "irondict-small", "irondict-medium"],
-    "large":        ["large-per-shard", "akd-large", "irondict-large"],
+    "small": [
+        ("aegon",    ["small"]),
+        ("AKD",      ["akd-small"]),
+        ("IronDict", ["irondict-small"]),
+    ],
+    "medium": [
+        ("aegon",    ["medium"]),
+        ("AKD",      ["akd-medium"]),
+        ("IronDict", ["irondict-medium"]),
+    ],
+    "large": [
+        ("aegon",    ["large-per-shard"]),
+        ("AKD",      ["akd-large"]),
+        ("IronDict", ["irondict-large"]),
+    ],
+}
+
+# All setup bars share a single steel-blue colour (Paul Tol "bright"
+# palette). The plot compares systems within a regime, so the bar
+# colour doesn't need to encode regime — the filename does that.
+_STEEL_BLUE = "#4477AA"
+REGIME_BAR_COLOR = {
+    "small":            _STEEL_BLUE,
+    "medium":           _STEEL_BLUE,
+    "large-per-shard":  _STEEL_BLUE,
+    "akd-small":        _STEEL_BLUE,
+    "akd-medium":       _STEEL_BLUE,
+    "akd-large":        _STEEL_BLUE,
+    "irondict-small":   _STEEL_BLUE,
+    "irondict-medium":  _STEEL_BLUE,
+    "irondict-large":   _STEEL_BLUE,
+}
+
+
+# Per-bar tick label: just the regime word.
+_REGIME_TICK = {
+    "small": "small",           "medium": "medium",
+    "large-per-shard": "large",
+    "akd-small": "small",       "akd-medium": "medium",       "akd-large": "large",
+    "irondict-small": "small",  "irondict-medium": "medium",  "irondict-large": "large",
 }
 
 
 def plot_setup_combined(records: list[dict], subset_name: str) -> Path:
     """One PDF per subset, three panels side by side: prover key,
-    verifier key, setup time. Each panel is a bar chart with one bar
-    per (system, regime) record that has the corresponding metric.
-    Bars missing a metric are silently omitted (cluster-mode records
-    don't have verifier_param_bytes, irondict-large currently has no
-    setup_ms, etc.)."""
-    wanted = SUBSETS[subset_name]
-    subset_recs = [r for r in records if r["label"] in wanted]
-    # Preserve the user's preferred left-to-right order: aegon first,
-    # then irondict, matching the entries in SUBSETS above.
-    subset_recs.sort(key=lambda r: wanted.index(r["label"]))
+    verifier key, setup time. Bars are grouped by system (aegon, AKD,
+    irondict) with a small gap between groups; each group is labeled
+    below the axis. Within a group, bars are colored by regime
+    (blue=small, red=medium, green=large), so the eye pairs a setup
+    bar with the corresponding lookup/publish curve. Bars missing a
+    metric are silently omitted (irondict-large previously had no
+    setup_ms; cluster-mode records inherit vk from per-shard.json)."""
+    groups = SUBSETS[subset_name]
+    by_label = {r["label"]: r for r in records}
 
-    fig, axes = plt.subplots(1, 3, figsize=(10.5, 3.6))
+    # For each panel we build a flat list of (record, value, xpos,
+    # tick_label) tuples plus a list of (system_name, group_center_x)
+    # for the below-axis annotation. Bar width < intra-group step so
+    # the "small"/"medium" tick labels don't overlap; group gap adds
+    # visible whitespace between systems.
+    BAR_WIDTH = 0.75
+    INTRA_STEP = 1.4
+    GROUP_GAP = 2.6
+
+    fig, axes = plt.subplots(1, 3, figsize=(6.5, 1.75))
     ax_pk, ax_vk, ax_time = axes
 
-    def _bar_panel(ax, metric_key: str, title: str, ylabel: str,
-                   fmt_fn, value_fn=lambda r, k: r.get(k)):
-        rows = [(r, value_fn(r, metric_key)) for r in subset_recs]
-        rows = [(r, v) for r, v in rows if v is not None and v > 0]
-        if not rows:
+    def _bar_panel(ax, metric_key: str, ylabel: str, fmt_fn, y_scale: float = 1.0):
+        plotted: list[tuple[float, float, dict]] = []  # (x, value, record)
+        group_centers: list[tuple[str, float, float]] = []  # (name, lo_x, hi_x)
+        x_cursor = 0.0
+        for system_name, member_labels in groups:
+            first_x = None
+            last_x = None
+            for lbl in member_labels:
+                rec = by_label.get(lbl)
+                if rec is None:
+                    continue
+                v = rec.get(metric_key)
+                if v is None or v <= 0:
+                    continue
+                plotted.append((x_cursor, v, rec))
+                if first_x is None:
+                    first_x = x_cursor
+                last_x = x_cursor
+                x_cursor += INTRA_STEP
+            if first_x is not None:
+                group_centers.append((system_name, first_x, last_x))
+                # Rewind the cursor so the gap is measured from the
+                # last plotted bar, not from the empty next slot.
+                x_cursor = last_x + INTRA_STEP + GROUP_GAP - INTRA_STEP
+            else:
+                x_cursor += GROUP_GAP
+
+        if not plotted:
             ax.text(0.5, 0.5, "no data", ha="center", va="center",
                     transform=ax.transAxes, fontsize=10, color="#666666")
             ax.set_xticks([])
-            ax.set_title(title)
             return
-        labels = [_record_label(r) for r, _ in rows]
-        vals = [v for _, v in rows]
-        colors = [_record_color(r) for r, _ in rows]
-        x = np.arange(len(rows))
-        bars = ax.bar(x, vals, color=colors, edgecolor="black", linewidth=0.6)
-        ax.set_yscale("log")
-        ax.set_ylabel(ylabel)
-        ax.set_xticks(x)
-        ax.set_xticklabels(labels, fontsize=8, rotation=25, ha="right")
-        ax.set_title(title)
+
+        xs = [x for x, _, _ in plotted]
+        raw_vals = [v for _, v, _ in plotted]
+        vals = [v / y_scale for v in raw_vals]
+        colors = [REGIME_BAR_COLOR.get(r["label"], "#888888") for _, _, r in plotted]
+        tick_labels = [_REGIME_TICK.get(r["label"], r["label"]) for _, _, r in plotted]
+
+        bars = ax.bar(xs, vals, width=BAR_WIDTH, color=colors,
+                      edgecolor="black", linewidth=0.6)
+        ax.set_ylabel(ylabel, fontsize=7, labelpad=2)
+        ax.tick_params(axis="y", labelsize=6, pad=1)
+        # No per-bar tick labels: the regime is encoded in the bar
+        # colour (see figure legend), and the group label sits below.
+        ax.set_xticks([])
         ax.grid(True, which="both", axis="y", linestyle=":", alpha=0.5)
         ax.set_axisbelow(True)
-        # Stretch the y-axis upper bound on log scale so annotations
-        # sit comfortably above the tallest bar instead of clipping.
+        # Just enough headroom for the tiny annotation above the
+        # tallest bar (fontsize=6, ~3% of panel height in these figs).
         lo, hi = ax.get_ylim()
-        ax.set_ylim(lo, hi * 2.0)
-        for bar, v in zip(bars, vals):
+        ax.set_ylim(0, hi * 1.06)
+        # Clip x-axis to the bars so there's no wasted left/right margin.
+        if xs:
+            ax.set_xlim(min(xs) - BAR_WIDTH, max(xs) + BAR_WIDTH)
+        # Annotations use the RAW (unscaled) value so byte sizes and
+        # times read in human-friendly units regardless of y_scale.
+        for bar, rv in zip(bars, raw_vals):
             h = bar.get_height()
-            ax.text(bar.get_x() + bar.get_width() / 2, h * 1.10,
-                    fmt_fn(v), ha="center", va="bottom", fontsize=8)
+            ax.text(bar.get_x() + bar.get_width() / 2, h * 1.02,
+                    fmt_fn(rv), ha="center", va="bottom", fontsize=6)
 
-    _bar_panel(ax_pk, "prover_param_bytes",   "Prover key",   "size (bytes, log scale)",  fmt_bytes)
-    _bar_panel(ax_vk, "verifier_param_bytes", "Verifier key", "size (bytes, log scale)",  fmt_bytes)
-    _bar_panel(ax_time, "gen_duration_secs",  "Setup time",   "seconds (log scale)",     fmt_time)
+        # Under-axis system labels — one per group, centered on the
+        # group's bars. Placed just below the axis; regime colour is
+        # explained by the single figure-level legend.
+        for system_name, lo_x, hi_x in group_centers:
+            center = (lo_x + hi_x) / 2.0
+            ax.annotate(
+                system_name,
+                xy=(center, 0), xycoords=("data", "axes fraction"),
+                xytext=(0, -10), textcoords="offset points",
+                ha="center", va="top",
+                fontsize=7,
+            )
 
-    fig.tight_layout()
+    GB = 1024 ** 3
+    MB = 1024 ** 2
+    _bar_panel(ax_pk, "prover_param_bytes",   "prover key size (GB)",   fmt_bytes, y_scale=GB)
+    _bar_panel(ax_vk, "verifier_param_bytes", "verifier key size (MB)", fmt_bytes, y_scale=MB)
+    # Setup time reads in seconds only for the small regime; medium
+    # (minutes) and large (up to an hour) are more readable in min.
+    if subset_name == "small":
+        _bar_panel(ax_time, "gen_duration_secs", "setup time (seconds)", fmt_time)
+    else:
+        _bar_panel(ax_time, "gen_duration_secs", "setup time (minutes)", fmt_time, y_scale=60.0)
+
+    # No figure-level legend: every bar in this subset shares the
+    # same regime, so a colour → regime legend adds no information
+    # beyond what the filename (setup_small.pdf / medium / large)
+    # already conveys. Tight subplot spacing since each panel now
+    # renders at ~1.75 in wide and doesn't need much internal margin.
+    fig.subplots_adjust(wspace=0.35)
+    fig.tight_layout(rect=(0, 0.03, 1, 1), pad=0.4, w_pad=0.6)
     out = OUT_DIR / f"setup_{subset_name}.pdf"
     fig.savefig(out, format="pdf", bbox_inches="tight")
     plt.close(fig)
@@ -426,9 +530,10 @@ def main() -> None:
     records = load_records()
     print(f"loaded {len(records)} setup records: "
           + ", ".join(r["label"] for r in records))
-    # Clean up the two now-stale PDFs from the previous layout so the
-    # plots directory doesn't accumulate orphans.
-    for stale in ("setup_time.pdf", "setup_key_sizes.pdf"):
+    # Clean up now-stale PDFs from previous layouts so the plots
+    # directory doesn't accumulate orphans.
+    for stale in ("setup_time.pdf", "setup_key_sizes.pdf",
+                  "setup_small_medium.pdf"):
         p = OUT_DIR / stale
         if p.exists():
             p.unlink()

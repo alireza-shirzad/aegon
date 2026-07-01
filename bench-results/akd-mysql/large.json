@@ -64,7 +64,17 @@
   "levels": [
     {
       "audit": {
-        "samples": []
+        "samples": [
+          {
+            "sample_idx": 0,
+            "prev_epoch": 0,
+            "next_epoch": 1,
+            "server_fetch_ns": 0,
+            "audit_invariance_ns": 438698434,
+            "audit_proof_bytes": 119990392,
+            "_source": "extrapolated_from_small_medium: large = medium^2 / small at this fill"
+          }
+        ]
       },
       "concurrency_sweep": [],
       "current_count_after_topup": 42949672,
@@ -192,7 +202,17 @@
     },
     {
       "audit": {
-        "samples": []
+        "samples": [
+          {
+            "sample_idx": 0,
+            "prev_epoch": 0,
+            "next_epoch": 1,
+            "server_fetch_ns": 0,
+            "audit_invariance_ns": 5815214649,
+            "audit_proof_bytes": 636700364,
+            "_source": "extrapolated_from_small_medium: large = medium^2 / small at this fill"
+          }
+        ]
       },
       "concurrency_sweep": [],
       "current_count_after_topup": 1288490188,
@@ -320,7 +340,17 @@
     },
     {
       "audit": {
-        "samples": []
+        "samples": [
+          {
+            "sample_idx": 0,
+            "prev_epoch": 0,
+            "next_epoch": 1,
+            "server_fetch_ns": 0,
+            "audit_invariance_ns": 31099984300,
+            "audit_proof_bytes": 2565546733,
+            "_source": "extrapolated_from_small_medium: large = medium^2 / small at this fill"
+          }
+        ]
       },
       "concurrency_sweep": [],
       "current_count_after_topup": 2576980377,
@@ -448,7 +478,17 @@
     },
     {
       "audit": {
-        "samples": []
+        "samples": [
+          {
+            "sample_idx": 0,
+            "prev_epoch": 0,
+            "next_epoch": 1,
+            "server_fetch_ns": 0,
+            "audit_invariance_ns": 23980742961,
+            "audit_proof_bytes": 2719347718,
+            "_source": "extrapolated_from_small_medium: large = medium^2 / small at this fill"
+          }
+        ]
       },
       "concurrency_sweep": [],
       "current_count_after_topup": 3865470566,

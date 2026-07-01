@@ -23,8 +23,9 @@
     }
   },
   "audit": {
-    "audit_ms": null,
-    "audit_bytes": null
+    "audit_ms": 35.0,
+    "audit_bytes": 8192,
+    "_source": "manual_estimate: verify 35 ms, proof 8 KB per user request (paper convention)"
   },
   "publish_keys": {
     "by_batch": [
