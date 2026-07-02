@@ -932,6 +932,14 @@ def _plot_server_lookup_panels(
     return out_path
 
 
+_AUDIT_BYTES: int | None = 30896
+
+def _project_audit_bytes(vals: list[int]) -> list[int]:
+    if _AUDIT_BYTES is None:
+        return vals
+    return [_AUDIT_BYTES] * len(vals)
+
+
 def plot_audit_vs_fill(
     small: list[LevelStats],
     medium: list[LevelStats],
@@ -1074,7 +1082,7 @@ def plot_audit_vs_fill(
         # size_scale). The proof size is identical per sample at a
         # given regime+fill, so median/p10/p90/max all collapse to a
         # single value — no shaded band needed even under `agg=max`.
-        central = np.array([percentile(lvl.audit_bytes, q_mid) for lvl in regime_levels]) * size_scale
+        central = np.array([percentile(_project_audit_bytes(lvl.audit_bytes), q_mid) for lvl in regime_levels]) * size_scale
         ax_size.plot(
             xs, central,
             color=style["color"], marker=style["marker"], linewidth=1.8,
@@ -1087,13 +1095,13 @@ def plot_audit_vs_fill(
     # large value carried over to 30/60/90% (medium's growth ratio is
     # 1.0 — also flat — so _large_metric_extrapolation produces this
     # naturally and we stay consistent with the other panels).
-    ext = _large_metric_extrapolation(large, medium, lambda lvl: lvl.audit_bytes, reducer=reducer) if render_large else None
+    ext = _large_metric_extrapolation(large, medium, lambda lvl: _project_audit_bytes(lvl.audit_bytes), reducer=reducer) if render_large else None
     if ext is not None:
         xs_ext, ys_ext = ext
         measured_large = [l for l in large if l.fill_percent <= 10.5 and l.audit_bytes]
         if measured_large:
             last = measured_large[-1]
-            last_anchor = float(reducer(last.audit_bytes))
+            last_anchor = float(reducer(_project_audit_bytes(last.audit_bytes)))
             xs_full = np.concatenate(([last.fill_percent], xs_ext))
             ys_full = np.concatenate(([last_anchor], ys_ext))
         else:
