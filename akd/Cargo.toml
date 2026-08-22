@@ -58,6 +58,13 @@ tracing_instrument = ["tracing/attributes", "dep:tracing-subscriber", "dep:traci
 # `bin/<name>.rs` `#[cfg(feature = "mimalloc_alloc")]` block. Off by
 # default so debug-tool binaries and unit tests stay on glibc.
 mimalloc_alloc = []
+# IVC (Nova) auditing: fold the per-epoch invariance check into a
+# recursive proof so an auditor verifies ONE proof instead of one per
+# epoch (paper §3, "fast-forwarding via recursive proofs"). Off by
+# default — pulls in the halo2curves/ff stack that nova-snark uses,
+# which is entirely independent of the arkworks stack the rest of the
+# crate is built on.
+ivc_audit = ["dep:nova-snark", "dep:ff", "dep:serde", "dep:bincode"]
 
 [dependencies]
 ## Required dependencies ##
@@ -103,6 +110,16 @@ tonic = { version = "0.12", features = ["tls", "tls-roots"] }
 
 ## Optional dependencies ##
 colored = { version = "2", optional = true }
+# Nova folding scheme for the `ivc_audit` path. Brings its own
+# bellpepper-derived `frontend` module and re-exports the
+# halo2curves bn256/grumpkin field types, so no direct dependency on
+# either is needed here. `ff` is required for the `PrimeField`
+# trait methods used by the ark<->halo2 coordinate bridge.
+nova-snark = { version = "0.75", default-features = false, optional = true }
+ff = { version = "0.13", optional = true }
+# Wire-size measurement for the recursive proof; matches the encoding
+# nova-snark itself uses.
+bincode = { version = "2", features = ["serde"], optional = true }
 once_cell = { version = "1", optional = true }
 paste = { version = "1", optional = true }
 protobuf = { version = "3", optional = true }
@@ -152,6 +169,21 @@ harness = false
 [[bench]]
 name = "ecvrf_microbench"
 harness = false
+
+[[example]]
+name = "ivc_audit_e2e"
+required-features = ["ivc_audit"]
+
+[[example]]
+name = "ivc_audit_grouped_e2e"
+required-features = ["ivc_audit"]
+
+# Gated so a plain `cargo check --workspace` does not try to build the
+# IVC bench without the Nova stack. Other binaries stay auto-discovered.
+[[bin]]
+name = "aegon_ivc_bench"
+path = "src/bin/aegon_ivc_bench.rs"
+required-features = ["ivc_audit"]
 
 [build-dependencies]
 tonic-build = "0.12"

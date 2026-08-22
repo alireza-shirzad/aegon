@@ -37,6 +37,11 @@ pub type ConsistencyProof = crate::aegon::ShardedConsistencyProofTwoLayer<Direct
 pub type VerifierContext = crate::aegon::ShardedVerifierContext<DirectoryE, DirectoryPcs>;
 /// Aegon `AuditState` over BN254's scalar field.
 pub type AuditState = crate::aegon::AuditState<<DirectoryE as ark_ec::pairing::Pairing>::ScalarField>;
+/// Sharded audit state over BN254's scalar field. Carries one
+/// Fiat-Shamir accumulator per chain group; `Default` is the
+/// single-group deployment.
+pub type ShardedAuditState =
+    crate::aegon::ShardedAuditState<<DirectoryE as ark_ec::pairing::Pairing>::ScalarField>;
 
 /// Verify a lookup proof produced by [`crate::Directory::lookup`]
 /// against an explicit Aegon `VerifierContext`.
@@ -84,12 +89,12 @@ pub fn verify_lookup_aegon(
 /// Verify a single-transition sharded invariance relation. Callers walk
 /// consecutive pairs of the commitment chain returned by
 /// [`crate::Directory::aegon_epoch_commits`] and call this for each
-/// step, threading a single `AuditState`. No per-epoch proof bytes
+/// step, threading a single `ShardedAuditState`. No per-epoch proof bytes
 /// flow — verification reads only from the published
 /// `EpochCommitment`s (commitment-homomorphism path).
 pub fn verify_invariance(
     ctx: &VerifierContext,
-    audit_state: &mut AuditState,
+    audit_state: &mut ShardedAuditState,
     prev: &EpochCommitment,
     next: &EpochCommitment,
 ) -> Result<bool, AkdError> {

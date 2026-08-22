@@ -200,6 +200,10 @@ where
 
     prover_param: std::sync::Arc<P::ProverParam>,
     verifier_param: P::VerifierParam,
+    /// Audit-path Fiat-Shamir derivations, inherited from
+    /// [`AegonConfig`]. Used when proving the value-chain
+    /// blinding equality; must match what auditors verify with.
+    audit_fs: super::audit_fs::AuditFsHooks<E, P>,
 
     /// Source of pre-built [`P::MaskingPackage`]s. In hiding mode
     /// (private = true) this is always populated: cluster shards wire
@@ -614,6 +618,7 @@ where
             dims,
             prover_param,
             verifier_param,
+            audit_fs: config.audit_fs,
             masking_client,
             epoch: 0,
             index_poly,
@@ -883,6 +888,7 @@ where
             dims,
             prover_param,
             verifier_param,
+            audit_fs: config.audit_fs,
             masking_client,
             epoch: ckpt.epoch,
             index_poly,
@@ -1138,6 +1144,7 @@ where
     /// `Clone`, so the server can hand out copies cheaply.
     pub fn verifier_context(&self) -> VerifierContext<E, P> {
         VerifierContext::new(self.log_capacity, self.verifier_param.clone())
+            .with_audit_fs(self.audit_fs)
     }
 
     pub fn current_commitment(&self) -> EpochCommitment<E, P> {
@@ -2068,6 +2075,7 @@ where
                 &self.rand_value_commitment,
                 new_r_value,
                 delta_tau,
+                &self.audit_fs,
                 &mut audit_rng,
             )
         } else {

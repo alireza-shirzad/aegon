@@ -215,6 +215,7 @@ async fn main() -> ExitCode {
         log_capacity: args.shard_log_capacity,
         private: args.private,
         pcs_config: KZHKConfig::new(args.kzh_k, args.private),
+        audit_fs: Default::default(),
         _e: PhantomData,
     };
 

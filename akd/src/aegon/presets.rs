@@ -83,6 +83,7 @@ pub fn kzh<E: Pairing>(
         log_capacity,
         private,
         pcs_config: KZHKConfig::new(k, private),
+        audit_fs: crate::aegon::audit_fs::AuditFsHooks::sha256(),
         _e: PhantomData,
     }
 }

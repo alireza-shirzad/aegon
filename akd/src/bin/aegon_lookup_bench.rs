@@ -114,7 +114,7 @@ use akd::aegon::coordinator_grpc::{
     CoordinatorServer,
 };
 use akd::aegon::{
-    optimal_kzh_k, verify_sharded_invariance, AuditState, DbSource, EcVrfHash, ShardTransport,
+    optimal_kzh_k, verify_sharded_invariance, ShardedAuditState, DbSource, EcVrfHash, ShardTransport,
     ShardedAegon, ShardedAegonConfig, SrsSource, VrfProver,
 };
 use akd::aegon::sharded::ShardedValueHistory;
@@ -414,7 +414,7 @@ struct Args {
 
     /// **Audit bench**: number of consecutive epoch-transition audits
     /// to time per stage via `verify_sharded_invariance`. Starts from
-    /// a fresh `AuditState` at epoch 0 and walks forward, so the chain
+    /// a fresh `ShardedAuditState` at epoch 0 and walks forward, so the chain
     /// state is correct at every step. Each sample times one
     /// `verify_sharded_invariance(prev_commit, next_commit)` call and
     /// records `audit_proof_bytes` = `next.uncompressed_size()` (the
@@ -1659,7 +1659,7 @@ fn main() -> ExitCode {
 
         // ---- per-stage audit bench --------------------------------
         // Run `verify_sharded_invariance` on consecutive epoch
-        // transitions starting from a fresh `AuditState` at epoch 0.
+        // transitions starting from a fresh `ShardedAuditState` at epoch 0.
         // The auditor's per-epoch cost is `O(n_shards × 2)` group
         // equations (no PCS openings, no proofs to ship — the only
         // bytes pulled per audit step are the next epoch's
@@ -1762,7 +1762,7 @@ fn main() -> ExitCode {
                 let prev_epoch = current_epoch - 1;
                 let next_epoch = current_epoch;
                 let mut warmup_state =
-                    AuditState::<<Bn254 as Pairing>::ScalarField>::default();
+                    ShardedAuditState::<<Bn254 as Pairing>::ScalarField>::default();
                 let mut prev_commit = match shared.blocking_read().epoch_commitment(0) {
                     Some(c) => c,
                     None => {

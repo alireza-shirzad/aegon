@@ -5,7 +5,7 @@
 //! verify_lookup, verify_invariance, verify_consistency).
 
 use akd::aegon_facade::{
-    self, AuditState, ConsistencyProof, EpochCommitment, VerifierContext,
+    self, ConsistencyProof, EpochCommitment, ShardedAuditState, VerifierContext,
 };
 use akd::append_only_zks::AzksParallelismConfig;
 use akd::directory::Directory;
@@ -107,7 +107,7 @@ async fn auditor_walks_invariance_chain() {
         .expect("commit chain");
     assert_eq!(commits.len(), 4);
 
-    let mut audit_state = AuditState::default();
+    let mut audit_state = ShardedAuditState::default();
     for i in 0..3 {
         let ok = aegon_facade::verify_invariance(
             &ctx,

@@ -34,7 +34,7 @@ use super::sharded::{
     ShardedEpochCommitment, ShardedLabelHistory, ShardedLabelProofTwoLayer, ShardedValueHistory,
     ShardedValueProof, ShardedVerifierContext,
 };
-use super::types::{AegonPcs, AuditState, EpochCommitment, Label, Value};
+use super::types::{AegonPcs, EpochCommitment, Label, ShardedAuditState, Value};
 
 // Generated tonic code for the coordinator service. Lives in its own
 // proto package (`aegon.coordinator.v1`) so it can evolve
@@ -500,8 +500,11 @@ where
             // transition audit, not the chain replay.
             let prev_epoch = current_epoch - 1;
             let next_epoch = current_epoch;
-            let mut warmup_state =
-                AuditState::<<E as Pairing>::ScalarField>::default();
+            // One accumulator per chain group, matching the
+            // deployment's partition.
+            let mut warmup_state = ShardedAuditState::<<E as Pairing>::ScalarField>::with_groups(
+                verifier_ctx.chain_groups,
+            );
             let mut prev_commit = state.epoch_commitment(0).ok_or_else(|| {
                 Status::internal("audit_chain: epoch 0 commitment missing")
             })?;

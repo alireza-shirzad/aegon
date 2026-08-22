@@ -155,6 +155,10 @@ pub struct AegonConfig<E: Pairing, P: AegonPcs<E>> {
     /// `KZHKConfig { k, zk }`; for other PCSs it's whatever associated
     /// `Config` type they declare.
     pub pcs_config: P::Config,
+    /// Audit-path Fiat-Shamir derivations. Defaults to SHA256; a
+    /// deployment audited via IVC installs the Poseidon bundle here
+    /// and on the verifier side alike.
+    pub audit_fs: super::audit_fs::AuditFsHooks<E, P>,
     pub _e: PhantomData<E>,
 }
 
@@ -169,8 +173,15 @@ impl<E: Pairing, P: AegonPcs<E>> AegonConfig<E, P> {
             log_capacity,
             private,
             pcs_config,
+            audit_fs: super::audit_fs::AuditFsHooks::sha256(),
             _e: PhantomData,
         }
+    }
+
+    /// Install a different audit-path Fiat-Shamir bundle.
+    pub fn with_audit_fs(mut self, hooks: super::audit_fs::AuditFsHooks<E, P>) -> Self {
+        self.audit_fs = hooks;
+        self
     }
 
     /// Hypercube size — the number of slots a fully-loaded dictionary
@@ -200,6 +211,10 @@ impl<E: Pairing, P: AegonPcs<E>> AegonConfig<E, P> {
 pub struct VerifierContext<E: Pairing, P: AegonPcs<E>> {
     pub log_capacity: usize,
     pub verifier_param: P::VerifierParam,
+    /// Which Fiat-Shamir derivations the audit path uses. Must match
+    /// what the server was configured with, or every audit fails.
+    /// Defaults to SHA256, i.e. the original behaviour.
+    pub audit_fs: super::audit_fs::AuditFsHooks<E, P>,
     pub _e: PhantomData<E>,
 }
 
@@ -213,6 +228,7 @@ where
         Self {
             log_capacity: self.log_capacity,
             verifier_param: self.verifier_param.clone(),
+            audit_fs: self.audit_fs.clone(),
             _e: PhantomData,
         }
     }
@@ -223,7 +239,16 @@ impl<E: Pairing, P: AegonPcs<E>> VerifierContext<E, P> {
         Self {
             log_capacity,
             verifier_param,
+            audit_fs: super::audit_fs::AuditFsHooks::sha256(),
             _e: PhantomData,
         }
+    }
+
+    /// Swap in a different audit-path Fiat-Shamir bundle — in
+    /// practice the Poseidon one, when the deployment is audited via
+    /// the IVC path. Must mirror the server's configuration.
+    pub fn with_audit_fs(mut self, hooks: super::audit_fs::AuditFsHooks<E, P>) -> Self {
+        self.audit_fs = hooks;
+        self
     }
 }

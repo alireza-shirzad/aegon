@@ -28,6 +28,12 @@ pub enum AegonError {
 
     #[error("database error: {0}")]
     Database(String),
+
+    /// A failure inside the Nova IVC audit path — parameter setup,
+    /// folding a step, or verifying a recursive proof.
+    #[cfg(feature = "ivc_audit")]
+    #[error("IVC audit error: {0}")]
+    Ivc(String),
 }
 
 impl From<akd_core::aegon_crypto::transcript::TranscriptError> for AegonError {

@@ -24,7 +24,7 @@
 //! having to fix the unrelated test_errors gating.
 
 use akd::aegon::{
-    verify_sharded_invariance, AuditState, DbSource, EcVrfHash, ShardTransport, ShardedAegon,
+    verify_sharded_invariance, ShardedAuditState, DbSource, EcVrfHash, ShardTransport, ShardedAegon,
     ShardedAegonConfig, VrfProver, BENCH_VRF_SEED,
 };
 use akd_core::aegon_crypto::pcs::kzhk::KZHK;
@@ -76,7 +76,7 @@ fn run_zk_path() {
 
     // (2) Honest audit transition accepts.
     {
-        let mut audit_state = AuditState::<Fr>::default();
+        let mut audit_state = ShardedAuditState::<Fr>::default();
         let ok = verify_sharded_invariance(&ctx, &mut audit_state, &prev, &next).expect("audit");
         assert!(ok, "honest zk transition must pass the audit");
     }
@@ -93,7 +93,7 @@ fn run_zk_path() {
         // Rebuild merkle root so the structural pre-check passes and
         // the audit actually reaches verify_chain.
         tampered.merkle_root = akd::aegon::merkle_root(&tampered.per_shard);
-        let mut audit_state = AuditState::<Fr>::default();
+        let mut audit_state = ShardedAuditState::<Fr>::default();
         let ok = verify_sharded_invariance(&ctx, &mut audit_state, &prev, &tampered)
             .expect("audit");
         assert!(!ok, "tampered value_commitment must trip the sigma check");
@@ -109,7 +109,7 @@ fn run_zk_path() {
             shard_commit.audit_value_blinding_proof = None;
         }
         stripped.merkle_root = akd::aegon::merkle_root(&stripped.per_shard);
-        let mut audit_state = AuditState::<Fr>::default();
+        let mut audit_state = ShardedAuditState::<Fr>::default();
         let ok = verify_sharded_invariance(&ctx, &mut audit_state, &prev, &stripped)
             .expect("audit");
         assert!(!ok, "missing sigma proof in zk mode must be rejected");
@@ -140,7 +140,7 @@ fn run_non_zk_path() {
     }
     println!("  ✓ every per-shard EpochCommitment has None proof slot.");
 
-    let mut audit_state = AuditState::<Fr>::default();
+    let mut audit_state = ShardedAuditState::<Fr>::default();
     let ok =
         verify_sharded_invariance(&ctx, &mut audit_state, &prev, &next).expect("audit non-zk");
     assert!(ok, "honest non-zk transition must pass the bare chain check");

@@ -117,6 +117,44 @@ impl<F: Zero> Default for AuditState<F> {
     }
 }
 
+/// Rolling Fiat-Shamir state for the **sharded** auditor.
+///
+/// The unsharded [`AuditState`] carries one `(r_index, r_value)`
+/// pair. A sharded deployment may run several independent chains
+/// (see [`chain_groups`](crate::aegon::chain_groups)), so this
+/// carries one pair per group. A single-group state — what
+/// [`Default`] produces — is exactly the one-pair behaviour.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ShardedAuditState<F: Zero> {
+    /// One index-chain accumulator per group, in group order.
+    pub r_index: Vec<F>,
+    /// One value-chain accumulator per group, in group order.
+    pub r_value: Vec<F>,
+}
+
+impl<F: Zero> ShardedAuditState<F> {
+    /// A fresh state for a deployment running `groups` independent
+    /// chains. Every accumulator starts at zero, matching the
+    /// server's state at epoch 0.
+    pub fn with_groups(groups: usize) -> Self {
+        Self {
+            r_index: (0..groups).map(|_| F::zero()).collect(),
+            r_value: (0..groups).map(|_| F::zero()).collect(),
+        }
+    }
+
+    /// Number of chains being tracked.
+    pub fn groups(&self) -> usize {
+        self.r_index.len()
+    }
+}
+
+impl<F: Zero> Default for ShardedAuditState<F> {
+    fn default() -> Self {
+        Self::with_groups(1)
+    }
+}
+
 // ---------- user-facing consistency types ------------------------------
 
 /// A pair of openings of the same polynomial at the same point in two

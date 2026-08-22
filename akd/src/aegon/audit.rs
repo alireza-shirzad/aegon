@@ -32,6 +32,7 @@ use ark_ec::pairing::Pairing;
 
 use super::config::VerifierContext;
 use super::error::AegonError;
+use super::audit_fs::AuditFsHooks;
 use super::fs::derive_chain_scalar;
 use super::sigma::{verify as verify_blinding_eq, BlindingEqProof};
 use super::types::{AegonPcs, AuditState, EpochCommitment};
@@ -77,6 +78,7 @@ where
         &next.rand_index_commitment,
         None,
         &ctx.verifier_param,
+        &ctx.audit_fs,
     );
     if !index_ok {
         return Ok(false);
@@ -113,6 +115,7 @@ where
         &next.rand_value_commitment,
         next.audit_value_blinding_proof.as_ref(),
         &ctx.verifier_param,
+        &ctx.audit_fs,
     );
     if !value_ok {
         return Ok(false);
@@ -144,6 +147,7 @@ where
 /// on the bare group equation to fail (which it will) and the
 /// caller to interpret that as a soft rejection — instead we reject
 /// hard with `false`.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn verify_chain<E, P>(
     r_n: E::ScalarField,
     prev_poly_com: &P::Commitment,
@@ -152,6 +156,7 @@ pub(super) fn verify_chain<E, P>(
     next_rand_com: &P::Commitment,
     blinding_proof: Option<&BlindingEqProof<E, P>>,
     verifier_param: &P::VerifierParam,
+    audit_fs: &AuditFsHooks<E, P>,
 ) -> bool
 where
     E: Pairing,
@@ -181,6 +186,7 @@ where
                 next_rand_com,
                 r_n,
                 proof,
+                audit_fs,
             )
         },
         None => {

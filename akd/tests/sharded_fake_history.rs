@@ -19,7 +19,7 @@
 
 use akd::aegon::{
     verify_sharded_consistency_two_layer, verify_sharded_invariance, verify_sharded_lookup_two_layer,
-    AuditState, Sha256Hash, ShardedAegon, ShardedAegonConfig, ShardedEpochCommitment,
+    Sha256Hash, ShardedAegon, ShardedAegonConfig, ShardedAuditState, ShardedEpochCommitment,
     ShardedVerifierContext,
 };
 use ark_bn254::Bn254;
@@ -60,7 +60,7 @@ fn fresh(log_capacity: usize, log_n_shards: usize) -> Sharded {
 fn audit_one_transition(
     server: &mut Sharded,
     ctx: &ShardedCtx,
-    audit_state: &mut AuditState<<Bn254 as Pairing>::ScalarField>,
+    audit_state: &mut ShardedAuditState<<Bn254 as Pairing>::ScalarField>,
     prev: &Commit,
     sign_ups: &[(&str, &str)],
     updates: &[(usize, &str)],
@@ -155,7 +155,7 @@ fn sharded_interleaved_eight_epoch_lifecycle_with_updates() {
     // and exercises non-trivial cross-shard routing.
     let mut server = fresh(8, 2);
     let ctx: ShardedCtx = server.sharded_verifier_context();
-    let mut audit_state = AuditState::default();
+    let mut audit_state = ShardedAuditState::default();
 
     let mut commits: Vec<Commit> = vec![server.epoch_commitment(0).expect("epoch 0")];
     let mut truth: Vec<UserRecord> = Vec::new();

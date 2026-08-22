@@ -10,7 +10,7 @@
 //! comes back matches what was put in — via [`aegon_facade::verify_lookup`]
 //! for value match, [`aegon_facade::verify_consistency`] for slot
 //! stability, and [`aegon_facade::verify_invariance`] (threading a
-//! single `AuditState`) for the Fiat-Shamir-bound homomorphic chain.
+//! single `ShardedAuditState`) for the Fiat-Shamir-bound homomorphic chain.
 //!
 //! Value updates are exercised explicitly: a user who legitimately
 //! changes their value WILL see their own consistency proof spanning
@@ -20,7 +20,7 @@
 //! a bug.
 
 use akd::aegon_facade::{
-    self, AuditState, ConsistencyProof, EpochCommitment, VerifierContext,
+    self, ConsistencyProof, EpochCommitment, ShardedAuditState, VerifierContext,
 };
 use akd::append_only_zks::AzksParallelismConfig;
 use akd::directory::Directory;
@@ -101,7 +101,7 @@ async fn apply_epoch(
 async fn audit_one_transition(
     directory: &AkdDirectory,
     ctx: &VerifierContext,
-    audit_state: &mut AuditState,
+    audit_state: &mut ShardedAuditState,
     prev: &EpochCommitment,
     next_epoch: u64,
 ) -> EpochCommitment {
@@ -204,7 +204,7 @@ async fn user_consistency(
 async fn interleaved_eight_epoch_lifecycle_with_updates() {
     let directory = fresh_directory().await;
     let ctx: VerifierContext = directory.verifier_context().await;
-    let mut audit_state = AuditState::default();
+    let mut audit_state = ShardedAuditState::default();
 
     // Auditor's running view of the chain head.
     let mut prev: EpochCommitment = directory
@@ -391,10 +391,10 @@ async fn interleaved_eight_epoch_lifecycle_with_updates() {
 
     // ===================== Auditor sanity =====================
     // Confirm the full chain (0 -> 8) re-verifies independently, with
-    // a fresh `AuditState`. Value updates don't change the auditor's
+    // a fresh `ShardedAuditState`. Value updates don't change the auditor's
     // story — the chain randomness depends only on commitments, not on
     // what data flowed through them.
-    let mut fresh_state = AuditState::default();
+    let mut fresh_state = ShardedAuditState::default();
     let mut fresh_prev = directory.epoch_commitment(0).await.unwrap();
     for i in 0..8u64 {
         let next = directory.epoch_commitment(i + 1).await.unwrap();

@@ -418,7 +418,7 @@ async fn test_malicious_key_history<TC: Configuration>() -> Result<(), AkdError>
 
         // Walk 0 -> 1 honestly to advance the audit state. Sanity-check
         // that the honest 1 -> 2 transition is accepted from that state.
-        let mut audit_state = crate::aegon_facade::AuditState::default();
+        let mut audit_state = crate::aegon_facade::ShardedAuditState::default();
         assert!(
             crate::aegon_facade::verify_invariance(&ctx, &mut audit_state, &epoch0, &epoch1)?,
             "honest epoch 0 -> 1 transition must pass",

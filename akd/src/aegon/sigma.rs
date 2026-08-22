@@ -77,8 +77,6 @@ use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::rand::{CryptoRng, RngCore};
 use std::ops::{Add, Mul, Sub};
 
-use akd_core::aegon_crypto::transcript::IOPTranscript;
-
 use super::types::AegonPcs;
 
 /// Fiat-Shamir Schnorr proof that a public commitment residue equals
@@ -112,42 +110,13 @@ where
     }
 }
 
-const DOMAIN: &[u8] = b"aegon.audit.blinding_eq.v1";
-
-/// Compute the Fiat-Shamir challenge for the blinding-equality proof.
-/// Both prover and verifier feed the same four chain commitments,
-/// chain scalar, and Schnorr commitment `r_commit` into the
-/// transcript; binding all five elements (paper §6.2) prevents the
-/// prover from adaptively picking any of them after seeing the
-/// others.
-fn fs_challenge<E, P>(
-    prev_poly_com: &P::Commitment,
-    next_poly_com: &P::Commitment,
-    prev_rand_com: &P::Commitment,
-    next_rand_com: &P::Commitment,
-    r_chain: E::ScalarField,
-    r_commit: &P::Commitment,
-) -> E::ScalarField
-where
-    E: Pairing,
-    P: AegonPcs<E>,
-{
-    let mut t = IOPTranscript::<E::ScalarField>::new(DOMAIN);
-    t.append_serializable_element(b"prev_val", prev_poly_com)
-        .expect("transcript append");
-    t.append_serializable_element(b"next_val", next_poly_com)
-        .expect("transcript append");
-    t.append_serializable_element(b"prev_rand", prev_rand_com)
-        .expect("transcript append");
-    t.append_serializable_element(b"next_rand", next_rand_com)
-        .expect("transcript append");
-    t.append_field_element(b"r", &r_chain)
-        .expect("transcript append");
-    t.append_serializable_element(b"R", r_commit)
-        .expect("transcript append");
-    t.get_and_append_challenge(b"e")
-        .expect("transcript challenge")
-}
+// The Fiat-Shamir challenge is no longer computed here: it is
+// supplied by the deployment's
+// [`AuditFsHooks`](super::audit_fs::AuditFsHooks), so that the same
+// derivation can be recomputed inside the IVC folding circuit. The
+// SHA256 implementation that used to live in this file is now
+// `audit_fs::sha256_sigma_challenge` and remains the default, so
+// `AuditFs::Sha256` deployments are byte-identical to before.
 
 /// Build a proof that `residue = c · h` where
 /// `residue = next_rand − (prev_rand + r_chain · (next_val − prev_val))`
@@ -159,6 +128,7 @@ where
 /// Returns `None` when the SRS is non-hiding (no `h` available);
 /// callers in that mode should leave the proof slot empty and let the
 /// audit path enforce `residue == 0` directly.
+#[allow(clippy::too_many_arguments)]
 pub fn prove<E, P, R>(
     pp: &P::ProverParam,
     model: &P::Commitment,
@@ -168,6 +138,7 @@ pub fn prove<E, P, R>(
     next_rand_com: &P::Commitment,
     r_chain: E::ScalarField,
     c: E::ScalarField,
+    audit_fs: &super::audit_fs::AuditFsHooks<E, P>,
     rng: &mut R,
 ) -> Option<BlindingEqProof<E, P>>
 where
@@ -177,7 +148,7 @@ where
 {
     let k = E::ScalarField::rand(rng);
     let r_commit = P::scaled_mask_generator_pp(pp, model, k)?;
-    let e = fs_challenge::<E, P>(
+    let e = audit_fs.sigma_challenge(
         prev_poly_com,
         next_poly_com,
         prev_rand_com,
@@ -197,6 +168,7 @@ where
 /// needs prover state. Returns `false` if the SRS is non-hiding (so
 /// the proof should not exist in the first place) — the audit caller
 /// in that branch must compare `residue == 0` instead.
+#[allow(clippy::too_many_arguments)]
 pub fn verify<E, P>(
     vk: &P::VerifierParam,
     prev_poly_com: &P::Commitment,
@@ -205,6 +177,7 @@ pub fn verify<E, P>(
     next_rand_com: &P::Commitment,
     r_chain: E::ScalarField,
     proof: &BlindingEqProof<E, P>,
+    audit_fs: &super::audit_fs::AuditFsHooks<E, P>,
 ) -> bool
 where
     E: Pairing,
@@ -215,7 +188,7 @@ where
         + Sub<Output = P::Commitment>
         + Mul<E::ScalarField, Output = P::Commitment>,
 {
-    let e = fs_challenge::<E, P>(
+    let e = audit_fs.sigma_challenge(
         prev_poly_com,
         next_poly_com,
         prev_rand_com,
@@ -292,13 +265,14 @@ mod tests {
                 .expect("zk pp has h");
         let next_rand = chain + bump;
 
+        let hooks = super::super::audit_fs::AuditFsHooks::<Bn254, Pcs>::sha256();
         let proof = prove::<Bn254, Pcs, _>(
-            &pp, &model, &prev_val, &next_val, &prev_rand, &next_rand, r_chain, c_witness,
+            &pp, &model, &prev_val, &next_val, &prev_rand, &next_rand, r_chain, c_witness, &hooks,
             &mut rng,
         )
         .expect("zk pp has h");
         assert!(verify::<Bn254, Pcs>(
-            &vk, &prev_val, &next_val, &prev_rand, &next_rand, r_chain, &proof
+            &vk, &prev_val, &next_val, &prev_rand, &next_rand, r_chain, &proof, &hooks
         ));
     }
 
@@ -318,8 +292,9 @@ mod tests {
             <Pcs as PolynomialCommitmentScheme<Bn254>>::scaled_mask_generator_pp(&pp, &model, c_witness)
                 .unwrap();
         let next_rand = chain.clone() + bump;
+        let hooks = super::super::audit_fs::AuditFsHooks::<Bn254, Pcs>::sha256();
         let proof = prove::<Bn254, Pcs, _>(
-            &pp, &model, &prev_val, &next_val, &prev_rand, &next_rand, r_chain, c_witness,
+            &pp, &model, &prev_val, &next_val, &prev_rand, &next_rand, r_chain, c_witness, &hooks,
             &mut rng,
         )
         .unwrap();
@@ -330,7 +305,8 @@ mod tests {
             &prev_rand,
             &next_rand,
             r_chain + Fr::from(1u64),
-            &proof
+            &proof,
+            &hooks
         ));
         let chain_only = prev_rand.clone() + (next_val.clone() - prev_val.clone()) * r_chain;
         assert!(!verify::<Bn254, Pcs>(
@@ -340,7 +316,8 @@ mod tests {
             &prev_rand,
             &chain_only,
             r_chain,
-            &proof
+            &proof,
+            &hooks
         ));
     }
 }

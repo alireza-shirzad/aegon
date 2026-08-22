@@ -5,7 +5,8 @@
 //! exercising publish + lookup + sharded verification.
 
 use akd::aegon::{
-    probe_at, rederive_sharded_fs_scalars, verify_sharded_lookup_two_layer, AuditState,
+    probe_at, rederive_sharded_fs_scalars, verify_sharded_lookup_two_layer, GroupPlan,
+    ShardedAuditState,
     Sha256Hash, ShardedAegon, ShardedAegonConfig, ShardedEpochCommitment,
     ShardedLookupProofTwoLayer, ShardedVerifierContext,
 };
@@ -1080,14 +1081,23 @@ fn auditor_rederives_shared_fs_scalars() {
     // sharded epoch commitments.
     let mut server = fresh(6, 1);
     let prev = server.epoch_commitment(0).expect("epoch 0");
-    let audit_state = AuditState::<<Bn254 as Pairing>::ScalarField>::default();
+    let audit_state = ShardedAuditState::<<Bn254 as Pairing>::ScalarField>::default();
 
     let next = server
         .publish_two_layer(&[(b"alice".to_vec(), b"a1".to_vec())])
         .expect("publish_two_layer");
 
-    let (rederived_r_index, rederived_r_value) =
-        rederive_sharded_fs_scalars::<Bn254, Pcs>(audit_state.r_index, audit_state.r_value, &next);
+    // Single-group plan: the original directory-wide derivation.
+    let plan = GroupPlan::single(next.per_shard.len()).expect("plan");
+    let (rederived_r_index, rederived_r_value) = rederive_sharded_fs_scalars::<Bn254, Pcs>(
+        &audit_state.r_index,
+        &audit_state.r_value,
+        &next,
+        plan,
+        &Default::default(),
+    )
+    .expect("rederive");
+    let (rederived_r_index, rederived_r_value) = (rederived_r_index[0], rederived_r_value[0]);
 
     // After updating the auditor's state, it should match what the
     // coordinator stored. We don't expose those internals, but we can

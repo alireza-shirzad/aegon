@@ -143,6 +143,7 @@ fn main() -> ExitCode {
     let verifier_inner = VerifierContext::<Bn254, Pcs> {
         log_capacity: args.shard_log_capacity,
         verifier_param,
+        audit_fs: Default::default(),
         _e: PhantomData,
     };
     let verifier_ctx = ShardedVerifierContext::new(verifier_inner, args.log_n_shards);

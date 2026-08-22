@@ -97,6 +97,7 @@ fn main() -> ExitCode {
         log_capacity: args.shard_log_capacity,
         private: false,
         pcs_config: KZHKConfig::new(kzh_k, false),
+        audit_fs: Default::default(),
         _e: PhantomData,
     };
 

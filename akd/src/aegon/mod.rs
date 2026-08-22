@@ -13,6 +13,9 @@
 //! with the workspace's KZH-k implementation as a smoke check.
 
 pub mod audit;
+pub mod audit_fs;
+/// Partitioning the shard set into independent Fiat-Shamir chains.
+pub mod chain_groups;
 pub mod config;
 pub mod consistency;
 pub mod coordinator_grpc;
@@ -22,6 +25,11 @@ pub mod error;
 pub(crate) mod fs;
 pub mod hash;
 pub mod instrument;
+/// IVC (Nova) auditing — fold the per-epoch invariance check into a
+/// single recursive proof. See the module docs for the curve-cycle
+/// argument that makes it cheap.
+#[cfg(feature = "ivc_audit")]
+pub mod ivc;
 pub mod masking;
 pub mod presets;
 pub mod server;
@@ -34,6 +42,8 @@ pub mod types;
 pub mod verify;
 
 pub use audit::verify_invariance;
+pub use audit_fs::{AuditFs, AuditFsHooks};
+pub use chain_groups::GroupPlan;
 pub use config::{
     shard_log_capacity_for_two_layer, shard_log_capacity_from_true, true_log_capacity_from_shard,
     AegonConfig, VerifierContext, LOG2_OVER_PROVISIONING_FACTOR, OVER_PROVISIONING_FACTOR,
@@ -63,6 +73,6 @@ pub use sharded::{
 };
 pub use types::{
     AegonPcs, AuditState, ConsistencyProof, EpochCommitment, HistoryOpeningEntry, HistoryOpenings,
-    Label, LookupProof, RandPair, Value, ValueChangeEntry,
+    Label, LookupProof, RandPair, ShardedAuditState, Value, ValueChangeEntry,
 };
 pub use verify::verify_lookup;

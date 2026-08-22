@@ -35,6 +35,7 @@ fn build_local_aegon(log_capacity: usize, seed: u64) -> Aegon {
         log_capacity,
         private: false,
         pcs_config: kzh,
+        audit_fs: Default::default(),
         _e: PhantomData,
     };
     let mut rng = ChaCha20Rng::seed_from_u64(seed);
@@ -272,6 +273,7 @@ fn build_local_aegon_vrf(log_capacity: usize, seed: u64) -> AegonVrf {
         log_capacity,
         private: false,
         pcs_config: kzh,
+        audit_fs: Default::default(),
         _e: PhantomData,
     };
     let mut rng = ChaCha20Rng::seed_from_u64(seed);

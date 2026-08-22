@@ -44,7 +44,7 @@ use super::error::AegonError;
 use super::hash::{bool_index_to_point, HashSuite, Sha256Hash};
 use super::server::Aegon;
 use super::types::{
-    AegonPcs, AuditState, EpochCommitment, Label, RandPair,
+    AegonPcs, AuditState, EpochCommitment, Label, RandPair, ShardedAuditState,
     Value, ValueChangeEntry,
 };
 
@@ -135,6 +135,36 @@ pub struct ShardedAegonConfig<E: Pairing, P: AegonPcs<E>> {
     /// [`ShardTransport::InProcess`] — remote shards configure their
     /// own masking source via `aegon_shard_server`'s `--masking-addr`.
     pub masking_addrs: Vec<String>,
+    /// Audit-path Fiat-Shamir derivations, propagated to every shard
+    /// so their Schnorr challenges match the coordinator's chain
+    /// scalars. Defaults to SHA256; an IVC-audited deployment
+    /// installs the Poseidon bundle here and on every verifier.
+    ///
+    /// **In-process shards only.** With
+    /// [`ShardTransport::Remote`] each `aegon_shard_server` builds
+    /// its own [`AegonConfig`] from its own flags, so it will not
+    /// inherit this setting — its Schnorr challenges would stay on
+    /// SHA256 while the coordinator derives chain scalars with
+    /// Poseidon, and every audit would fail. Wiring the selection
+    /// through the shard-server CLI is still outstanding; until then
+    /// IVC auditing is supported on
+    /// [`ShardTransport::InProcess`] deployments.
+    pub audit_fs: super::audit_fs::AuditFsHooks<E, P>,
+    /// Number of independent Fiat-Shamir chains the audit runs. `1`
+    /// (the default) derives one `(r_index, r_value)` pair per epoch
+    /// from every shard's commitments, which is the behaviour every
+    /// existing deployment has.
+    ///
+    /// A larger `G` partitions the shards into `G` contiguous groups
+    /// (see [`GroupPlan`](super::chain_groups::GroupPlan)), each with
+    /// its own rolling accumulator. The groups never interact, so a
+    /// recursive auditor can fold and compress them in parallel — the
+    /// compression step is linear in circuit size, so `G` groups cost
+    /// `1/G` each. Must divide `n_shards` exactly.
+    ///
+    /// Every verifier in the deployment must be configured with the
+    /// same value; a mismatch makes every audit fail.
+    pub chain_groups: usize,
     pub _e: PhantomData<E>,
 }
 
@@ -277,6 +307,8 @@ pub struct ShardedAegonConfigBuilder<E: Pairing, P: AegonPcs<E>> {
     srs: SrsSource,
     db: DbSource,
     masking_addrs: Vec<String>,
+    audit_fs: super::audit_fs::AuditFsHooks<E, P>,
+    chain_groups: usize,
     _e: PhantomData<E>,
 }
 
@@ -297,8 +329,25 @@ impl<E: Pairing, P: AegonPcs<E>> ShardedAegonConfigBuilder<E, P> {
             srs: SrsSource::default(),
             db: DbSource::default(),
             masking_addrs: Vec::new(),
+            audit_fs: super::audit_fs::AuditFsHooks::sha256(),
+            chain_groups: 1,
             _e: PhantomData,
         }
+    }
+
+    /// Split the audit's Fiat-Shamir chain into `g` independent
+    /// groups. Defaults to `1`. Must divide `n_shards` exactly. See
+    /// [`ShardedAegonConfig::chain_groups`].
+    pub fn chain_groups(mut self, g: usize) -> Self {
+        self.chain_groups = g;
+        self
+    }
+
+    /// Install a different audit-path Fiat-Shamir bundle. Every
+    /// verifier in the deployment must be configured to match.
+    pub fn audit_fs(mut self, hooks: super::audit_fs::AuditFsHooks<E, P>) -> Self {
+        self.audit_fs = hooks;
+        self
     }
 
     /// log-capacity of each shard's polynomial. **Required.**
@@ -385,6 +434,10 @@ impl<E: Pairing, P: AegonPcs<E>> ShardedAegonConfigBuilder<E, P> {
         let log_n_shards = self.log_n_shards.ok_or_else(|| {
             AegonError::Config("ShardedAegonConfig: log_n_shards is required".into())
         })?;
+        // Reject an unusable partition here rather than at the first
+        // publish: an audit that derives per-group scalars the
+        // verifier cannot reconstruct fails silently and late.
+        super::chain_groups::GroupPlan::new(1usize << log_n_shards, self.chain_groups)?;
         let pcs_config = self.pcs_config.ok_or_else(|| {
             AegonError::Config(
                 "ShardedAegonConfig: pcs_config is required (for the KZH-k backend, call .kzh_k(k) instead)".into(),
@@ -414,6 +467,8 @@ impl<E: Pairing, P: AegonPcs<E>> ShardedAegonConfigBuilder<E, P> {
             srs: self.srs,
             db: self.db,
             masking_addrs: self.masking_addrs,
+            audit_fs: self.audit_fs,
+            chain_groups: self.chain_groups,
             _e: PhantomData,
         })
     }
@@ -473,8 +528,11 @@ pub struct ShardWrite<F: Field> {
 /// `ShardedAegon::try_recover_from_db` and consumed in `setup`.
 struct RecoveredState<E: Pairing, P: AegonPcs<E>> {
     epoch: u64,
-    r_index: E::ScalarField,
-    r_value: E::ScalarField,
+    /// One rolling accumulator per chain group. Length is the
+    /// deployment's `chain_groups`; `1` for the default single-chain
+    /// configuration.
+    r_index: Vec<E::ScalarField>,
+    r_value: Vec<E::ScalarField>,
     epoch_commits: Vec<ShardedEpochCommitment<E, P>>,
 }
 
@@ -1211,6 +1269,10 @@ pub struct ShardedVerifierContext<E: Pairing, P: AegonPcs<E>> {
     /// each probe's `vrf_proof`. `None` for the SHA-256 path, in
     /// which case slot bits are re-derived locally via `H::h_bits`.
     pub vrf_verifier: Option<super::hash::VrfVerifier>,
+    /// Number of independent Fiat-Shamir chains the audit runs. Must
+    /// match the server's
+    /// [`ShardedAegonConfig::chain_groups`]. Defaults to `1`.
+    pub chain_groups: usize,
 }
 
 impl<E: Pairing, P: AegonPcs<E>> ShardedVerifierContext<E, P> {
@@ -1219,7 +1281,23 @@ impl<E: Pairing, P: AegonPcs<E>> ShardedVerifierContext<E, P> {
             inner,
             log_n_shards,
             vrf_verifier: None,
+            chain_groups: 1,
         }
+    }
+
+    /// Track `g` independent chain-scalar accumulators instead of
+    /// one. Must match the server's
+    /// [`ShardedAegonConfig::chain_groups`] exactly — a mismatch
+    /// makes every audit fail, since the verifier would absorb a
+    /// different set of commitments than the server did.
+    pub fn with_chain_groups(mut self, g: usize) -> Self {
+        self.chain_groups = g;
+        self
+    }
+
+    /// The shard partition this context audits against.
+    pub fn group_plan(&self) -> Result<super::chain_groups::GroupPlan, AegonError> {
+        super::chain_groups::GroupPlan::new(1usize << self.log_n_shards, self.chain_groups)
     }
 
     /// Attach a [`VrfVerifier`](super::hash::VrfVerifier) so subsequent
@@ -1267,9 +1345,13 @@ where
     epoch: u64,
 
     // Coordinator-side FS chain. Each new epoch's r is derived by
-    // hashing prev_r with ALL the shards' new data commits.
-    r_index: E::ScalarField,
-    r_value: E::ScalarField,
+    // hashing prev_r with the new data commits of the shards in its
+    // group -- ALL of them when `chain_groups == 1`, which is the
+    // default and what every pre-existing deployment does.
+    r_index: Vec<E::ScalarField>,
+    r_value: Vec<E::ScalarField>,
+    // How the shard set is partitioned into independent chains.
+    chain_groups: usize,
 
     // Coordinator's view of past epochs.
     epoch_commits: Vec<ShardedEpochCommitment<E, P>>,
@@ -1346,6 +1428,10 @@ where
             log_capacity: config.shard_log_capacity,
             private: config.private,
             pcs_config: config.pcs_config.clone(),
+            // Every shard must derive its Schnorr challenges the same
+            // way the coordinator derives the chain scalars, or the
+            // audit equation will not close.
+            audit_fs: config.audit_fs.clone(),
             _e: PhantomData,
         };
 
@@ -1500,7 +1586,26 @@ where
             None => vec![None; shards.len()],
         };
 
+        // The verifier context is the single source of truth for the
+        // audit-path FS derivations: `derive_chain_scalars` reads it
+        // at publish time and `sharded_verifier_context()` hands the
+        // same bundle to auditors, so the two can never drift.
+        let mut shard_verifier_context = shard_verifier_context;
+        shard_verifier_context.audit_fs = config.audit_fs;
+
+        let chain_groups = config.chain_groups;
         if let Some(rec) = recovered {
+            // A deployment that changed `chain_groups` between runs
+            // would silently start deriving scalars a verifier cannot
+            // reproduce, so refuse rather than resume.
+            if rec.r_index.len() != chain_groups || rec.r_value.len() != chain_groups {
+                return Err(AegonError::Config(format!(
+                    "recovered coordinator state has {} chain groups but this configuration \
+                     declares {chain_groups}; the Fiat-Shamir chain cannot be resumed across \
+                     a change to chain_groups",
+                    rec.r_index.len()
+                )));
+            }
             Ok(Self {
                 shards,
                 shard_dims,
@@ -1510,6 +1615,7 @@ where
                 epoch: rec.epoch,
                 r_index: rec.r_index,
                 r_value: rec.r_value,
+                chain_groups,
                 epoch_commits: rec.epoch_commits,
                 db,
                 vrf_prover: None,
@@ -1523,8 +1629,9 @@ where
                 shard_log_capacity_cached: shard_config.log_capacity,
                 log_n_shards: config.log_n_shards,
                 epoch: 0,
-                r_index: E::ScalarField::zero(),
-                r_value: E::ScalarField::zero(),
+                r_index: vec![E::ScalarField::zero(); chain_groups],
+                r_value: vec![E::ScalarField::zero(); chain_groups],
+                chain_groups,
                 epoch_commits: vec![initial_commit],
                 db,
                 vrf_prover: None,
@@ -1567,15 +1674,23 @@ where
             return Ok(None);
         };
 
-        // 1. Parse coord:state → (epoch, r_index, r_value)
+        // 1. Parse coord:state → (epoch, r_index[], r_value[])
+        //
+        // The scalars are length-prefixed vectors, one entry per
+        // chain group. Deployments predating group-sharding wrote
+        // bare scalars here, so their state will not parse — that is
+        // deliberate. Silently reading a bare scalar as a one-element
+        // vector is not possible to do safely (the encodings are not
+        // distinguishable), and mis-parsing the FS chain would break
+        // every subsequent audit rather than fail loudly now.
         let mut cursor = &state_bytes[..];
         let epoch: u64 = u64::deserialize_compressed(&mut cursor)
             .map_err(|e| AegonError::Database(format!("deserialize epoch: {e}")))?;
-        let r_index: E::ScalarField =
-            E::ScalarField::deserialize_compressed(&mut cursor)
+        let r_index: Vec<E::ScalarField> =
+            Vec::<E::ScalarField>::deserialize_compressed(&mut cursor)
                 .map_err(|e| AegonError::Database(format!("deserialize r_index: {e}")))?;
-        let r_value: E::ScalarField =
-            E::ScalarField::deserialize_compressed(&mut cursor)
+        let r_value: Vec<E::ScalarField> =
+            Vec::<E::ScalarField>::deserialize_compressed(&mut cursor)
                 .map_err(|e| AegonError::Database(format!("deserialize r_value: {e}")))?;
 
         // 2. Load every published epoch commitment in order.
@@ -1740,7 +1855,11 @@ where
     /// carries a matching `VrfVerifier` so `verify_lookup_label` will
     /// consume the `vrf_proof` field on each probe.
     pub fn sharded_verifier_context(&self) -> ShardedVerifierContext<E, P> {
-        let mut ctx = ShardedVerifierContext::new(self.verifier_context(), self.log_n_shards);
+        // Carries the deployment's chain-group partition, so an
+        // auditor handed this context can never absorb a different
+        // set of commitments than the coordinator did.
+        let mut ctx = ShardedVerifierContext::new(self.verifier_context(), self.log_n_shards)
+            .with_chain_groups(self.chain_groups);
         if let Some(prover) = self.vrf_prover.as_ref() {
             ctx = ctx.with_vrf_verifier(super::hash::VrfVerifier::new(prover.public_key().clone()));
         }
@@ -1848,8 +1967,8 @@ where
             .collect();
         let refreshed = ShardedEpochCommitment::<E, P>::with_per_shard(0, per_shard);
         self.epoch = 0;
-        self.r_index = E::ScalarField::zero();
-        self.r_value = E::ScalarField::zero();
+        self.r_index = vec![E::ScalarField::zero(); self.chain_groups];
+        self.r_value = vec![E::ScalarField::zero(); self.chain_groups];
         self.epoch_commits.clear();
         self.epoch_commits.push(refreshed.clone());
         if let Some(db) = &self.db {
@@ -2084,8 +2203,8 @@ where
 
         // Phase 2 + persist (single RPC per shard).
         let (new_r_index, new_r_value) =
-            self.derive_chain_scalars(&new_index_commits, &new_value_commits);
-        let per_shard_commits = self.run_phase_2(new_r_index, new_r_value)?;
+            self.derive_chain_scalars(&new_index_commits, &new_value_commits)?;
+        let per_shard_commits = self.run_phase_2(&new_r_index, &new_r_value)?;
         let sharded_commit =
             self.finalize_epoch(per_shard_commits, new_r_index, new_r_value);
 
@@ -2234,18 +2353,37 @@ where
         &self,
         new_index_commits: &[P::Commitment],
         new_value_commits: &[P::Commitment],
-    ) -> (E::ScalarField, E::ScalarField) {
-        let new_r_index = fs_chain_scalar::<E::ScalarField, P::Commitment>(
-            b"aegon.sharded.fs.r_index",
-            self.r_index,
-            new_index_commits,
-        );
-        let new_r_value = fs_chain_scalar::<E::ScalarField, P::Commitment>(
-            b"aegon.sharded.fs.r_value",
-            self.r_value,
-            new_value_commits,
-        );
-        (new_r_index, new_r_value)
+    ) -> Result<(Vec<E::ScalarField>, Vec<E::ScalarField>), AegonError> {
+        let plan = super::chain_groups::GroupPlan::new(self.n_shards(), self.chain_groups)?;
+        let index_groups = plan.split(new_index_commits)?;
+        let value_groups = plan.split(new_value_commits)?;
+
+        // One rolling accumulator per group, each absorbing only its
+        // own shards' commitments. With `chain_groups == 1` this is
+        // byte-for-byte the single-transcript derivation it replaces.
+        let new_r_index = index_groups
+            .iter()
+            .zip(&self.r_index)
+            .map(|(commits, prev)| {
+                self.shard_verifier_context.audit_fs.chain_scalar(
+                    b"aegon.sharded.fs.r_index",
+                    *prev,
+                    commits,
+                )
+            })
+            .collect();
+        let new_r_value = value_groups
+            .iter()
+            .zip(&self.r_value)
+            .map(|(commits, prev)| {
+                self.shard_verifier_context.audit_fs.chain_scalar(
+                    b"aegon.sharded.fs.r_value",
+                    *prev,
+                    commits,
+                )
+            })
+            .collect();
+        Ok((new_r_index, new_r_value))
     }
 
     /// Drive every shard's `publish_phase_2` with the shared scalars
@@ -2261,8 +2399,8 @@ where
     )]
     fn run_phase_2(
         &mut self,
-        new_r_index: E::ScalarField,
-        new_r_value: E::ScalarField,
+        new_r_index: &[E::ScalarField],
+        new_r_value: &[E::ScalarField],
     ) -> Result<Vec<EpochCommitment<E, P>>, AegonError> {
         // Combined phase-2 + persist. Each shard runs phase-2 crypto
         // locally and writes its dictionary-content DbOps (with empty
@@ -2275,11 +2413,19 @@ where
             "[EPOCH-INSTR coord] run_phase_2 entry coord.epoch={} dispatching to {} shards",
             self.epoch, self.shards.len()
         );
+        // Each shard is handed *its group's* scalars. Because phase 2
+        // is already one call per shard, group-sharding costs nothing
+        // here and works for remote shards as well as in-process
+        // ones -- unlike `audit_fs`, which a remote shard configures
+        // for itself.
+        let plan = super::chain_groups::GroupPlan::new(self.n_shards(), self.chain_groups)?;
         let results: Vec<Result<EpochCommitment<E, P>, AegonError>> = self.shards
             .par_iter_mut()
             .zip(shard_ids.into_par_iter())
             .map(|(shard, shard_id)| {
-                let res = shard.publish_phase_2_and_persist(new_r_index, new_r_value, shard_id);
+                let g = plan.group_of(shard_id as usize);
+                let res =
+                    shard.publish_phase_2_and_persist(new_r_index[g], new_r_value[g], shard_id);
                 if let Err(ref e) = res {
                     eprintln!(
                         "[EPOCH-INSTR coord] shard={} phase_2 RPC returned Err: {}",
@@ -2312,8 +2458,8 @@ where
     fn finalize_epoch(
         &mut self,
         per_shard_commits: Vec<EpochCommitment<E, P>>,
-        new_r_index: E::ScalarField,
-        new_r_value: E::ScalarField,
+        new_r_index: Vec<E::ScalarField>,
+        new_r_value: Vec<E::ScalarField>,
     ) -> ShardedEpochCommitment<E, P> {
         self.r_index = new_r_index;
         self.r_value = new_r_value;
@@ -3914,21 +4060,24 @@ where
 /// Steps:
 ///   1. The announced `next.merkle_root` must reconstruct from
 ///      `next.per_shard` (auditor independently hashes the leaves).
-///   2. Re-derive the *shared* `(r_index, r_value)` Fiat-Shamir scalars
-///      from `audit_state.r_*` and *all* shards' new data commits, in
-///      shard-id order — the same hash the coordinator used at publish
-///      time.
+///   2. Re-derive the `(r_index, r_value)` Fiat-Shamir scalars from
+///      `audit_state.r_*` and the new data commits of each chain
+///      group's shards, in shard-id order — the same hash the
+///      coordinator used at publish time. With the default single
+///      group that absorbs *all* shards, which is what every
+///      deployment predating
+///      [`chain_groups`](super::chain_groups) does.
 ///   3. For every shard `i`, run the standard single-shard invariance
 ///      chain check (paper Fig. 4) on `(prev.per_shard[i],
-///      next.per_shard[i])` using the *shared* scalars — *not* the
-///      single-shard derivation, since the coordinator committed every
-///      shard to the same `r`.
+///      next.per_shard[i])` using *that shard's group's* scalars —
+///      *not* the single-shard derivation, since the coordinator
+///      committed every shard in a group to the same `r`.
 ///
 /// On success, `audit_state` is advanced to the new chain scalars,
 /// ready for the next transition.
 pub fn verify_sharded_invariance<E, P>(
     ctx: &ShardedVerifierContext<E, P>,
-    audit_state: &mut AuditState<E::ScalarField>,
+    audit_state: &mut ShardedAuditState<E::ScalarField>,
     prev: &ShardedEpochCommitment<E, P>,
     next: &ShardedEpochCommitment<E, P>,
 ) -> Result<bool, AegonError>
@@ -3960,11 +4109,23 @@ where
         ));
     }
 
-    // (2) Re-derive shared FS scalars from prev_r and the full per-shard tuple.
-    let (new_r_index, new_r_value) =
-        rederive_sharded_fs_scalars::<E, P>(audit_state.r_index, audit_state.r_value, next);
+    // (2) Re-derive each group's FS scalars from its own prev_r and
+    // its own slice of the per-shard tuple.
+    let plan = ctx.group_plan()?;
+    if audit_state.groups() != plan.groups() {
+        return Err(AegonError::Verification(
+            "sharded audit: audit state's chain-group count does not match the verifier context",
+        ));
+    }
+    let (new_r_index, new_r_value) = rederive_sharded_fs_scalars::<E, P>(
+        &audit_state.r_index,
+        &audit_state.r_value,
+        next,
+        plan,
+        &ctx.inner.audit_fs,
+    )?;
 
-    // (3) Per-shard chain checks with the *shared* scalars. Every group
+    // (3) Per-shard chain checks with that shard's group's scalars. Every group
     // element the auditor needs is in `prev.per_shard[i]` /
     // `next.per_shard[i]`, and `verify_chain` does the homomorphism
     // check directly on commitments.
@@ -3979,15 +4140,17 @@ where
     for i in 0..next.per_shard.len() {
         let prev_i = &prev.per_shard[i];
         let next_i = &next.per_shard[i];
+        let g = plan.group_of(i);
 
         let index_ok = verify_chain::<E, P>(
-            new_r_index,
+            new_r_index[g],
             &prev_i.index_commitment,
             &next_i.index_commitment,
             &prev_i.rand_index_commitment,
             &next_i.rand_index_commitment,
             None,
             vk,
+            &ctx.inner.audit_fs,
         );
         if !index_ok {
             return Ok(false);
@@ -4001,13 +4164,14 @@ where
             return Ok(false);
         }
         let value_ok = verify_chain::<E, P>(
-            new_r_value,
+            new_r_value[g],
             &prev_i.value_commitment,
             &next_i.value_commitment,
             &prev_i.rand_value_commitment,
             &next_i.rand_value_commitment,
             next_i.audit_value_blinding_proof.as_ref(),
             vk,
+            &ctx.inner.audit_fs,
         );
         if !value_ok {
             return Ok(false);
@@ -4205,14 +4369,26 @@ pub fn verify_merkle_path<E: Pairing, P: AegonPcs<E>>(
     hash
 }
 
-/// Recompute the shared FS scalars the prover used at the transition
+/// Recompute the FS chain scalars the prover used at the transition
 /// from `prev` to `next`. Auditors call this to bind their own
-/// invariance check to the same `(r_index, r_value)`.
+/// invariance check to the same scalars the server derived.
+///
+/// Returns one `(r_index, r_value)` pair per chain group, in group
+/// order. `plan` must be the deployment's partition — with
+/// [`GroupPlan::single`](super::chain_groups::GroupPlan::single) this
+/// is the original directory-wide derivation.
 pub fn rederive_sharded_fs_scalars<E: Pairing, P: AegonPcs<E>>(
-    prev_r_index: E::ScalarField,
-    prev_r_value: E::ScalarField,
+    prev_r_index: &[E::ScalarField],
+    prev_r_value: &[E::ScalarField],
     next: &ShardedEpochCommitment<E, P>,
-) -> (E::ScalarField, E::ScalarField) {
+    plan: super::chain_groups::GroupPlan,
+    audit_fs: &super::audit_fs::AuditFsHooks<E, P>,
+) -> Result<(Vec<E::ScalarField>, Vec<E::ScalarField>), AegonError> {
+    if prev_r_index.len() != plan.groups() || prev_r_value.len() != plan.groups() {
+        return Err(AegonError::Verification(
+            "sharded audit: audit state does not carry one accumulator per chain group",
+        ));
+    }
     let index_commits: Vec<P::Commitment> = next
         .per_shard
         .iter()
@@ -4223,15 +4399,22 @@ pub fn rederive_sharded_fs_scalars<E: Pairing, P: AegonPcs<E>>(
         .iter()
         .map(|c| c.value_commitment.clone())
         .collect();
-    let r_index = fs_chain_scalar::<E::ScalarField, P::Commitment>(
-        b"aegon.sharded.fs.r_index",
-        prev_r_index,
-        &index_commits,
-    );
-    let r_value = fs_chain_scalar::<E::ScalarField, P::Commitment>(
-        b"aegon.sharded.fs.r_value",
-        prev_r_value,
-        &value_commits,
-    );
-    (r_index, r_value)
+    let index_groups = plan.split(&index_commits)?;
+    let value_groups = plan.split(&value_commits)?;
+
+    let r_index = index_groups
+        .iter()
+        .zip(prev_r_index)
+        .map(|(commits, prev)| {
+            audit_fs.chain_scalar(b"aegon.sharded.fs.r_index", *prev, commits)
+        })
+        .collect();
+    let r_value = value_groups
+        .iter()
+        .zip(prev_r_value)
+        .map(|(commits, prev)| {
+            audit_fs.chain_scalar(b"aegon.sharded.fs.r_value", *prev, commits)
+        })
+        .collect();
+    Ok((r_index, r_value))
 }
