@@ -50,23 +50,46 @@ use rand_chacha::ChaCha20Rng;
 
 type Pcs = KZHK<Bn254>;
 
-const LOG_CAPACITY: usize = 12;
-const LOG_N_SHARDS: usize = 2; // 4 shards
-const CHAIN_GROUPS: usize = 2; // 2 shards per group
-const EPOCHS: usize = 3;
+/// Deployment shape, overridable from the environment so the same
+/// example can run as a fast smoke test or as a full-width
+/// fidelity check:
+///
+/// ```text
+/// AEGON_LOG_N_SHARDS=7 AEGON_CHAIN_GROUPS=8 AEGON_SHARD_LOG_CAPACITY=5 \
+///     cargo run --release -p akd --features ivc_audit \
+///     --example ivc_audit_grouped_e2e
+/// ```
+///
+/// `AEGON_SHARD_LOG_CAPACITY` is what makes the full-width run cheap.
+/// The audit consumes four group elements per shard and nothing else,
+/// so its cost is independent of how much dictionary each shard
+/// holds — which is itself one of the paper's claims. A 128-shard
+/// deployment with tiny shards therefore produces exactly the
+/// commitment structure a planetary one does, on a single machine.
+fn env_usize(key: &str, default: usize) -> usize {
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
+}
 
 fn main() {
     println!("── group-sharded IVC audit against a real ShardedAegon publish ──");
 
-    let n_shards = 1usize << LOG_N_SHARDS;
-    let plan = GroupPlan::new(n_shards, CHAIN_GROUPS).expect("plan");
+    let log_n_shards = env_usize("AEGON_LOG_N_SHARDS", 2);
+    let chain_groups = env_usize("AEGON_CHAIN_GROUPS", 2);
+    let epochs = env_usize("AEGON_EPOCHS", 3);
+    let shard_log_capacity = env_usize("AEGON_SHARD_LOG_CAPACITY", 10);
+
+    let n_shards = 1usize << log_n_shards;
+    let plan = GroupPlan::new(n_shards, chain_groups).expect("plan");
 
     // A hiding SRS, so the value chain carries a real Schnorr
     // re-randomisation proof per shard -- the case the circuit's
     // sigma block exists for.
     let cfg: ShardedAegonConfig<Bn254, Pcs> = ShardedAegonConfig::<Bn254, Pcs>::builder()
-        .shard_log_capacity(LOG_CAPACITY - LOG_N_SHARDS)
-        .log_n_shards(LOG_N_SHARDS)
+        .shard_log_capacity(shard_log_capacity)
+        .log_n_shards(log_n_shards)
         .private(true)
         .kzh_k(2)
         .shards(ShardTransport::InProcess)
@@ -74,7 +97,7 @@ fn main() {
         .audit_fs(poseidon_audit_fs())
         // The one line that changes the protocol: derive chain
         // scalars per group instead of directory-wide.
-        .chain_groups(CHAIN_GROUPS)
+        .chain_groups(chain_groups)
         .build()
         .expect("config builds");
 
@@ -84,13 +107,13 @@ fn main() {
     server.set_vrf_prover(VrfProver::from_seed(&BENCH_VRF_SEED));
 
     let ctx = server.sharded_verifier_context();
-    assert_eq!(ctx.chain_groups, CHAIN_GROUPS, "context carries the partition");
+    assert_eq!(ctx.chain_groups, chain_groups, "context carries the partition");
     let h = ctx.inner.verifier_param.get_h();
     let genesis = server.epoch_commitment(0).expect("epoch-0 commit retained");
 
     // ---- publish a few real epochs ------------------------------------
     let mut chain = vec![genesis.clone()];
-    for e in 0..EPOCHS {
+    for e in 0..epochs {
         let updates: Vec<(Vec<u8>, Vec<u8>)> = (0..4)
             .map(|i| {
                 (
@@ -102,8 +125,8 @@ fn main() {
         chain.push(server.publish_two_layer(&updates).expect("publish"));
     }
     println!(
-        "  published {EPOCHS} epochs across {n_shards} shards in {CHAIN_GROUPS} chain groups \
-         ({} shards/group).",
+        "  published {epochs} epochs across {n_shards} shards in {chain_groups} chain groups \
+         ({} shards/group, shard_log_capacity={shard_log_capacity}).",
         plan.shards_per_group()
     );
 
@@ -113,14 +136,14 @@ fn main() {
     // else about it is unchanged -- and its aggregate cost is too;
     // grouping buys the recursive auditor, not this one.
     {
-        let mut audit_state = ShardedAuditState::<Fr>::with_groups(CHAIN_GROUPS);
+        let mut audit_state = ShardedAuditState::<Fr>::with_groups(chain_groups);
         for w in chain.windows(2) {
             let ok = verify_sharded_invariance(&ctx, &mut audit_state, &w[0], &w[1])
                 .expect("classic audit");
             assert!(ok, "honest transition must pass the classic audit");
         }
     }
-    println!("  ✓ classic per-epoch audit accepts the whole chain, tracking {CHAIN_GROUPS} chains.");
+    println!("  ✓ classic per-epoch audit accepts the whole chain, tracking {chain_groups} chains.");
 
     // A verifier configured for the *wrong* partition must fail
     // rather than quietly accept: it would absorb a different set of
@@ -155,9 +178,9 @@ fn main() {
         let sigmas = epoch_sigma_witnesses(next).expect("every shard carries a sigma proof");
         let t = Instant::now();
         prover.fold_epoch(&shards, &sigmas).expect("fold epoch");
-        println!("  folded epoch {} across {CHAIN_GROUPS} groups in {:.2?}", i + 1, t.elapsed());
+        println!("  folded epoch {} across {chain_groups} groups in {:.2?}", i + 1, t.elapsed());
     }
-    assert_eq!(prover.num_steps(), EPOCHS);
+    assert_eq!(prover.num_steps(), epochs);
 
     // ---- (3) verify every group ---------------------------------------
     let latest = chain.last().expect("non-empty");
@@ -174,7 +197,7 @@ fn main() {
     )
     .expect("grouped audit verifies");
     println!(
-        "  ✓ {CHAIN_GROUPS} verifications covered {} epochs in {:.2?}.",
+        "  ✓ {chain_groups} verifications covered {} epochs in {:.2?}.",
         verified.epochs,
         t.elapsed()
     );
@@ -184,10 +207,10 @@ fn main() {
     let t = Instant::now();
     let published = prover.compress_all(&pk).expect("compress");
     println!(
-        "  compressed {CHAIN_GROUPS} groups in {:.2?} -> {:.2} KB total ({:.2} KB/group)",
+        "  compressed {chain_groups} groups in {:.2?} -> {:.2} KB total ({:.2} KB/group)",
         t.elapsed(),
         published.size_bytes() as f64 / 1024.0,
-        published.size_bytes() as f64 / 1024.0 / CHAIN_GROUPS as f64,
+        published.size_bytes() as f64 / 1024.0 / chain_groups as f64,
     );
 
     let t = Instant::now();
@@ -230,7 +253,7 @@ fn main() {
             &published,
             prover.num_steps(),
             &genesis_shards,
-            &epoch_commitments(&chain[EPOCHS - 1]),
+            &epoch_commitments(&chain[epochs - 1]),
         )
         .is_err(),
         "proof must be bound to the epoch it describes"
