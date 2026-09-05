@@ -569,3 +569,4 @@ fn more_groups_means_a_proportionally_smaller_circuit() {
          {marginal_hi} vs {marginal_lo}"
     );
 }
+

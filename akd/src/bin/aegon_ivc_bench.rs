@@ -40,7 +40,8 @@ use akd::aegon::ivc::grouped::{
     GroupedIvcAuditProver,
 };
 use akd::aegon::ivc::synthetic::{
-    as_sharded_epoch_commitment, genesis, honest_chain, honest_grouped_chain, rng, Pcs,
+    as_sharded_epoch_commitment, genesis, honest_chain, honest_grouped_chain, rand_point, rng,
+    Pcs,
 };
 use akd::aegon::ivc::verifier::verify_compressed_ivc_audit;
 use akd::aegon::{verify_sharded_invariance, ShardedAuditState, ShardedVerifierContext, VerifierContext};
@@ -80,6 +81,12 @@ struct Args {
     /// proof size and, above all, VERIFY time.
     #[arg(long)]
     snark_compare: bool,
+    /// Isolate what the Poseidon audit-FS costs the *classic*
+    /// auditor, against the SHA256 derivation it replaces, on this
+    /// machine. Times only the Fiat-Shamir work, so the answer is not
+    /// confounded by hardware or dictionary fill.
+    #[arg(long)]
+    fs_compare: bool,
     /// Number of independent Fiat-Shamir chain groups to audit under.
     ///
     /// Applies to every mode. `1` (the default) is a single chain
@@ -223,6 +230,11 @@ fn main() {
 
     if args.snark_compare {
         snark_compare(&args, h);
+        return;
+    }
+
+    if args.fs_compare {
+        fs_compare(&args);
         return;
     }
 
@@ -725,5 +737,116 @@ fn snark_compare(args: &Args, h: G1Affine) {
          cannot remove is the polynomial-commitment opening check, and ours is IPA -- linear in\n\
          the circuit -- because the primary curve is Grumpkin, which has no pairing. Watch whether\n\
          `mn VERIFY` is flat in `shards` or still tracks it."
+    );
+}
+
+/// What the Poseidon audit-FS costs, measured against the SHA256
+/// derivation it replaces, on one machine.
+///
+/// The IVC path needs its Fiat-Shamir recomputed inside the folding
+/// circuit, and SHA256 there would cost ~4M constraints per epoch. So
+/// the audit-path derivations moved to Poseidon. That is a change to
+/// the *existing* auditor too, and its cost belongs in the paper next
+/// to the IVC numbers rather than buried.
+///
+/// Per epoch the audit performs two chain-scalar derivations (index
+/// and value, each absorbing every shard's commitment) and one sigma
+/// challenge per shard. Everything else about the audit -- the group
+/// arithmetic, the SHA256 Merkle root -- is untouched by the switch,
+/// so timing just these isolates the delta.
+fn fs_compare(args: &Args) {
+    use akd::aegon::audit_fs::AuditFsHooks;
+    use akd_core::aegon_crypto::pcs::kzhk::structs::KZHKCommitment;
+
+    let n: usize = args
+        .shards
+        .split(',')
+        .next()
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(128);
+
+    let mut r = rng(0xF5_C0FF);
+    let commits: Vec<KZHKCommitment<Bn254>> = (0..n)
+        .map(|_| KZHKCommitment::new(rand_point(&mut r), args.num_vars))
+        .collect();
+    let one = KZHKCommitment::new(rand_point(&mut r), args.num_vars);
+    let prev = Fr::rand(&mut r);
+
+    let sha = AuditFsHooks::<Bn254, Pcs>::sha256();
+    let pos = akd::aegon::ivc::adapter::poseidon_audit_fs();
+
+    // Enough repetitions that a single epoch's worth of work is well
+    // above timer resolution.
+    const REPS: usize = 20;
+
+    // Warm up. The Poseidon constants are generated once per process
+    // behind a `OnceLock`, and that generation is expensive enough
+    // that amortising it over REPS shows up as a fixed offset of
+    // several milliseconds -- which would be charged to the FS
+    // derivation it is not part of. A real auditor pays it once at
+    // startup, never per epoch.
+    for _ in 0..3 {
+        std::hint::black_box(pos.chain_scalar(b"aegon.sharded.fs.r_index", prev, &commits));
+        std::hint::black_box(pos.sigma_challenge(&one, &one, &one, &one, prev, &one));
+        std::hint::black_box(sha.chain_scalar(b"aegon.sharded.fs.r_index", prev, &commits));
+        std::hint::black_box(sha.sigma_challenge(&one, &one, &one, &one, prev, &one));
+    }
+
+    let bench_chain = |hooks: &AuditFsHooks<Bn254, Pcs>| {
+        let t = Instant::now();
+        for _ in 0..REPS {
+            std::hint::black_box(hooks.chain_scalar(
+                b"aegon.sharded.fs.r_index",
+                prev,
+                &commits,
+            ));
+            std::hint::black_box(hooks.chain_scalar(
+                b"aegon.sharded.fs.r_value",
+                prev,
+                &commits,
+            ));
+        }
+        t.elapsed() / REPS as u32
+    };
+
+    let bench_sigma = |hooks: &AuditFsHooks<Bn254, Pcs>| {
+        let t = Instant::now();
+        for _ in 0..REPS {
+            for c in &commits {
+                std::hint::black_box(hooks.sigma_challenge(c, c, &one, &one, prev, &one));
+            }
+        }
+        t.elapsed() / REPS as u32
+    };
+
+    let sha_chain = bench_chain(&sha);
+    let pos_chain = bench_chain(&pos);
+    let sha_sigma = bench_sigma(&sha);
+    let pos_sigma = bench_sigma(&pos);
+
+    let sha_total = sha_chain + sha_sigma;
+    let pos_total = pos_chain + pos_sigma;
+
+    println!("audit-path Fiat-Shamir: SHA256 vs Poseidon  (shards={n}, num_vars={})\n", args.num_vars);
+    println!("{:>34} {:>13} {:>13} {:>10}", "per epoch", "SHA256", "Poseidon", "ratio");
+    println!("{}", "-".repeat(74));
+    let row = |label: &str, a: Duration, b: Duration| {
+        println!(
+            "{:>34} {:>13} {:>13} {:>10}",
+            label,
+            format!("{:.3?}", a),
+            format!("{:.3?}", b),
+            format!("{:.2}x", b.as_secs_f64() / a.as_secs_f64().max(1e-12)),
+        );
+    };
+    row("2 chain scalars (all shards)", sha_chain, pos_chain);
+    row(&format!("{n} sigma challenges"), sha_sigma, pos_sigma);
+    row("TOTAL FS work per epoch", sha_total, pos_total);
+
+    println!(
+        "\nThis is the whole delta the Poseidon switch introduces for the classic auditor:\n\
+         everything else it does -- the commitment-homomorphism group arithmetic and the\n\
+         SHA256 Merkle root -- is byte-for-byte unchanged. Subtract the SHA256 column from\n\
+         `classic/ep` and add the Poseidon one to convert between the two configurations."
     );
 }
