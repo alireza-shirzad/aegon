@@ -41,10 +41,18 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["e
 [workspace.metadata.docs.rs]
 rustdoc-args = ["--html-in-header", "../docs-header.html"]
 
+# Pinned to exact revisions. These patches previously tracked git HEAD,
+# so a fresh clone resolved to whatever had landed upstream that day --
+# `Cargo.lock` is gitignored, so nothing else held the resolution still.
+# For a workspace whose published results are timing measurements of
+# field and curve arithmetic, that silently makes benchmarks
+# irreproducible across machines and across time.
+#
+# Bump deliberately, and re-run the benchmarks when you do.
 [patch.crates-io]
-ark-std = { git = "https://github.com/arkworks-rs/std" }
-ark-poly = { git = "https://github.com/arkworks-rs/algebra.git" }
-ark-ff = { git = "https://github.com/arkworks-rs/algebra.git" }
-ark-ec = { git = "https://github.com/arkworks-rs/algebra.git" }
-ark-serialize = { git = "https://github.com/arkworks-rs/algebra.git" }
-ark-bn254 = { git = "https://github.com/arkworks-rs/algebra.git" }
+ark-std = { git = "https://github.com/arkworks-rs/std", rev = "1693bc56d2ca6657b623f33a3f0b009d0ffeb892" }
+ark-poly = { git = "https://github.com/arkworks-rs/algebra.git", rev = "598a5fbabc1903c7bab6668ef8812bfdf2158723" }
+ark-ff = { git = "https://github.com/arkworks-rs/algebra.git", rev = "598a5fbabc1903c7bab6668ef8812bfdf2158723" }
+ark-ec = { git = "https://github.com/arkworks-rs/algebra.git", rev = "598a5fbabc1903c7bab6668ef8812bfdf2158723" }
+ark-serialize = { git = "https://github.com/arkworks-rs/algebra.git", rev = "598a5fbabc1903c7bab6668ef8812bfdf2158723" }
+ark-bn254 = { git = "https://github.com/arkworks-rs/algebra.git", rev = "598a5fbabc1903c7bab6668ef8812bfdf2158723" }
