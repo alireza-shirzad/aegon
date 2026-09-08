@@ -428,9 +428,36 @@ benchmarks:
 
 | Test | Status |
 | :--- | :--- |
-| `sharded_aegon::*_history_round_trip` (3) | **Known failure.** Value-history round-trip returns 0 entries against the Rocks backend where 2 are expected. Not diagnosed. |
+| `sharded_aegon::*_history_round_trip` (3) | **Known failure** — value history is unimplemented for in-process shards; see below. |
 | `grpc_sharded::*` (3) | **Known failure.** The harness starts the gRPC shard without a KV backend, so `FetchValue` fails. Needs a `DbSource` attached in the test setup. |
 | `univariate_polynomial::test_build_l*` (2) | **Known failure.** Vendored HyperPlonk helper with no caller in Aegon; does not affect the KZH-k path. |
+
+#### Value history is unimplemented for in-process shards
+
+A regression, introduced by `c152aa5` (2026-06-25). Value history used to live
+in the coordinator's DB, and `ShardedAegon::lookup_history` read it there
+directly. That commit moved it to per-shard DBs behind
+`ShardHandle::fetch_full_value_history`. Only the gRPC shard implements that
+method: it reads its own store with `lrange`. The in-process shard implements
+neither half —
+
+* reads fall through to the trait default,
+  `fn fetch_value_history(..) -> Ok(Vec::new())` in `shard_grpc.rs`;
+* writes are discarded by the `|_chunk| Ok(())` sink in
+  `impl ShardHandle for Aegon`, because the `Aegon` struct has no DB field.
+
+So `ShardTransport::InProcess` returns empty history at *any* `DbSource`; the
+`DbSource` in an in-process config only configures the coordinator. The three
+tests were written before the move, passed then, and have failed since — there
+was no CI to notice.
+
+**Cluster deployments are unaffected.** The benchmark scripts pass
+`--endpoints`, which selects `ShardTransport::Remote`, where both halves are
+implemented.
+
+Fixing it means giving the in-process shard a DB handle (or routing its writes
+and reads back through the coordinator's). That is a design choice about what
+`DbSource` should mean for in-process deployments, so it is left open.
 
 The upstream SEEMless/Merkle suites (`append_only_zks::tests` and
 `akd::tests`, 74 tests) are behind the off-by-default `upstream_tests`
