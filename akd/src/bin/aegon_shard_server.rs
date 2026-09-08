@@ -1,3 +1,8 @@
+// Copyright (c) The Aegon Authors.
+//
+// This source code is licensed under the MIT license found in the
+// LICENSE file in the root directory of this source tree.
+
 //! `aegon_shard_server` — one gRPC shard for the sharded Aegon
 //! cluster. Operators deploy one per shard machine; the coordinator
 //! connects to N of them over the network.
@@ -19,10 +24,10 @@ use akd::aegon::distributed_srs::{
     run_distributed_compute, try_cache_hit, Phase, SrsBootstrapConfig, SrsBootstrapState,
     SrsServer as SrsGrpcServer,
 };
+use akd::aegon::hash::VrfProver;
 use akd::aegon::server::load_aegon_checkpoint_from_db;
 use akd::aegon::shard_grpc::{ShardServer, ShardServerTlsConfig};
 use akd::aegon::sharded::read_srs_from_file;
-use akd::aegon::hash::VrfProver;
 use akd::aegon::{AegonConfig, DbSource, EcVrfHash};
 use akd_core::aegon_crypto::pcs::kzhk::structs::KZHKConfig;
 use akd_core::aegon_crypto::pcs::kzhk::KZHK;
@@ -169,7 +174,12 @@ struct Args {
     /// `--shard-id`. Mutually exclusive with `--srs-path` (file-backed
     /// SRS path) — `--srs-bind` triggers the distributed-gen path
     /// exclusively.
-    #[arg(long, requires = "setup_seed", requires = "shard_id", conflicts_with = "srs_path")]
+    #[arg(
+        long,
+        requires = "setup_seed",
+        requires = "shard_id",
+        conflicts_with = "srs_path"
+    )]
     srs_bind: Option<SocketAddr>,
 
     /// Cache directory for the distributed-gen SRS path. Each shard
@@ -226,7 +236,7 @@ async fn main() -> ExitCode {
         (Some(_), Some(_)) => {
             eprintln!("error: --db-url and --db-path are mutually exclusive");
             return ExitCode::from(2);
-        },
+        }
     };
     let shard_id = args.shard_id.unwrap_or(0);
 
@@ -239,13 +249,14 @@ async fn main() -> ExitCode {
     // the main control flow below (which polls it for trapdoors and
     // publishes local slabs as they're computed).
     let srs_state: Option<Arc<SrsBootstrapState<Bn254>>> = if let Some(addr) = args.srs_bind {
-        let seed = args.setup_seed.expect("--srs-bind requires --setup-seed (checked by clap)");
+        let seed = args
+            .setup_seed
+            .expect("--srs-bind requires --setup-seed (checked by clap)");
         let cache_dir = args
             .srs_cache_dir
             .clone()
             .or_else(|| {
-                std::env::var_os("HOME")
-                    .map(|h| PathBuf::from(h).join(".cache").join("aegon-srs"))
+                std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache").join("aegon-srs"))
             })
             .unwrap_or_else(|| PathBuf::from(".aegon-srs-cache"));
         eprintln!(
@@ -281,7 +292,7 @@ async fn main() -> ExitCode {
         None
     };
 
-    let mut aegon = match (&args.srs_path, args.setup_seed, &srs_state) {
+    let aegon = match (&args.srs_path, args.setup_seed, &srs_state) {
         // --srs-bind path: distributed gen (or cache hit) via the
         // bootstrap actor + peers. This is the production-grade path.
         (None, Some(_seed), Some(state)) => {
@@ -290,7 +301,7 @@ async fn main() -> ExitCode {
                 Ok(Some((_up, pk, vk))) => {
                     eprintln!("[distributed-gen] cache hit; skipping bootstrap handshake");
                     build_aegon_from_srs(pk, vk, &aegon_cfg, &db_source, shard_id)
-                },
+                }
                 Ok(None) => {
                     eprintln!(
                         "[distributed-gen] cache miss — awaiting BootstrapSrs from bootstrap actor"
@@ -299,19 +310,19 @@ async fn main() -> ExitCode {
                         Ok((_up, pk, vk)) => {
                             eprintln!("[distributed-gen] SRS assembled + cached");
                             build_aegon_from_srs(pk, vk, &aegon_cfg, &db_source, shard_id)
-                        },
+                        }
                         Err(e) => {
                             eprintln!("[distributed-gen] error: {e}");
                             return ExitCode::from(1);
-                        },
+                        }
                     }
-                },
+                }
                 Err(e) => {
                     eprintln!("[distributed-gen] cache read error: {e}");
                     return ExitCode::from(1);
-                },
+                }
             }
-        },
+        }
         // --srs-path path: load a pre-existing SRS file (production
         // path without distributed gen — typically a trusted-setup
         // ceremony output).
@@ -322,10 +333,10 @@ async fn main() -> ExitCode {
                 Err(e) => {
                     eprintln!("error loading SRS: {e}");
                     return ExitCode::from(1);
-                },
+                }
             };
             build_aegon_from_srs(pk, vk, &aegon_cfg, &db_source, shard_id)
-        },
+        }
         // Legacy in-process gen via seed (no --srs-bind). Test mode.
         (None, Some(seed), None) => {
             eprintln!("WARNING: generating SRS in-process from seed {seed} (test mode only)");
@@ -334,7 +345,7 @@ async fn main() -> ExitCode {
                 Ok(a) => Ok(a),
                 Err(e) => Err(format!("setup: {e}")),
             }
-        },
+        }
         (None, None, _) => unreachable!("checked above"),
     };
     let mut aegon = match aegon {
@@ -342,7 +353,7 @@ async fn main() -> ExitCode {
         Err(e) => {
             eprintln!("error initializing Aegon: {e}");
             return ExitCode::from(1);
-        },
+        }
     };
     akd::aegon::instrument::log_rss("post_aegon_init");
 
@@ -353,7 +364,9 @@ async fn main() -> ExitCode {
     // publishes — the epoch-0 snapshot that Aegon::setup just inserted
     // already has its polys populated (cheap; both are empty there).
     if args.no_retain_epoch_polys {
-        eprintln!("shard config: retain_epoch_polys=false (consistency_proof at old epochs disabled)");
+        eprintln!(
+            "shard config: retain_epoch_polys=false (consistency_proof at old epochs disabled)"
+        );
         aegon.set_retain_epoch_polys(false);
     }
 
@@ -367,9 +380,7 @@ async fn main() -> ExitCode {
     // Distributed-gen path advances phase as we work through init +
     // prefill so any `WaitForReady` poll has a useful status string.
     if let Some(state) = &srs_state {
-        state
-            .set_phase(Phase::Initializing, "post-init")
-            .await;
+        state.set_phase(Phase::Initializing, "post-init").await;
     }
 
     // Cluster path: if --masking-addr is set, swap out Aegon's
@@ -380,7 +391,7 @@ async fn main() -> ExitCode {
     // kept when no remote endpoint is configured (e.g. single-shard
     // dev).
     match args.masking_addr.len() {
-        0 => {},
+        0 => {}
         1 => {
             let addr = &args.masking_addr[0];
             eprintln!("connecting to masking server at {addr}");
@@ -389,21 +400,27 @@ async fn main() -> ExitCode {
                 Err(e) => {
                     eprintln!("error connecting to masking server '{addr}': {e}");
                     return ExitCode::from(1);
-                },
+                }
             }
-        },
+        }
         n => {
-            eprintln!("connecting to {n} masking servers (round-robin): {:?}", args.masking_addr);
+            eprintln!(
+                "connecting to {n} masking servers (round-robin): {:?}",
+                args.masking_addr
+            );
             match akd::aegon::masking::MaskingClientPool::<Bn254, Pcs>::connect_all(
                 &args.masking_addr,
             ) {
                 Ok(pool) => aegon.set_masking_source(std::sync::Arc::new(pool)),
                 Err(e) => {
-                    eprintln!("error connecting to masking pool {:?}: {e}", args.masking_addr);
+                    eprintln!(
+                        "error connecting to masking pool {:?}: {e}",
+                        args.masking_addr
+                    );
                     return ExitCode::from(1);
-                },
+                }
             }
-        },
+        }
     }
 
     // Benchmark-only prefill. Runs after setup but before binding the
@@ -414,18 +431,14 @@ async fn main() -> ExitCode {
     if let Some(count) = args.prefill_count {
         if count > 0 {
             if let Some(state) = &srs_state {
-                state
-                    .set_phase(Phase::Prefilling, "prefilling")
-                    .await;
+                state.set_phase(Phase::Prefilling, "prefilling").await;
             }
             eprintln!(
                 "prefilling shard with {count} random entries (seed={})",
                 args.prefill_seed
             );
             let mut prefill_rng = ChaCha20Rng::seed_from_u64(args.prefill_seed);
-            if let Err(e) =
-                aegon.prefill_random(&mut prefill_rng, count, &db_source, shard_id)
-            {
+            if let Err(e) = aegon.prefill_random(&mut prefill_rng, count, &db_source, shard_id) {
                 eprintln!("error prefilling shard: {e}");
                 return ExitCode::from(1);
             }
@@ -446,7 +459,7 @@ async fn main() -> ExitCode {
             Err(e) => {
                 eprintln!("error loading TLS material: {e}");
                 return ExitCode::from(1);
-            },
+            }
         },
         _ => None,
     };
@@ -471,7 +484,7 @@ async fn main() -> ExitCode {
             Err(e) => {
                 eprintln!("error wiring shard checkpoint sink: {e}");
                 return ExitCode::from(1);
-            },
+            }
         }
     } else {
         ShardServer::<Bn254, Pcs, EcVrfHash>::new(aegon)
@@ -508,7 +521,7 @@ fn build_aegon_from_srs(
             );
             Aegon::restore_from_checkpoint(pk, vk, aegon_cfg, ckpt)
                 .map_err(|e| format!("restore_from_checkpoint: {e}"))
-        },
+        }
         None => Aegon::init(pk, vk, aegon_cfg).map_err(|e| format!("init: {e}")),
     }
 }

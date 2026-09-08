@@ -1,3 +1,8 @@
+// Copyright (c) The Aegon Authors.
+//
+// This source code is licensed under the MIT license found in the
+// LICENSE file in the root directory of this source tree.
+
 //! Hash suite for Aegon.
 //!
 //! Aegon's index assignment relies on two hash functions (paper §5.1):
@@ -327,8 +332,8 @@ fn load_or_create_seed_file(path: &str) -> [u8; 32] {
     // mode 0600. Read from /dev/urandom directly to avoid pulling in
     // a new feature-gated dependency on `rand`.
     let mut buf = [0u8; 32];
-    let mut urandom = fs::File::open("/dev/urandom")
-        .expect("/dev/urandom available for VRF key generation");
+    let mut urandom =
+        fs::File::open("/dev/urandom").expect("/dev/urandom available for VRF key generation");
     urandom
         .read_exact(&mut buf)
         .expect("read 32 bytes from /dev/urandom");
@@ -353,8 +358,7 @@ fn vrf_secret_key() -> &'static akd_core::ecvrf::VRFPrivateKey {
     static KEY: OnceLock<VRFPrivateKey> = OnceLock::new();
     KEY.get_or_init(|| {
         let seed = load_seed_from_env().unwrap_or(BENCH_VRF_SEED);
-        VRFPrivateKey::try_from(seed.as_slice())
-            .expect("32-byte seed is a valid Ed25519 secret")
+        VRFPrivateKey::try_from(seed.as_slice()).expect("32-byte seed is a valid Ed25519 secret")
     })
 }
 
@@ -481,12 +485,7 @@ impl VrfProver {
     /// one scalar multiplication versus `prove`'s three plus a Fiat-
     /// Shamir hash. Use this on the publish path where the proof is
     /// never serialized to the wire.
-    pub fn evaluate_h_shard(
-        &self,
-        shard_ctr: u64,
-        label: &[u8],
-        num_vars: usize,
-    ) -> Vec<bool> {
+    pub fn evaluate_h_shard(&self, shard_ctr: u64, label: &[u8], num_vars: usize) -> Vec<bool> {
         if num_vars == 0 {
             return Vec::new();
         }
@@ -497,33 +496,17 @@ impl VrfProver {
     /// the rationale — used by the shard's open-addressing probe loop
     /// where the slot bits are recomputable by anyone re-running the
     /// VRF, so the proof is never persisted.
-    pub fn evaluate_h_slot(
-        &self,
-        slot_ctr: u64,
-        label: &[u8],
-        num_vars: usize,
-    ) -> Vec<bool> {
+    pub fn evaluate_h_slot(&self, slot_ctr: u64, label: &[u8], num_vars: usize) -> Vec<bool> {
         self.evaluate_with_tag(b"aegon.h_slot", slot_ctr, label, num_vars)
     }
 
     /// Bits-only variant of `prove_h_bits` — used by the legacy single-
     /// layer code paths when the proof would be discarded.
-    pub fn evaluate_h_bits(
-        &self,
-        ctr: u64,
-        label: &[u8],
-        num_vars: usize,
-    ) -> Vec<bool> {
+    pub fn evaluate_h_bits(&self, ctr: u64, label: &[u8], num_vars: usize) -> Vec<bool> {
         self.evaluate_with_tag(b"aegon.h_bits", ctr, label, num_vars)
     }
 
-    fn evaluate_with_tag(
-        &self,
-        tag: &[u8],
-        ctr: u64,
-        label: &[u8],
-        num_vars: usize,
-    ) -> Vec<bool> {
+    fn evaluate_with_tag(&self, tag: &[u8], ctr: u64, label: &[u8], num_vars: usize) -> Vec<bool> {
         let alpha = vrf_alpha_with_tag(tag, ctr, label);
         let output = self.sk.evaluate(&alpha);
         output_to_bits(&output.to_bytes(), num_vars)
@@ -730,12 +713,7 @@ impl EcVrfHash {
     /// VRF output is bit-identical (both derive from the same
     /// `gamma = h_point * sk`), so any caller that discards the
     /// proof can use this directly.
-    fn evaluate_with_tag(
-        tag: &[u8],
-        ctr: u64,
-        label: &[u8],
-        num_vars: usize,
-    ) -> Vec<bool> {
+    fn evaluate_with_tag(tag: &[u8], ctr: u64, label: &[u8], num_vars: usize) -> Vec<bool> {
         let alpha = vrf_alpha_with_tag(tag, ctr, label);
         let output = vrf_secret_key().evaluate(&alpha);
         output_to_bits(&output.to_bytes(), num_vars)
@@ -792,8 +770,9 @@ mod ecvrf_tests {
         let bits = output_to_bits(&bytes, 12);
         assert_eq!(bits.len(), 12);
         // Little-endian per byte: bit 0 of 0xA5 = 1, bit 1 = 0, ...
-        let expected = [true, false, true, false, false, true, false, true,
-                        true, false, true, false]; // first byte then first 4 bits of next
+        let expected = [
+            true, false, true, false, false, true, false, true, true, false, true, false,
+        ]; // first byte then first 4 bits of next
         assert_eq!(bits, expected);
     }
 
@@ -869,14 +848,23 @@ mod ecvrf_tests {
         let prover = VrfProver::from_seed(&BENCH_VRF_SEED);
         let label = b"replay-attacker@example.com";
         for ctr in 0u64..3 {
-            let (bits_bits,  proof_bits)  = prover.prove_h_bits(ctr,  label, 27);
+            let (bits_bits, proof_bits) = prover.prove_h_bits(ctr, label, 27);
             let (bits_shard, proof_shard) = prover.prove_h_shard(ctr, label, 27);
-            let (bits_slot,  proof_slot)  = prover.prove_h_slot(ctr,  label, 27);
-            assert_ne!(bits_bits,  bits_shard, "h_bits vs h_shard collide at ctr={ctr}");
-            assert_ne!(bits_bits,  bits_slot,  "h_bits vs h_slot collide at ctr={ctr}");
-            assert_ne!(bits_shard, bits_slot,  "h_shard vs h_slot collide at ctr={ctr}");
-            assert_ne!(proof_bits,  proof_shard);
-            assert_ne!(proof_bits,  proof_slot);
+            let (bits_slot, proof_slot) = prover.prove_h_slot(ctr, label, 27);
+            assert_ne!(
+                bits_bits, bits_shard,
+                "h_bits vs h_shard collide at ctr={ctr}"
+            );
+            assert_ne!(
+                bits_bits, bits_slot,
+                "h_bits vs h_slot collide at ctr={ctr}"
+            );
+            assert_ne!(
+                bits_shard, bits_slot,
+                "h_shard vs h_slot collide at ctr={ctr}"
+            );
+            assert_ne!(proof_bits, proof_shard);
+            assert_ne!(proof_bits, proof_slot);
             assert_ne!(proof_shard, proof_slot);
         }
     }
@@ -893,7 +881,9 @@ mod ecvrf_tests {
             assert_eq!(bits, recovered);
             // An h_bits-encoded proof must not verify under h_shard.
             let (_, wrong_layer) = prover.prove_h_bits(ctr, label, 7);
-            assert!(verifier.verify_h_shard(ctr, label, &wrong_layer, 7).is_err());
+            assert!(verifier
+                .verify_h_shard(ctr, label, &wrong_layer, 7)
+                .is_err());
         }
     }
 
@@ -910,7 +900,9 @@ mod ecvrf_tests {
             // Cross-layer rejection: an h_shard proof must not verify
             // under h_slot for the same (ctr, label).
             let (_, wrong_layer) = prover.prove_h_shard(ctr, label, 22);
-            assert!(verifier.verify_h_slot(ctr, label, &wrong_layer, 22).is_err());
+            assert!(verifier
+                .verify_h_slot(ctr, label, &wrong_layer, 22)
+                .is_err());
         }
     }
 

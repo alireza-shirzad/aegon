@@ -1,3 +1,8 @@
+// Copyright (c) The Aegon Authors.
+//
+// This source code is licensed under the MIT license found in the
+// LICENSE file in the root directory of this source tree.
+
 //! End-to-end integration test for the production-shape ECVRF wiring.
 //!
 //! Exercises:
@@ -14,7 +19,7 @@
 //!      will carry once the proto fields are added.
 
 use akd::aegon::{
-    BENCH_VRF_SEED, EcVrfHash, HashSuite, Sha256Hash, VrfProver, VrfVerifier, VrfVerifyError,
+    EcVrfHash, HashSuite, Sha256Hash, VrfProver, VrfVerifier, VrfVerifyError, BENCH_VRF_SEED,
     VRF_PROOF_BYTES, VRF_PUBLIC_KEY_BYTES,
 };
 use ark_bn254::Fr;
@@ -37,7 +42,10 @@ fn main() {
         b.copy_from_slice(prover.public_key().as_bytes());
         b
     };
-    must("public key is 32 bytes", pk_bytes.len() == VRF_PUBLIC_KEY_BYTES);
+    must(
+        "public key is 32 bytes",
+        pk_bytes.len() == VRF_PUBLIC_KEY_BYTES,
+    );
 
     let verifier = VrfVerifier::from_public_key_bytes(&pk_bytes).expect("pk parses");
 
@@ -46,13 +54,22 @@ fn main() {
     let num_vars = 27usize;
 
     let (bits_server, proof) = prover.prove_h_bits(0, label, num_vars);
-    must("proof is exactly 80 bytes (RFC 9381)", proof.len() == VRF_PROOF_BYTES);
-    must("server bits length matches num_vars", bits_server.len() == num_vars);
+    must(
+        "proof is exactly 80 bytes (RFC 9381)",
+        proof.len() == VRF_PROOF_BYTES,
+    );
+    must(
+        "server bits length matches num_vars",
+        bits_server.len() == num_vars,
+    );
 
     let bits_client = verifier
         .verify_h_bits(0, label, &proof, num_vars)
         .expect("honest proof verifies");
-    must("client recovers exact same bits", bits_client == bits_server);
+    must(
+        "client recovers exact same bits",
+        bits_client == bits_server,
+    );
 
     // ---- 3. Adversarial: tampered proof byte. ----
     let mut bad = proof;
@@ -119,8 +136,7 @@ fn main() {
     // only the proofs (which carry the Edwards-curve hash-to-curve
     // output, not the raw bits) and cannot enumerate the per-label
     // index distribution offline.
-    let wire_bundle: Vec<[u8; VRF_PROOF_BYTES]> =
-        server_trail.iter().map(|(_, p)| *p).collect();
+    let wire_bundle: Vec<[u8; VRF_PROOF_BYTES]> = server_trail.iter().map(|(_, p)| *p).collect();
 
     // Client side: receive, verify, recover bits.
     for (ctr, proof) in wire_bundle.iter().enumerate() {

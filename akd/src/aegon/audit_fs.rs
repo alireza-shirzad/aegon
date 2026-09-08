@@ -1,3 +1,8 @@
+// Copyright (c) The Aegon Authors.
+//
+// This source code is licensed under the MIT license found in the
+// LICENSE file in the root directory of this source tree.
+
 //! Which hash the *audit path's* Fiat–Shamir derivations use.
 //!
 //! ## Why this is selectable at all
@@ -162,7 +167,9 @@ impl<E: Pairing, P: AegonPcs<E>> AuditFsHooks<E, P> {
         r_chain: E::ScalarField,
         r_commit: &P::Commitment,
     ) -> E::ScalarField {
-        (self.sigma_challenge)(prev_poly, next_poly, prev_rand, next_rand, r_chain, r_commit)
+        (self.sigma_challenge)(
+            prev_poly, next_poly, prev_rand, next_rand, r_chain, r_commit,
+        )
     }
 }
 

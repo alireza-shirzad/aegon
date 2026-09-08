@@ -1,3 +1,8 @@
+// Copyright (c) The Aegon Authors.
+//
+// This source code is licensed under the MIT license found in the
+// LICENSE file in the root directory of this source tree.
+
 //! End-to-end IVC auditing against a **real** `ShardedAegon` publish.
 //!
 //! The unit tests in `aegon::ivc` synthesise epoch transitions from
@@ -38,8 +43,8 @@ use akd::aegon::ivc::adapter::{
 use akd::aegon::ivc::prover::{IvcAuditParams, IvcAuditProver};
 use akd::aegon::ivc::verifier::{verify_against_merkle_root, verify_ivc_audit};
 use akd::aegon::{
-    merkle_root, verify_sharded_invariance, ShardedAuditState, DbSource, EcVrfHash, ShardTransport,
-    ShardedAegon, ShardedAegonConfig, VrfProver, BENCH_VRF_SEED,
+    merkle_root, verify_sharded_invariance, DbSource, EcVrfHash, ShardTransport, ShardedAegon,
+    ShardedAegonConfig, ShardedAuditState, VrfProver, BENCH_VRF_SEED,
 };
 use akd_core::aegon_crypto::pcs::kzhk::KZHK;
 use ark_bn254::{Bn254, Fr};
@@ -93,7 +98,10 @@ fn main() {
         let next = server.publish_two_layer(&updates).expect("publish");
         chain.push(next);
     }
-    println!("  published {EPOCHS} epochs across {} shards.", 1 << LOG_N_SHARDS);
+    println!(
+        "  published {EPOCHS} epochs across {} shards.",
+        1 << LOG_N_SHARDS
+    );
 
     // ---- (1) the classic per-epoch audit still accepts -----------------
     //

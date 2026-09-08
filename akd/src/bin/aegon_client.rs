@@ -1,3 +1,8 @@
+// Copyright (c) The Aegon Authors.
+//
+// This source code is licensed under the MIT license found in the
+// LICENSE file in the root directory of this source tree.
+
 //! `aegon_client` — minimal demo client for the coordinator.
 //!
 //! Connects to an `aegon_coordinator_server` over gRPC and walks the
@@ -113,7 +118,7 @@ fn main() -> ExitCode {
             Err(e) => {
                 eprintln!("error: read --srs-path {path:?}: {e}");
                 return ExitCode::from(1);
-            },
+            }
         };
         match <Pcs as PolynomialCommitmentScheme<Bn254>>::SRS::deserialize_uncompressed_unchecked(
             &bytes[..],
@@ -122,7 +127,7 @@ fn main() -> ExitCode {
             Err(e) => {
                 eprintln!("error: deserialize SRS: {e}");
                 return ExitCode::from(1);
-            },
+            }
         }
     } else {
         let seed = args.setup_seed.unwrap();
@@ -136,7 +141,7 @@ fn main() -> ExitCode {
             Err(e) => {
                 eprintln!("error: gen_srs_for_testing: {e}");
                 return ExitCode::from(1);
-            },
+            }
         }
     };
 
@@ -157,7 +162,7 @@ fn main() -> ExitCode {
         Err(e) => {
             eprintln!("error: connect: {e}");
             return ExitCode::from(1);
-        },
+        }
     };
 
     // 1. Pin the verification root.
@@ -166,7 +171,7 @@ fn main() -> ExitCode {
         Err(e) => {
             eprintln!("error: current_commitment: {e}");
             return ExitCode::from(1);
-        },
+        }
     };
     eprintln!("client: current commitment OK");
 
@@ -178,7 +183,7 @@ fn main() -> ExitCode {
         Err(e) => {
             eprintln!("error: lookup_label({:?}): {e}", args.label);
             return ExitCode::from(1);
-        },
+        }
     };
     eprintln!(
         "client: lookup_label OK in {:.1} ms → shard {}, slot len {}",
@@ -196,7 +201,7 @@ fn main() -> ExitCode {
             Err(e) => {
                 eprintln!("error: lookup_value_with_bytes: {e}");
                 return ExitCode::from(1);
-            },
+            }
         }
     } else {
         match client.lookup_value(&commit, &slot) {
@@ -212,11 +217,11 @@ fn main() -> ExitCode {
                     );
                 }
                 p
-            },
+            }
             Err(e) => {
                 eprintln!("error: lookup_value: {e}");
                 return ExitCode::from(1);
-            },
+            }
         }
     };
     eprintln!(

@@ -1,11 +1,9 @@
-This package is included here to support the automatic reporting of code coverage on 
-Github.
+This package supports local code-coverage reporting.
 
-## Current code coverage
-
-[![codecov](https://codecov.io/gh/facebook/akd/branch/main/graph/badge.svg?token=VFE82QWLTK)](https://codecov.io/gh/facebook/akd)
-
-<img src="https://codecov.io/gh/facebook/akd/branch/main/graphs/sunburst.svg?token=VFE82QWLTK">
+Coverage badges are not published for this repository. The upstream
+`facebook/akd` badges that previously appeared here pointed at Meta's
+Codecov project and did not reflect this fork's coverage, so they have
+been removed rather than left to mislead.
 
 ## Viewing code coverage locally
 

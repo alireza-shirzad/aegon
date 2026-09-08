@@ -1,3 +1,8 @@
+// Copyright (c) The Aegon Authors.
+//
+// This source code is licensed under the MIT license found in the
+// LICENSE file in the root directory of this source tree.
+
 //! The Nova step circuit: one Aegon epoch transition per folding step.
 //!
 //! ## The statement
@@ -292,32 +297,33 @@ impl StepCircuit<CircuitField> for AuditStepCircuit {
         )?;
 
         // ---- allocate the epoch's commitments ----------------------
-        let alloc_shards = |cs: &mut CS,
-                            tag: &str,
-                            shards: &[ShardCommitments]|
-         -> Result<Vec<[AllocatedPoint<PointEngine>; 4]>, SynthesisError> {
-            shards
-                .iter()
-                .enumerate()
-                .map(|(j, s)| {
-                    let pts = s.as_array();
-                    let names = ["index", "value", "rand_index", "rand_value"];
-                    let mut out = Vec::with_capacity(4);
-                    for (p, name) in pts.iter().zip(names) {
-                        out.push(alloc_point(
-                            cs.namespace(|| format!("{tag} shard {j} {name}")),
-                            ark_g1_to_coords(p),
-                        )?);
-                    }
-                    Ok([
-                        out[0].clone(),
-                        out[1].clone(),
-                        out[2].clone(),
-                        out[3].clone(),
-                    ])
-                })
-                .collect()
-        };
+        let alloc_shards =
+            |cs: &mut CS,
+             tag: &str,
+             shards: &[ShardCommitments]|
+             -> Result<Vec<[AllocatedPoint<PointEngine>; 4]>, SynthesisError> {
+                shards
+                    .iter()
+                    .enumerate()
+                    .map(|(j, s)| {
+                        let pts = s.as_array();
+                        let names = ["index", "value", "rand_index", "rand_value"];
+                        let mut out = Vec::with_capacity(4);
+                        for (p, name) in pts.iter().zip(names) {
+                            out.push(alloc_point(
+                                cs.namespace(|| format!("{tag} shard {j} {name}")),
+                                ark_g1_to_coords(p),
+                            )?);
+                        }
+                        Ok([
+                            out[0].clone(),
+                            out[1].clone(),
+                            out[2].clone(),
+                            out[3].clone(),
+                        ])
+                    })
+                    .collect()
+            };
         let prev = alloc_shards(cs, "prev", &w.prev)?;
         let next = alloc_shards(cs, "next", &w.next)?;
 
@@ -352,11 +358,14 @@ impl StepCircuit<CircuitField> for AuditStepCircuit {
         // what pins `r` to the commitments instead of letting the
         // server choose it.
         let derive_chain = |cs: &mut CS,
-                                tag: &str,
-                                dom: u64,
-                                prev_r: &AllocatedNum<CircuitField>,
-                                slot: usize|
-         -> Result<(Vec<AllocatedBit>, AllocatedNum<CircuitField>), SynthesisError> {
+                            tag: &str,
+                            dom: u64,
+                            prev_r: &AllocatedNum<CircuitField>,
+                            slot: usize|
+         -> Result<
+            (Vec<AllocatedBit>, AllocatedNum<CircuitField>),
+            SynthesisError,
+        > {
             let mut ro = PoseidonROCircuit::<CircuitField>::new(self.ro_consts.clone());
             let d = alloc_constant(
                 cs.namespace(|| format!("const dom {tag}")),
@@ -599,7 +608,11 @@ mod tests {
             out[Z_DIGEST],
             poseidon_state_digest(&ro_constants(), p, &t.next)
         );
-        println!("n_shards={} constraints={}", p.n_shards, cs.num_constraints());
+        println!(
+            "n_shards={} constraints={}",
+            p.n_shards,
+            cs.num_constraints()
+        );
     }
 
     /// A shard with no updates makes every delta the identity. This
@@ -721,8 +734,7 @@ mod tests {
     fn rejects_off_curve_schnorr_commitment() {
         assert!(!tampered(|w, _r| {
             let (x, y) = w.sigma[0].r_commit.xy().expect("non-identity");
-            w.sigma[0].r_commit =
-                ArkG1Affine::new_unchecked(x, y + ark_bn254::Fq::from(1u64));
+            w.sigma[0].r_commit = ArkG1Affine::new_unchecked(x, y + ark_bn254::Fq::from(1u64));
         }));
     }
 

@@ -1,3 +1,8 @@
+// Copyright (c) The Aegon Authors.
+//
+// This source code is licensed under the MIT license found in the
+// LICENSE file in the root directory of this source tree.
+
 //! Configuration for an Aegon dictionary.
 //!
 //! Two bundles, one per role:
@@ -118,7 +123,11 @@ pub const fn shard_log_capacity_for_two_layer(
 ) -> usize {
     let total = true_log_capacity + LOG2_OVER_PROVISIONING_FACTOR;
     let v = total.saturating_sub(log_n_shards);
-    if v == 0 { 1 } else { v }
+    if v == 0 {
+        1
+    } else {
+        v
+    }
 }
 
 /// Server-side configuration. Built once, consumed by `Aegon::setup`
@@ -228,7 +237,7 @@ where
         Self {
             log_capacity: self.log_capacity,
             verifier_param: self.verifier_param.clone(),
-            audit_fs: self.audit_fs.clone(),
+            audit_fs: self.audit_fs,
             _e: PhantomData,
         }
     }

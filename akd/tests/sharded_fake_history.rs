@@ -1,3 +1,8 @@
+// Copyright (c) The Aegon Authors.
+//
+// This source code is licensed under the MIT license found in the
+// LICENSE file in the root directory of this source tree.
+
 //! Eight-epoch sharded-Aegon end-to-end smoke test.
 //!
 //! Mirrors `tests/fake_history.rs` but drives `ShardedAegon` directly
@@ -18,9 +23,9 @@
 //! consistency proof should accept or reject.
 
 use akd::aegon::{
-    verify_sharded_consistency_two_layer, verify_sharded_invariance, verify_sharded_lookup_two_layer,
-    Sha256Hash, ShardedAegon, ShardedAegonConfig, ShardedAuditState, ShardedEpochCommitment,
-    ShardedVerifierContext,
+    verify_sharded_consistency_two_layer, verify_sharded_invariance,
+    verify_sharded_lookup_two_layer, Sha256Hash, ShardedAegon, ShardedAegonConfig,
+    ShardedAuditState, ShardedEpochCommitment, ShardedVerifierContext,
 };
 use ark_bn254::Bn254;
 use ark_ec::pairing::Pairing;
@@ -73,7 +78,9 @@ fn audit_one_transition(
     for (idx, new_value) in updates {
         entries.push((truth[*idx].label.clone(), new_value.as_bytes().to_vec()));
     }
-    let commit = server.publish_two_layer(&entries).expect("publish_two_layer");
+    let commit = server
+        .publish_two_layer(&entries)
+        .expect("publish_two_layer");
     for (name, value) in sign_ups {
         truth.push(UserRecord {
             label: name.as_bytes().to_vec(),
@@ -97,7 +104,9 @@ fn audit_one_transition(
 }
 
 fn user_lookup(server: &Sharded, ctx: &ShardedCtx, user: &UserRecord, commit: &Commit) {
-    let (_db_value, proof) = server.lookup_two_layer(&user.label).expect("lookup_two_layer");
+    let (_db_value, proof) = server
+        .lookup_two_layer(&user.label)
+        .expect("lookup_two_layer");
     let ok = verify_sharded_lookup_two_layer::<Bn254, Pcs, Sha256Hash>(
         ctx,
         commit,
@@ -129,7 +138,11 @@ fn user_consistency(
         .consistency_proof_two_layer(&user.label, s0.epoch)
         .expect("consistency_proof_two_layer");
     let result = verify_sharded_consistency_two_layer::<Bn254, Pcs, Sha256Hash>(
-        ctx, s0, s1, &user.label, &proof,
+        ctx,
+        s0,
+        s1,
+        &user.label,
+        &proof,
     )
     .expect("verify_sharded_consistency_two_layer");
 
@@ -196,7 +209,15 @@ fn sharded_interleaved_eight_epoch_lifecycle_with_updates() {
     user_consistency(&server, &ctx, &truth[0], &commits[1], &c2); // alice e1->e2
 
     // ===================== EPOCH 3 =====================
-    let c3 = audit_one_transition(&mut server, &ctx, &mut audit_state, &c2, &[], &[], &mut truth);
+    let c3 = audit_one_transition(
+        &mut server,
+        &ctx,
+        &mut audit_state,
+        &c2,
+        &[],
+        &[],
+        &mut truth,
+    );
     assert_eq!(c3.epoch, 3);
     commits.push(c3.clone());
     user_lookup(&server, &ctx, &truth[1], &c3); // bob
@@ -223,7 +244,15 @@ fn sharded_interleaved_eight_epoch_lifecycle_with_updates() {
     user_consistency(&server, &ctx, &truth[1], &commits[1], &c4); // bob still stable
 
     // ===================== EPOCH 5 =====================
-    let c5 = audit_one_transition(&mut server, &ctx, &mut audit_state, &c4, &[], &[], &mut truth);
+    let c5 = audit_one_transition(
+        &mut server,
+        &ctx,
+        &mut audit_state,
+        &c4,
+        &[],
+        &[],
+        &mut truth,
+    );
     assert_eq!(c5.epoch, 5);
     commits.push(c5.clone());
     user_lookup(&server, &ctx, &truth[6], &c5); // grace

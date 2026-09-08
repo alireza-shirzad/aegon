@@ -1,3 +1,8 @@
+// Copyright (c) The Aegon Authors.
+//
+// This source code is licensed under the MIT license found in the
+// LICENSE file in the root directory of this source tree.
+
 //! Schnorr-style sigma protocol for "commitment difference is a known
 //! multiple of `h`" — the audit-path bridge between zk-blinded
 //! commitments and the bare homomorphism equation.
@@ -239,9 +244,12 @@ mod tests {
         .expect("srs gen");
         let (pp, vk) =
             <akd_core::aegon_crypto::pcs::kzhk::srs::KZHKUniversalParams<Bn254> as StructuredReferenceString<Bn254>>::trim(&srs, num_vars).expect("trim");
-        let model =
-            <Pcs as PolynomialCommitmentScheme<Bn254>>::scaled_mask_generator_pp(&pp, &Default::default(), Fr::from(1u64))
-                .expect("zk model");
+        let model = <Pcs as PolynomialCommitmentScheme<Bn254>>::scaled_mask_generator_pp(
+            &pp,
+            &Default::default(),
+            Fr::from(1u64),
+        )
+        .expect("zk model");
         (pp, vk, model)
     }
 
@@ -252,17 +260,18 @@ mod tests {
         let (pp, vk, model) = fixture(0xA56_6, 10, 5);
         let mut rng = ChaCha20Rng::seed_from_u64(1);
 
-        let prev_val = model.clone();
-        let next_val = model.clone();
-        let prev_rand = model.clone();
+        let prev_val = model;
+        let next_val = model;
+        let prev_rand = model;
         let r_chain = Fr::from(7u64);
         let c_witness = Fr::from(123_456u64);
         // next_rand = chain + c·h is exactly what the publish path
         // produces after re-randomising the chained commitment.
-        let chain = prev_rand.clone() + (next_val.clone() - prev_val.clone()) * r_chain;
-        let bump =
-            <Pcs as PolynomialCommitmentScheme<Bn254>>::scaled_mask_generator_pp(&pp, &model, c_witness)
-                .expect("zk pp has h");
+        let chain = prev_rand + (next_val - prev_val) * r_chain;
+        let bump = <Pcs as PolynomialCommitmentScheme<Bn254>>::scaled_mask_generator_pp(
+            &pp, &model, c_witness,
+        )
+        .expect("zk pp has h");
         let next_rand = chain + bump;
 
         let hooks = super::super::audit_fs::AuditFsHooks::<Bn254, Pcs>::sha256();
@@ -282,16 +291,17 @@ mod tests {
     fn tamper_breaks_verification() {
         let (pp, vk, model) = fixture(0xA56_7, 10, 5);
         let mut rng = ChaCha20Rng::seed_from_u64(2);
-        let prev_val = model.clone();
-        let next_val = model.clone();
-        let prev_rand = model.clone();
+        let prev_val = model;
+        let next_val = model;
+        let prev_rand = model;
         let r_chain = Fr::from(11u64);
         let c_witness = Fr::from(99u64);
-        let chain = prev_rand.clone() + (next_val.clone() - prev_val.clone()) * r_chain;
-        let bump =
-            <Pcs as PolynomialCommitmentScheme<Bn254>>::scaled_mask_generator_pp(&pp, &model, c_witness)
-                .unwrap();
-        let next_rand = chain.clone() + bump;
+        let chain = prev_rand + (next_val - prev_val) * r_chain;
+        let bump = <Pcs as PolynomialCommitmentScheme<Bn254>>::scaled_mask_generator_pp(
+            &pp, &model, c_witness,
+        )
+        .unwrap();
+        let next_rand = chain + bump;
         let hooks = super::super::audit_fs::AuditFsHooks::<Bn254, Pcs>::sha256();
         let proof = prove::<Bn254, Pcs, _>(
             &pp, &model, &prev_val, &next_val, &prev_rand, &next_rand, r_chain, c_witness, &hooks,
@@ -308,7 +318,7 @@ mod tests {
             &proof,
             &hooks
         ));
-        let chain_only = prev_rand.clone() + (next_val.clone() - prev_val.clone()) * r_chain;
+        let chain_only = prev_rand + (next_val - prev_val) * r_chain;
         assert!(!verify::<Bn254, Pcs>(
             &vk,
             &prev_val,

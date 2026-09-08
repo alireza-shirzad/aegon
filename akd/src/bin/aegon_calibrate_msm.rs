@@ -1,3 +1,8 @@
+// Copyright (c) The Aegon Authors.
+//
+// This source code is licensed under the MIT license found in the
+// LICENSE file in the root directory of this source tree.
+
 //! Standalone MSM calibration binary.
 //!
 //! Build with `cargo build --release -p akd --bin aegon_calibrate_msm`,
@@ -9,15 +14,14 @@
 //! No flags — sizes and iteration counts are baked in. Calibration on a
 //! 4-vCPU VM takes ~1 minute end-to-end.
 
-use ark_bn254::G1Projective;
 use akd_core::aegon_crypto::pcs::kzhk::msm::calibrate;
+use ark_bn254::G1Projective;
 
 fn main() {
     // Sizes spanning the regime KZH-k's per-bucket / per-chunk MSMs
     // actually hit during publishes (a handful to a few hundred K).
     let sizes: &[usize] = &[
-        1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536,
-        131072,
+        1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072,
     ];
     let max_threads = std::thread::available_parallelism()
         .map(|n| n.get())

@@ -7,10 +7,10 @@
 //! Error module.
 
 use crate::aegon_crypto::arithmetic::errors::ArithErrors;
+use crate::aegon_crypto::transcript::TranscriptError;
 use ark_serialize::SerializationError;
 use ark_std::string::String;
 use displaydoc::Display;
-use crate::aegon_crypto::transcript::TranscriptError;
 
 /// A `enum` specifying the possible failure modes of the PCS.
 #[derive(Display, Debug)]

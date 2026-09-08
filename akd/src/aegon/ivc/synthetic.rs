@@ -1,3 +1,8 @@
+// Copyright (c) The Aegon Authors.
+//
+// This source code is licensed under the MIT license found in the
+// LICENSE file in the root directory of this source tree.
+
 //! Synthetic epoch transitions for testing and benchmarking.
 //!
 //! Builds honest epoch transitions from **pure group arithmetic**
@@ -195,15 +200,7 @@ pub fn honest_chain(
     let mut sigmas = Vec::new();
     let (mut ri, mut rv) = (ArkFr::from(0u64), ArkFr::from(0u64));
     for _ in 0..n_epochs {
-        let t = honest_transition(
-            p,
-            h,
-            epochs.last().expect("non-empty"),
-            ri,
-            rv,
-            rng,
-            true,
-        );
+        let t = honest_transition(p, h, epochs.last().expect("non-empty"), ri, rv, rng, true);
         ri = t.r_index;
         rv = t.r_value;
         sigmas.push(t.sigma.clone());

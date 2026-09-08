@@ -1,3 +1,8 @@
+// Copyright (c) The Aegon Authors.
+//
+// This source code is licensed under the MIT license found in the
+// LICENSE file in the root directory of this source tree.
+
 //! Sweep the publish batch size and record per-batch wall time.
 //!
 //! What this measures: the wall-clock cost of one
@@ -150,11 +155,16 @@ fn build_server() -> Sharded {
 /// case for `plan_phase_1_batches`).
 fn build_batch(batch_size: usize) -> Vec<(Vec<u8>, Vec<u8>)> {
     (0..batch_size as u32)
-        .map(|i| (format!("user-{i}").into_bytes(), format!("v-{i}").into_bytes()))
+        .map(|i| {
+            (
+                format!("user-{i}").into_bytes(),
+                format!("v-{i}").into_bytes(),
+            )
+        })
         .collect()
 }
 
-#[divan::bench(args = params().batch_sizes.iter().copied().collect::<Vec<_>>(), sample_count = 5)]
+#[divan::bench(args = params().batch_sizes.to_vec(), sample_count = 5)]
 fn publish_batch(bencher: divan::Bencher, batch_size: usize) {
     bencher
         .with_inputs(|| (build_server(), build_batch(batch_size)))

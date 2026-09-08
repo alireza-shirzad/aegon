@@ -1,9 +1,7 @@
 // Copyright (c) Meta Platforms, Inc. and affiliates.
 //
-// This source code is dual-licensed under either the MIT license found in the
-// LICENSE-MIT file in the root directory of this source tree or the Apache
-// License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-// of this source tree. You may select, at your option, one of the above-listed licenses.
+// This source code is licensed under the MIT license found in the
+// LICENSE file in the root directory of this source tree.
 
 //! Implementation of an auditable key directory, backed by the Aegon
 //! polynomial-commitment engine. The public surface mirrors the original
@@ -35,9 +33,10 @@ use crate::aegon::{
     ShardedEpochCommitment, ShardedLookupProofTwoLayer, ShardedVerifierContext, VrfProver,
 };
 use akd_core::configuration::Configuration;
-use akd_core::verify::history::HistoryParams;
 use akd_core::types::{AzksValue, MembershipProof, NonMembershipProof};
+use akd_core::verify::history::HistoryParams;
 
+use akd_core::aegon_crypto::pcs::kzhk::KZHK;
 use ark_bn254::Bn254;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use rand_chacha::rand_core::SeedableRng;
@@ -45,7 +44,6 @@ use rand_chacha::ChaCha20Rng;
 use std::collections::{HashMap, HashSet};
 use std::marker::PhantomData;
 use std::sync::Arc;
-use akd_core::aegon_crypto::pcs::kzhk::KZHK;
 use tokio::sync::{Mutex, RwLock};
 
 // ---------- Aegon backend type aliases --------------------------------
@@ -190,9 +188,9 @@ where
 
         let commitment = {
             let mut aegon = self.aegon.lock().await;
-            aegon
-                .publish_two_layer(&aegon_updates)
-                .map_err(|e| AkdError::Directory(DirectoryError::Publish(format!("aegon publish: {e}"))))?
+            aegon.publish_two_layer(&aegon_updates).map_err(|e| {
+                AkdError::Directory(DirectoryError::Publish(format!("aegon publish: {e}")))
+            })?
         };
 
         // Cache plaintext values so `lookup` can return them.
@@ -205,7 +203,10 @@ where
 
         self.epoch_commits.write().await.push(commitment.clone());
 
-        Ok(EpochHash(commitment.epoch, digest_of_commitment(&commitment)))
+        Ok(EpochHash(
+            commitment.epoch,
+            digest_of_commitment(&commitment),
+        ))
     }
 
     /// Provides proof of correctness for the latest version of the
@@ -227,9 +228,9 @@ where
         // single-process tests, so the DB-side value is discarded
         // here. With `DbSource::None`, the DB-side value is the
         // empty vector anyway.
-        let (_db_value, proof) = aegon
-            .lookup_two_layer(&akd_label.0)
-            .map_err(|e| AkdError::Directory(DirectoryError::Publish(format!("aegon lookup: {e}"))))?;
+        let (_db_value, proof) = aegon.lookup_two_layer(&akd_label.0).map_err(|e| {
+            AkdError::Directory(DirectoryError::Publish(format!("aegon lookup: {e}")))
+        })?;
         let commitment = aegon.current_commitment();
         drop(aegon);
 
@@ -311,7 +312,9 @@ where
         _period: tokio::time::Duration,
         _change_detected: Option<tokio::sync::mpsc::Sender<()>>,
     ) -> Result<(), AkdError> {
-        unimplemented!("poll_for_azks_changes is database-bound; the Aegon backend has no DB to poll")
+        unimplemented!(
+            "poll_for_azks_changes is database-bound; the Aegon backend has no DB to poll"
+        )
     }
 
     /// **Not implemented via the legacy [`AppendOnlyProof`] shape.** The
@@ -356,7 +359,10 @@ where
     pub async fn get_epoch_hash(&self) -> Result<EpochHash, AkdError> {
         let aegon = self.aegon.lock().await;
         let commitment = aegon.current_commitment();
-        Ok(EpochHash(commitment.epoch, digest_of_commitment(&commitment)))
+        Ok(EpochHash(
+            commitment.epoch,
+            digest_of_commitment(&commitment),
+        ))
     }
 
     // ===================================================================
@@ -373,7 +379,9 @@ where
         let aegon = self.aegon.lock().await;
         aegon
             .consistency_proof_two_layer(&akd_label.0, s0)
-            .map_err(|e| AkdError::Directory(DirectoryError::Publish(format!("aegon consistency: {e}"))))
+            .map_err(|e| {
+                AkdError::Directory(DirectoryError::Publish(format!("aegon consistency: {e}")))
+            })
     }
 
     /// Returns the sharded `EpochCommitment` for a past (or current) epoch.
@@ -550,9 +558,7 @@ pub(crate) fn decode_lookup_payload(
 /// Build a `Digest` (32-byte hash) from a sharded `EpochCommitment`.
 /// The Merkle root over the per-shard commitments already commits to
 /// every shard's full state, so it doubles as the epoch digest.
-fn digest_of_commitment(
-    commit: &ShardedEpochCommitment<DirectoryE, DirectoryPcs>,
-) -> Digest {
+fn digest_of_commitment(commit: &ShardedEpochCommitment<DirectoryE, DirectoryPcs>) -> Digest {
     commit.merkle_root
 }
 

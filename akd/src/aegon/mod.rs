@@ -1,3 +1,8 @@
+// Copyright (c) The Aegon Authors.
+//
+// This source code is licensed under the MIT license found in the
+// LICENSE file in the root directory of this source tree.
+
 //! Aegon — a transparent dictionary built generically on top of any
 //! multilinear polynomial commitment scheme. Implements the publish /
 //! lookup / verify slice from §6 of the Aegon paper.
@@ -57,20 +62,20 @@ pub use hash::{
 };
 pub use presets::optimal_kzh_k;
 pub use server::Aegon;
-pub use sigma::BlindingEqProof;
 pub use sharded::{
     build_merkle_path, build_merkle_root_and_paths, merkle_root, probe_at,
     rederive_sharded_fs_scalars, verify_lookup_history, verify_lookup_label_history,
     verify_lookup_label_two_layer, verify_lookup_value, verify_merkle_path,
     verify_sharded_consistency_two_layer, verify_sharded_invariance,
-    verify_sharded_lookup_two_layer, EpochDigest, FreshnessAttestation,
-    FreshnessAttestationLabel, LabelSlot, ShardRoutingProbe, ShardSlotProbe, ShardSlotRandPair,
-    ShardTransport, ShardedAegon, ShardedAegonConfig, ShardedAegonConfigBuilder,
-    ShardedConsistencyProofTwoLayer, ShardedEpochCommitment, ShardedLabelHistory,
-    ShardedLabelProofTwoLayer, ShardedLookupProofTwoLayer, ShardedValueHistory,
-    ShardedValueProof, ShardedVerifierContext, SrsSource, StoredLabelPlacement,
-    StoredValueHistoryEntry, VerifiedLookupHistory, VerifiedLookupLabelHistory, HISTORY_WINDOW,
+    verify_sharded_lookup_two_layer, EpochDigest, FreshnessAttestation, FreshnessAttestationLabel,
+    LabelSlot, ShardRoutingProbe, ShardSlotProbe, ShardSlotRandPair, ShardTransport, ShardedAegon,
+    ShardedAegonConfig, ShardedAegonConfigBuilder, ShardedConsistencyProofTwoLayer,
+    ShardedEpochCommitment, ShardedLabelHistory, ShardedLabelProofTwoLayer,
+    ShardedLookupProofTwoLayer, ShardedValueHistory, ShardedValueProof, ShardedVerifierContext,
+    SrsSource, StoredLabelPlacement, StoredValueHistoryEntry, VerifiedLookupHistory,
+    VerifiedLookupLabelHistory, HISTORY_WINDOW,
 };
+pub use sigma::BlindingEqProof;
 pub use types::{
     AegonPcs, AuditState, ConsistencyProof, EpochCommitment, HistoryOpeningEntry, HistoryOpenings,
     Label, LookupProof, RandPair, ShardedAuditState, Value, ValueChangeEntry,

@@ -1,3 +1,8 @@
+// Copyright (c) The Aegon Authors.
+//
+// This source code is licensed under the MIT license found in the
+// LICENSE file in the root directory of this source tree.
+
 //! Bridge between Aegon's published types and the IVC audit path.
 //!
 //! Two jobs:
@@ -15,8 +20,8 @@
 //! keeps that assumption in one visible place instead of smearing a
 //! BN254 bound across the generic core.
 
-use ark_bn254::{Bn254, Fr as ArkFr, G1Affine as ArkG1Affine};
 use akd_core::aegon_crypto::pcs::kzhk::KZHK;
+use ark_bn254::{Bn254, Fr as ArkFr, G1Affine as ArkG1Affine};
 
 use super::circuit::SigmaWitness;
 use super::fs_poseidon::{
@@ -25,8 +30,8 @@ use super::fs_poseidon::{
 };
 use crate::aegon::audit_fs::{AuditFs, AuditFsHooks};
 use crate::aegon::error::AegonError;
-use crate::aegon::types::EpochCommitment;
 use crate::aegon::sharded::ShardedEpochCommitment;
+use crate::aegon::types::EpochCommitment;
 
 /// The PCS the IVC audit path is defined against.
 pub type Pcs = KZHK<Bn254>;
@@ -35,7 +40,8 @@ pub type ShardEpoch = EpochCommitment<Bn254, Pcs>;
 /// A whole epoch's published commitment, across all shards.
 pub type ShardedEpoch = ShardedEpochCommitment<Bn254, Pcs>;
 
-type Commitment = <Pcs as akd_core::aegon_crypto::pcs::PolynomialCommitmentScheme<Bn254>>::Commitment;
+type Commitment =
+    <Pcs as akd_core::aegon_crypto::pcs::PolynomialCommitmentScheme<Bn254>>::Commitment;
 
 fn point(c: &Commitment) -> ArkG1Affine {
     c.get_commitment()
@@ -115,11 +121,7 @@ fn params_from(commits: &[Commitment]) -> FsParams {
     }
 }
 
-fn poseidon_chain(
-    label: &'static [u8],
-    prev: ArkFr,
-    commits: &[Commitment],
-) -> ArkFr {
+fn poseidon_chain(label: &'static [u8], prev: ArkFr, commits: &[Commitment]) -> ArkFr {
     // Map the byte tag the rest of the system uses onto the numeric
     // domain the circuit allocates as a constant.
     let dom = match label {
@@ -127,7 +129,13 @@ fn poseidon_chain(
         _ => domain::CHAIN_INDEX,
     };
     let points: Vec<ArkG1Affine> = commits.iter().map(point).collect();
-    poseidon_chain_scalar(ro_constants_cached(), dom, params_from(commits), prev, &points)
+    poseidon_chain_scalar(
+        ro_constants_cached(),
+        dom,
+        params_from(commits),
+        prev,
+        &points,
+    )
 }
 
 fn poseidon_sigma(

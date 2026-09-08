@@ -1,3 +1,8 @@
+// Copyright (c) The Aegon Authors.
+//
+// This source code is licensed under the MIT license found in the
+// LICENSE file in the root directory of this source tree.
+
 //! End-to-end smoke test for the AKD-on-Aegon backend.
 //!
 //! Exercises the Category-1 path (publish, lookup, batch_lookup,
@@ -23,8 +28,7 @@ impl akd::DomainLabel for TestDomainLabel {
 }
 
 type Config = ExperimentalConfiguration<TestDomainLabel>;
-type AkdDirectory =
-    Directory<Config, AsyncInMemoryDatabase, HardCodedAkdVRF>;
+type AkdDirectory = Directory<Config, AsyncInMemoryDatabase, HardCodedAkdVRF>;
 
 async fn fresh_directory() -> AkdDirectory {
     let db = AsyncInMemoryDatabase::new();
@@ -44,10 +48,7 @@ async fn publish_and_lookup_round_trip() {
         (AkdLabel::from("carol"), AkdValue::from("carol-key-v1")),
     ];
 
-    let EpochHash(epoch, _root) = directory
-        .publish(entries.clone())
-        .await
-        .expect("publish");
+    let EpochHash(epoch, _root) = directory.publish(entries.clone()).await.expect("publish");
     assert_eq!(epoch, 1);
 
     let ctx: VerifierContext = directory.verifier_context().await;
@@ -109,13 +110,9 @@ async fn auditor_walks_invariance_chain() {
 
     let mut audit_state = ShardedAuditState::default();
     for i in 0..3 {
-        let ok = aegon_facade::verify_invariance(
-            &ctx,
-            &mut audit_state,
-            &commits[i],
-            &commits[i + 1],
-        )
-        .expect("verify_invariance");
+        let ok =
+            aegon_facade::verify_invariance(&ctx, &mut audit_state, &commits[i], &commits[i + 1])
+                .expect("verify_invariance");
         assert!(ok, "invariance must hold for transition {i}");
     }
 }
@@ -158,7 +155,10 @@ async fn legacy_lookup_verify_panics() {
         .publish(vec![(AkdLabel::from("alice"), AkdValue::from("a1"))])
         .await
         .expect("publish");
-    let (proof, eh) = directory.lookup(AkdLabel::from("alice")).await.expect("lookup");
+    let (proof, eh) = directory
+        .lookup(AkdLabel::from("alice"))
+        .await
+        .expect("lookup");
     let _ = akd::client::lookup_verify::<Config>(
         &[],
         eh.hash(),

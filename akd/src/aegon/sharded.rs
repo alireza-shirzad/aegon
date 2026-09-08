@@ -1,3 +1,8 @@
+// Copyright (c) The Aegon Authors.
+//
+// This source code is licensed under the MIT license found in the
+// LICENSE file in the root directory of this source tree.
+
 //! Sharded Aegon: a coordinator that owns N independent Aegon
 //! shard instances, each storing a polynomial of size `2^(log_capacity -
 //! log_n_shards)`. The coordinator handles
@@ -19,34 +24,29 @@
 //! source of truth for the coordinator-side logic, regardless of where
 //! the shards live.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::marker::PhantomData;
 
+use akd_core::aegon_crypto::pcs::PCSGlobalParam;
+use akd_core::aegon_crypto::transcript::IOPTranscript;
 use ark_ec::pairing::Pairing;
 use ark_ff::{Field, Zero};
 use ark_serialize::{
     CanonicalDeserialize, CanonicalSerialize, Compress, SerializationError, Valid, Validate,
 };
 use ark_std::rand::Rng;
-use akd_core::aegon_crypto::pcs::PCSGlobalParam;
-use akd_core::aegon_crypto::transcript::IOPTranscript;
 use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 
 use super::audit::verify_chain;
 use super::config::{AegonConfig, VerifierContext};
 use super::db::{
-    key_coord_state, key_epoch_commit, key_history_openings, key_history_openings_local,
-    key_label_placement, key_shard_fullness, key_value, key_value_history, Db, DbOp,
-    DbSource, RedisDb,
+    key_coord_state, key_epoch_commit, key_shard_fullness, Db, DbOp, DbSource, RedisDb,
 };
 use super::error::AegonError;
 use super::hash::{bool_index_to_point, HashSuite, Sha256Hash};
 use super::server::Aegon;
-use super::types::{
-    AegonPcs, AuditState, EpochCommitment, Label, RandPair, ShardedAuditState,
-    Value, ValueChangeEntry,
-};
+use super::types::{AegonPcs, EpochCommitment, Label, ShardedAuditState, Value};
 
 /// Where the shards live, and how the coordinator talks to them.
 ///
@@ -58,21 +58,16 @@ use super::types::{
 /// honoured at setup time; calling `ShardedAegon::setup` with a
 /// `Remote` transport returns an `unimplemented!()`-style error
 /// until the gRPC layer lands.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub enum ShardTransport {
     /// Single-process: shards co-located in the same address space.
+    #[default]
     InProcess,
     /// Each shard is a remote `tonic`/gRPC service. `endpoints[i]`
     /// is the address of shard `i` (e.g. `"http://10.0.0.7:50051"`
     /// or `"https://aegon-shard-7.svc.cluster.local:50051"`). Length
     /// must equal `1 << log_n_shards`.
     Remote { endpoints: Vec<String> },
-}
-
-impl Default for ShardTransport {
-    fn default() -> Self {
-        Self::InProcess
-    }
 }
 
 /// Where the SRS / (prover_param, verifier_param) come from.
@@ -83,20 +78,15 @@ impl Default for ShardTransport {
 /// from disk (the natural output of a trusted-setup ceremony).
 /// `Path` is not yet wired up; using it returns
 /// `AegonError::Config(...)` at setup time.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub enum SrsSource {
     /// Generate a fresh SRS from `P::gen_srs_for_testing`. Test-only.
+    #[default]
     DangerouslyGenerate,
     /// Load `(prover_param, verifier_param)` from a previously-
     /// serialized file (canonical SRS, typically a trusted-setup
     /// ceremony output). Not yet implemented.
     Path(std::path::PathBuf),
-}
-
-impl Default for SrsSource {
-    fn default() -> Self {
-        Self::DangerouslyGenerate
-    }
 }
 
 /// Configuration for a [`ShardedAegon`] deployment.
@@ -208,18 +198,11 @@ impl<E: Pairing, P: AegonPcs<E>> ShardedAegonConfig<E, P> {
         P::ProverParam: CanonicalSerialize,
         P::VerifierParam: CanonicalSerialize,
     {
-        let srs = P::gen_srs_for_testing(
-            self.pcs_config.clone(),
-            rng,
-            self.shard_log_capacity,
-        )?;
+        let srs = P::gen_srs_for_testing(self.pcs_config.clone(), rng, self.shard_log_capacity)?;
         let (pk, vk) = P::trim(&srs, None, Some(self.shard_log_capacity))?;
 
         let file = std::fs::File::create(path).map_err(|e| {
-            AegonError::Config(format!(
-                "create srs file '{}': {e}",
-                path.display()
-            ))
+            AegonError::Config(format!("create srs file '{}': {e}", path.display()))
         })?;
         // BufWriter — arkworks' CanonicalSerialize issues many small
         // writes (one per scalar / group-element field). Without
@@ -233,16 +216,14 @@ impl<E: Pairing, P: AegonPcs<E>> ShardedAegonConfig<E, P> {
         // writes its own local copy now (no NFS), so the size hit
         // is contained to local disk.
         let mut writer = std::io::BufWriter::with_capacity(1 << 20, file);
-        pk.serialize_uncompressed(&mut writer).map_err(|e| {
-            AegonError::Config(format!("serialize prover_param: {e}"))
-        })?;
-        vk.serialize_uncompressed(&mut writer).map_err(|e| {
-            AegonError::Config(format!("serialize verifier_param: {e}"))
-        })?;
+        pk.serialize_uncompressed(&mut writer)
+            .map_err(|e| AegonError::Config(format!("serialize prover_param: {e}")))?;
+        vk.serialize_uncompressed(&mut writer)
+            .map_err(|e| AegonError::Config(format!("serialize verifier_param: {e}")))?;
         use std::io::Write;
-        writer.flush().map_err(|e| {
-            AegonError::Config(format!("flush srs file: {e}"))
-        })?;
+        writer
+            .flush()
+            .map_err(|e| AegonError::Config(format!("flush srs file: {e}")))?;
         Ok(())
     }
 }
@@ -260,12 +241,8 @@ where
     P::ProverParam: CanonicalDeserialize,
     P::VerifierParam: CanonicalDeserialize,
 {
-    let file = std::fs::File::open(path).map_err(|e| {
-        AegonError::Config(format!(
-            "open srs file '{}': {e}",
-            path.display()
-        ))
-    })?;
+    let file = std::fs::File::open(path)
+        .map_err(|e| AegonError::Config(format!("open srs file '{}': {e}", path.display())))?;
     // BufReader — arkworks' CanonicalDeserialize issues one `read`
     // per scalar / group-element field (~50 bytes). Without
     // buffering each call hits the kernel; a 4.9GB SRS produced
@@ -280,12 +257,10 @@ where
     // — it was either written by the shard itself or generated
     // by aegon_srs_gen on the same host. Load: ~25min → ~1min.
     let mut reader = std::io::BufReader::with_capacity(1 << 20, file);
-    let pk = P::ProverParam::deserialize_uncompressed_unchecked(&mut reader).map_err(|e| {
-        AegonError::Config(format!("deserialize prover_param: {e}"))
-    })?;
-    let vk = P::VerifierParam::deserialize_uncompressed_unchecked(&mut reader).map_err(|e| {
-        AegonError::Config(format!("deserialize verifier_param: {e}"))
-    })?;
+    let pk = P::ProverParam::deserialize_uncompressed_unchecked(&mut reader)
+        .map_err(|e| AegonError::Config(format!("deserialize prover_param: {e}")))?;
+    let vk = P::VerifierParam::deserialize_uncompressed_unchecked(&mut reader)
+        .map_err(|e| AegonError::Config(format!("deserialize verifier_param: {e}")))?;
     Ok((pk, vk))
 }
 
@@ -640,8 +615,7 @@ where
         self.epoch.serialize_with_mode(&mut writer, compress)?;
         self.merkle_root
             .serialize_with_mode(&mut writer, compress)?;
-        self.per_shard
-            .serialize_with_mode(&mut writer, compress)?;
+        self.per_shard.serialize_with_mode(&mut writer, compress)?;
         Ok(())
     }
 
@@ -676,8 +650,7 @@ where
         validate: Validate,
     ) -> Result<Self, SerializationError> {
         let epoch = u64::deserialize_with_mode(&mut reader, compress, validate)?;
-        let merkle_root =
-            <EpochDigest>::deserialize_with_mode(&mut reader, compress, validate)?;
+        let merkle_root = <EpochDigest>::deserialize_with_mode(&mut reader, compress, validate)?;
         let per_shard =
             Vec::<EpochCommitment<E, P>>::deserialize_with_mode(&mut reader, compress, validate)?;
         // Rebuild the path cache deterministically from per_shard;
@@ -1414,10 +1387,7 @@ where
     /// which is sound because each one commits to a distinct
     /// polynomial — and avoids 32× redundant SRS generation, which
     /// dominates setup cost at production scale.
-    pub fn setup<R: Rng>(
-        rng: &mut R,
-        config: &ShardedAegonConfig<E, P>,
-    ) -> Result<Self, AegonError>
+    pub fn setup<R: Rng>(rng: &mut R, config: &ShardedAegonConfig<E, P>) -> Result<Self, AegonError>
     where
         P::VerifierParam: Clone,
         // Bounds for boxing Aegon as a ShardHandle (in-process).
@@ -1431,7 +1401,7 @@ where
             // Every shard must derive its Schnorr challenges the same
             // way the coordinator derives the chain scalars, or the
             // audit equation will not close.
-            audit_fs: config.audit_fs.clone(),
+            audit_fs: config.audit_fs,
             _e: PhantomData,
         };
 
@@ -1454,14 +1424,11 @@ where
                             shard_config.log_capacity,
                         )?;
                         P::trim(&srs, None, Some(shard_config.log_capacity))?
-                    },
+                    }
                     SrsSource::Path(path) => read_srs_from_file::<E, P>(path)?,
                 };
                 let dims = P::block_dims(&prover_param, shard_config.log_capacity);
-                let vctx = VerifierContext::new(
-                    shard_config.log_capacity,
-                    verifier_param.clone(),
-                );
+                let vctx = VerifierContext::new(shard_config.log_capacity, verifier_param.clone());
                 // If remote masking server endpoints are configured,
                 // connect once and share the client(s) across all shards.
                 // A one-element list builds a single MaskingClient
@@ -1480,13 +1447,13 @@ where
                             config.masking_addrs[0].clone(),
                         )?;
                         Some(std::sync::Arc::new(client))
-                    },
+                    }
                     _ => {
                         let pool = super::masking::MaskingClientPool::<E, P>::connect_all(
                             &config.masking_addrs,
                         )?;
                         Some(std::sync::Arc::new(pool))
-                    },
+                    }
                 };
                 let mut shards: Vec<Box<dyn super::shard_grpc::ShardHandle<E, P, H>>> =
                     Vec::with_capacity(n_shards);
@@ -1502,7 +1469,7 @@ where
                     shards.push(Box::new(aegon));
                 }
                 (shards, dims, vctx)
-            },
+            }
             ShardTransport::Remote { endpoints } => {
                 // Remote shards already loaded their own SRS at boot
                 // (via the shard-server binary). The coordinator just
@@ -1537,10 +1504,8 @@ where
                 // available; for the generic trait fallback we
                 // construct dims via the verifier_param's own getter
                 // wrapper. PCSGlobalParam exposes everything we need.
-                let dims = P::block_dims_from_verifier_param(
-                    &verifier_param,
-                    shard_config.log_capacity,
-                );
+                let dims =
+                    P::block_dims_from_verifier_param(&verifier_param, shard_config.log_capacity);
                 let mut shards: Vec<Box<dyn super::shard_grpc::ShardHandle<E, P, H>>> =
                     Vec::with_capacity(n_shards);
                 for ep in endpoints {
@@ -1552,13 +1517,12 @@ where
                     shards.push(Box::new(client));
                 }
                 (shards, dims, vctx)
-            },
+            }
         };
 
         let initial_per_shard: Vec<EpochCommitment<E, P>> =
             shards.iter().map(|s| s.current_commitment()).collect();
-        let initial_commit =
-            ShardedEpochCommitment::<E, P>::with_per_shard(0, initial_per_shard);
+        let initial_commit = ShardedEpochCommitment::<E, P>::with_per_shard(0, initial_per_shard);
 
         // Coordinator-side KV store. Connect eagerly so a misconfigured
         // URL fails at setup, not on the first publish.
@@ -1667,9 +1631,7 @@ where
     /// `Err` if a key exists but a downstream get/deserialize fails
     /// — that means the DB is half-written or corrupt and the caller
     /// should refuse to come up, not silently start over.
-    fn try_recover_from_db(
-        db: &dyn Db,
-    ) -> Result<Option<RecoveredState<E, P>>, AegonError> {
+    fn try_recover_from_db(db: &dyn Db) -> Result<Option<RecoveredState<E, P>>, AegonError> {
         let Some(state_bytes) = db.get(key_coord_state())? else {
             return Ok(None);
         };
@@ -1758,9 +1720,9 @@ where
             }
             let has_proof = bytes[off];
             off += 1;
-            let plen = u32::from_le_bytes([
-                bytes[off], bytes[off + 1], bytes[off + 2], bytes[off + 3],
-            ]) as usize;
+            let plen =
+                u32::from_le_bytes([bytes[off], bytes[off + 1], bytes[off + 2], bytes[off + 3]])
+                    as usize;
             off += 4;
             if off + plen > bytes.len() {
                 return Err(AegonError::Database(format!(
@@ -1780,7 +1742,8 @@ where
     /// empty bytes, real ones are at most a few hundred bytes).
     fn encode_shard_full_proofs(&self) -> Vec<u8> {
         let n = self.shard_full_proofs.len();
-        let total_bytes_est: usize = 4 + n * 5
+        let total_bytes_est: usize = 4
+            + n * 5
             + self
                 .shard_full_proofs
                 .iter()
@@ -1793,12 +1756,12 @@ where
                 None => {
                     out.push(0);
                     out.extend_from_slice(&0u32.to_le_bytes());
-                },
+                }
                 Some(proof) => {
                     out.push(1);
                     out.extend_from_slice(&(proof.len() as u32).to_le_bytes());
                     out.extend_from_slice(proof);
-                },
+                }
             }
         }
         out
@@ -1919,11 +1882,8 @@ where
         // publish would advance the coordinator's epoch from N+1
         // while the shards thought it was 1, and FS-chain
         // derivation would desync.
-        let per_shard: Vec<EpochCommitment<E, P>> = self
-            .shards
-            .iter()
-            .map(|s| s.current_commitment())
-            .collect();
+        let per_shard: Vec<EpochCommitment<E, P>> =
+            self.shards.iter().map(|s| s.current_commitment()).collect();
         let refreshed = ShardedEpochCommitment::<E, P>::with_per_shard(0, per_shard);
         self.epoch = 0;
         self.epoch_commits.clear();
@@ -1960,11 +1920,8 @@ where
         for shard in self.shards.iter_mut() {
             shard.clear_dictionary()?;
         }
-        let per_shard: Vec<EpochCommitment<E, P>> = self
-            .shards
-            .iter()
-            .map(|s| s.current_commitment())
-            .collect();
+        let per_shard: Vec<EpochCommitment<E, P>> =
+            self.shards.iter().map(|s| s.current_commitment()).collect();
         let refreshed = ShardedEpochCommitment::<E, P>::with_per_shard(0, per_shard);
         self.epoch = 0;
         self.r_index = vec![E::ScalarField::zero(); self.chain_groups];
@@ -2090,8 +2047,7 @@ where
                 })
                 .collect::<Result<Vec<_>, _>>()?;
 
-            let mut groups: Vec<Vec<(Label, Value)>> =
-                (0..n_shards).map(|_| Vec::new()).collect();
+            let mut groups: Vec<Vec<(Label, Value)>> = (0..n_shards).map(|_| Vec::new()).collect();
             let mut group_vrf_proofs: Vec<Vec<Vec<Vec<u8>>>> =
                 (0..n_shards).map(|_| Vec::new()).collect();
             for (shard_id, label, value, proofs) in routed {
@@ -2139,8 +2095,7 @@ where
                     let placed_count = outcome.placed_count;
                     if outcome.fullness_proof.is_some() {
                         // Persist the (placeholder) fullness bytes.
-                        let proof_bytes =
-                            outcome.fullness_proof.clone().unwrap_or_default();
+                        let proof_bytes = outcome.fullness_proof.clone().unwrap_or_default();
                         self.shard_full_proofs[shard_id] = Some(proof_bytes);
                         // Re-queue the tail. They'll route to a
                         // different shard in the next wave because
@@ -2161,7 +2116,9 @@ where
         // Same fan-out reasoning as the wave loop above.
         let needs_cleanup: Vec<bool> = shard_outcomes.iter().map(|o| o.is_none()).collect();
         if needs_cleanup.iter().any(|&b| b) {
-            let cleanup_results: Vec<Result<Option<(usize, super::server::PublishBatchOutcome<E, P>)>, AegonError>> = self
+            let cleanup_results: Vec<
+                Result<Option<(usize, super::server::PublishBatchOutcome<E, P>)>, AegonError>,
+            > = self
                 .shards
                 .par_iter_mut()
                 .zip(needs_cleanup.par_iter())
@@ -2205,8 +2162,7 @@ where
         let (new_r_index, new_r_value) =
             self.derive_chain_scalars(&new_index_commits, &new_value_commits)?;
         let per_shard_commits = self.run_phase_2(&new_r_index, &new_r_value)?;
-        let sharded_commit =
-            self.finalize_epoch(per_shard_commits, new_r_index, new_r_value);
+        let sharded_commit = self.finalize_epoch(per_shard_commits, new_r_index, new_r_value);
 
         // Coord-side persist: just `coord:state` + `coord:epoch_commit:{epoch}`.
         // The shard fan-out for dictionary content already happened
@@ -2343,11 +2299,7 @@ where
     /// commit after observing the chain randomness.
     #[cfg_attr(
         feature = "tracing_instrument",
-        tracing::instrument(
-            level = "debug",
-            skip_all,
-            name = "ShardedAegon::DeriveChainScalars"
-        )
+        tracing::instrument(level = "debug", skip_all, name = "ShardedAegon::DeriveChainScalars")
     )]
     fn derive_chain_scalars(
         &self,
@@ -2409,41 +2361,21 @@ where
         // EpochCommitments and build the cross-shard merkle tree
         // upstream in `finalize_epoch`.
         let shard_ids: Vec<u32> = (0..self.shards.len() as u32).collect();
-        eprintln!(
-            "[EPOCH-INSTR coord] run_phase_2 entry coord.epoch={} dispatching to {} shards",
-            self.epoch, self.shards.len()
-        );
         // Each shard is handed *its group's* scalars. Because phase 2
         // is already one call per shard, group-sharding costs nothing
         // here and works for remote shards as well as in-process
         // ones -- unlike `audit_fs`, which a remote shard configures
         // for itself.
         let plan = super::chain_groups::GroupPlan::new(self.n_shards(), self.chain_groups)?;
-        let results: Vec<Result<EpochCommitment<E, P>, AegonError>> = self.shards
+        let results: Vec<Result<EpochCommitment<E, P>, AegonError>> = self
+            .shards
             .par_iter_mut()
             .zip(shard_ids.into_par_iter())
             .map(|(shard, shard_id)| {
                 let g = plan.group_of(shard_id as usize);
-                let res =
-                    shard.publish_phase_2_and_persist(new_r_index[g], new_r_value[g], shard_id);
-                if let Err(ref e) = res {
-                    eprintln!(
-                        "[EPOCH-INSTR coord] shard={} phase_2 RPC returned Err: {}",
-                        shard_id, e
-                    );
-                }
-                res
+                shard.publish_phase_2_and_persist(new_r_index[g], new_r_value[g], shard_id)
             })
             .collect();
-        let mut ok = 0usize;
-        let mut errs = 0usize;
-        for r in &results {
-            if r.is_ok() { ok += 1; } else { errs += 1; }
-        }
-        eprintln!(
-            "[EPOCH-INSTR coord] run_phase_2 results: ok={} err={}",
-            ok, errs
-        );
         results.into_iter().collect::<Result<Vec<_>, _>>()
     }
 
@@ -2463,12 +2395,7 @@ where
     ) -> ShardedEpochCommitment<E, P> {
         self.r_index = new_r_index;
         self.r_value = new_r_value;
-        let _epoch_instr_old = self.epoch;
         self.epoch += 1;
-        eprintln!(
-            "[EPOCH-INSTR coord] finalize_epoch advanced {} -> {}",
-            _epoch_instr_old, self.epoch
-        );
         let sharded_commit =
             ShardedEpochCommitment::<E, P>::with_per_shard(self.epoch, per_shard_commits);
         self.epoch_commits.push(sharded_commit.clone());
@@ -2593,10 +2520,7 @@ where
     /// No side-channel value bytes are fetched here either: the
     /// polynomial commitment binds `H_F(value)`, the raw bytes ride a
     /// separate channel, and the verifier hashes them locally.
-    pub fn lookup_value(
-        &self,
-        slot: &LabelSlot,
-    ) -> Result<ShardedValueProof<E, P>, AegonError> {
+    pub fn lookup_value(&self, slot: &LabelSlot) -> Result<ShardedValueProof<E, P>, AegonError> {
         if (slot.shard_id as usize) >= self.shards.len() {
             return Err(AegonError::Config(format!(
                 "lookup_value: shard_id {} out of range (have {} shards)",
@@ -2636,10 +2560,7 @@ where
     /// resilient to races where a client asks for history right after
     /// a label was assigned but before the persist's MULTI/EXEC
     /// landed.
-    pub fn lookup_history(
-        &self,
-        label: &Label,
-    ) -> Result<ShardedValueHistory<E, P>, AegonError> {
+    pub fn lookup_history(&self, label: &Label) -> Result<ShardedValueHistory<E, P>, AegonError> {
         // Post-refactor + Patch 7: value_history lives on the owning
         // shard's DB, and the entire {fetch + per-entry remask +
         // freshness opening} chain is collapsed into ONE shard RPC
@@ -2687,26 +2608,30 @@ where
             entry.post_merkle_path = self
                 .epoch_commits
                 .get(entry.epoch as usize)
-                .ok_or_else(|| AegonError::Database(format!(
-                    "lookup_history: entry.epoch={} out of bounds \
+                .ok_or_else(|| {
+                    AegonError::Database(format!(
+                        "lookup_history: entry.epoch={} out of bounds \
                      (epoch_commits.len()={}, coord.epoch={})",
-                    entry.epoch,
-                    self.epoch_commits.len(),
-                    self.epoch,
-                )))?
+                        entry.epoch,
+                        self.epoch_commits.len(),
+                        self.epoch,
+                    ))
+                })?
                 .merkle_path(shard_id as usize)
                 .to_vec();
             if entry.epoch > 0 {
                 entry.prev_merkle_path = self
                     .epoch_commits
                     .get((entry.epoch - 1) as usize)
-                    .ok_or_else(|| AegonError::Database(format!(
-                        "lookup_history: entry.epoch-1={} out of bounds \
+                    .ok_or_else(|| {
+                        AegonError::Database(format!(
+                            "lookup_history: entry.epoch-1={} out of bounds \
                          (epoch_commits.len()={}, coord.epoch={})",
-                        entry.epoch - 1,
-                        self.epoch_commits.len(),
-                        self.epoch,
-                    )))?
+                            entry.epoch - 1,
+                            self.epoch_commits.len(),
+                            self.epoch,
+                        ))
+                    })?
                     .merkle_path(shard_id as usize)
                     .to_vec();
             }
@@ -2730,14 +2655,12 @@ where
             }
             let eval = full.freshness_eval.ok_or_else(|| {
                 AegonError::Database(
-                    "lookup_history: shard returned entries but no freshness eval"
-                        .into(),
+                    "lookup_history: shard returned entries but no freshness eval".into(),
                 )
             })?;
             let proof = full.freshness_proof.ok_or_else(|| {
                 AegonError::Database(
-                    "lookup_history: shard returned entries but no freshness proof"
-                        .into(),
+                    "lookup_history: shard returned entries but no freshness proof".into(),
                 )
             })?;
             let current = self.current_commitment();
@@ -2830,13 +2753,15 @@ where
         placement.placement_merkle_path = self
             .epoch_commits
             .get(placement.epoch as usize)
-            .ok_or_else(|| AegonError::Database(format!(
-                "lookup_label_history: placement.epoch={} out of bounds \
+            .ok_or_else(|| {
+                AegonError::Database(format!(
+                    "lookup_label_history: placement.epoch={} out of bounds \
                  (epoch_commits.len()={}, coord.epoch={})",
-                placement.epoch,
-                self.epoch_commits.len(),
-                self.epoch,
-            )))?
+                    placement.epoch,
+                    self.epoch_commits.len(),
+                    self.epoch,
+                ))
+            })?
             .merkle_path(shard_id as usize)
             .to_vec();
         let current = self.current_commitment();
@@ -2890,8 +2815,7 @@ where
         // (1 scalar mul per step); the matching VRF proofs come from
         // the destination shard's cache below, not from re-proving
         // here.
-        let (dest_shard_id, final_shard_ctr) =
-            self.route_label_to_shard(label, 0)?;
+        let (dest_shard_id, final_shard_ctr) = self.route_label_to_shard(label, 0)?;
 
         // Second-layer routing: ask the destination shard for the
         // within-shard placement of `label`, the index-polynomial
@@ -2921,17 +2845,13 @@ where
         // ctr counts we'll iterate below. Empty vectors signal "no
         // cache; fall back to coord-side prove" — the legacy path.
         let have_cached_shard_proofs = !cached_shard_proofs.is_empty();
-        if have_cached_shard_proofs
-            && cached_shard_proofs.len() != (final_shard_ctr as usize) + 1
-        {
+        if have_cached_shard_proofs && cached_shard_proofs.len() != (final_shard_ctr as usize) + 1 {
             return Err(AegonError::Verification(
                 "lookup_label_two_layer: cached vrf_proofs_shard length disagrees with final_shard_ctr",
             ));
         }
         let have_cached_slot_proofs = !cached_slot_proofs.is_empty();
-        if have_cached_slot_proofs
-            && cached_slot_proofs.len() != (slot_ctr0 as usize) + 1
-        {
+        if have_cached_slot_proofs && cached_slot_proofs.len() != (slot_ctr0 as usize) + 1 {
             return Err(AegonError::Verification(
                 "lookup_label_two_layer: cached vrf_proofs_slot length disagrees with slot_ctr0",
             ));
@@ -2943,8 +2863,7 @@ where
         // emit the landing probe (no fullness proof). VRF proofs come
         // from the cache when available, else we fall back to
         // prove_h_shard.
-        let mut route: Vec<ShardRoutingProbe> =
-            Vec::with_capacity((final_shard_ctr as usize) + 1);
+        let mut route: Vec<ShardRoutingProbe> = Vec::with_capacity((final_shard_ctr as usize) + 1);
         for ctr in 0..=final_shard_ctr {
             let (bits, vrf_proof_bytes) = if have_cached_shard_proofs {
                 let bits = if let Some(vrf) = &self.vrf_prover {
@@ -2969,7 +2888,7 @@ where
             let fullness_proof = if ctr < final_shard_ctr {
                 let bytes = self
                     .shard_fullness_proof(shard_id as usize)
-                    .ok_or_else(|| {
+                    .ok_or({
                         AegonError::Verification(
                             "lookup_label_two_layer: routing skipped a shard not marked full",
                         )
@@ -2996,8 +2915,7 @@ where
         // when available) and sanity-checks that the shard's
         // `slot_bits` match the H_slot derivation.
         let shard_log_capacity = self.shard_log_capacity();
-        let mut slots: Vec<ShardSlotProbe<E, P>> =
-            Vec::with_capacity((slot_ctr0 as usize) + 1);
+        let mut slots: Vec<ShardSlotProbe<E, P>> = Vec::with_capacity((slot_ctr0 as usize) + 1);
         for (slot_ctr, entry) in (0..=slot_ctr0).zip(entries.into_iter()) {
             let (expected_bits, vrf_proof_bytes) = if have_cached_slot_proofs {
                 let bits = if let Some(vrf) = &self.vrf_prover {
@@ -3070,9 +2988,7 @@ where
         // (`slot.shard_id`). In-process shards return Ok(None) via the
         // default trait impl, preserving the prior empty-Value behavior
         // for `DbSource::None` tests.
-        let value: Value = match self.shards[slot.shard_id as usize]
-            .fetch_value(label)?
-        {
+        let value: Value = match self.shards[slot.shard_id as usize].fetch_value(label)? {
             Some(v) => v,
             None => Vec::new(),
         };
@@ -3105,8 +3021,7 @@ where
         // (1) Inter-shard route trail — same walk lookup_label_two_layer
         // does (uses self.shard_full_proofs at the current epoch).
         let (dest_shard_id, final_shard_ctr) = self.route_label_to_shard(label, 0)?;
-        let mut route: Vec<ShardRoutingProbe> =
-            Vec::with_capacity((final_shard_ctr as usize) + 1);
+        let mut route: Vec<ShardRoutingProbe> = Vec::with_capacity((final_shard_ctr as usize) + 1);
         for ctr in 0..=final_shard_ctr {
             let (bits, vrf_proof_bytes) = if let Some(prover) = self.vrf_prover.as_ref() {
                 let (b, p) = prover.prove_h_shard(ctr, label, self.log_n_shards);
@@ -3124,7 +3039,7 @@ where
             let fullness_proof = if ctr < final_shard_ctr {
                 let bytes = self
                     .shard_fullness_proof(shard_id as usize)
-                    .ok_or_else(|| {
+                    .ok_or({
                         AegonError::Verification(
                             "consistency_proof_two_layer: routing skipped a shard not marked full",
                         )
@@ -3156,8 +3071,7 @@ where
             .ok_or_else(|| AegonError::UnknownLabel(label.clone()))?;
 
         let shard_log_capacity = self.shard_log_capacity();
-        let mut slots: Vec<ShardSlotRandPair<E, P>> =
-            Vec::with_capacity((slot_ctr0 as usize) + 1);
+        let mut slots: Vec<ShardSlotRandPair<E, P>> = Vec::with_capacity((slot_ctr0 as usize) + 1);
         for slot_ctr in 0..=slot_ctr0 {
             let (slot_bits, vrf_proof_bytes) = if let Some(prover) = self.vrf_prover.as_ref() {
                 let (b, p) = prover.prove_h_slot(slot_ctr, label, shard_log_capacity);
@@ -3171,10 +3085,10 @@ where
                     "consistency_proof_two_layer: derived final slot_bits disagree with shard's find_label_slot",
                 ));
             }
-            let (eval_s0, proof_s0) = self.shards[dest_shard_id]
-                .open_rand_index_at_slot_in_epoch(&slot_bits, s0)?;
-            let (eval_s1, proof_s1) = self.shards[dest_shard_id]
-                .open_rand_index_at_slot_in_epoch(&slot_bits, s1)?;
+            let (eval_s0, proof_s0) =
+                self.shards[dest_shard_id].open_rand_index_at_slot_in_epoch(&slot_bits, s0)?;
+            let (eval_s1, proof_s1) =
+                self.shards[dest_shard_id].open_rand_index_at_slot_in_epoch(&slot_bits, s1)?;
             slots.push(ShardSlotRandPair {
                 slot_bits,
                 vrf_proof: vrf_proof_bytes,
@@ -3186,10 +3100,10 @@ where
         }
 
         // (4) rand_value at the final slot at both epochs.
-        let (value_rand_s0_eval, value_rand_s0_proof) = self.shards[dest_shard_id]
-            .open_rand_value_at_slot_in_epoch(&final_slot_bits, s0)?;
-        let (value_rand_s1_eval, value_rand_s1_proof) = self.shards[dest_shard_id]
-            .open_rand_value_at_slot_in_epoch(&final_slot_bits, s1)?;
+        let (value_rand_s0_eval, value_rand_s0_proof) =
+            self.shards[dest_shard_id].open_rand_value_at_slot_in_epoch(&final_slot_bits, s0)?;
+        let (value_rand_s1_eval, value_rand_s1_proof) =
+            self.shards[dest_shard_id].open_rand_value_at_slot_in_epoch(&final_slot_bits, s1)?;
 
         Ok(ShardedConsistencyProofTwoLayer {
             route,
@@ -3266,11 +3180,8 @@ where
         ));
     }
     // Merkle anchor: the proof's leaf must hash up to `commit.merkle_root`.
-    let reconstructed = verify_merkle_path::<E, P>(
-        &proof.leaf,
-        proof.shard_id as usize,
-        &proof.merkle_path,
-    );
+    let reconstructed =
+        verify_merkle_path::<E, P>(&proof.leaf, proof.shard_id as usize, &proof.merkle_path);
     if reconstructed != commit.merkle_root {
         return Err(AegonError::Verification(
             "value proof merkle path does not reconstruct epoch root",
@@ -3438,23 +3349,20 @@ where
             return Err(AegonError::Verification(
                 "history has entries but no freshness attestation",
             ));
-        },
+        }
         (Some(_), None) => {
             return Err(AegonError::Verification(
                 "history has a freshness attestation but no entries",
             ));
-        },
+        }
         (Some(fr), Some(latest)) => {
             if fr.shard_id != latest.shard_id || fr.slot_bits != latest.slot_bits {
                 return Err(AegonError::Verification(
                     "freshness attestation references a different (shard, slot) than the latest entry",
                 ));
             }
-            let live_root = verify_merkle_path::<E, P>(
-                &fr.shard_commit,
-                fr.shard_id as usize,
-                &fr.merkle_path,
-            );
+            let live_root =
+                verify_merkle_path::<E, P>(&fr.shard_commit, fr.shard_id as usize, &fr.merkle_path);
             // Live `rand_value(slot)` opens under the live shard commit.
             let point = bool_index_to_point::<E::ScalarField>(&fr.slot_bits);
             let mut tr_live = IOPTranscript::<E::ScalarField>::new(b"aegon.rand_value.open");
@@ -3481,7 +3389,7 @@ where
                 ));
             }
             Some(live_root)
-        },
+        }
     };
 
     Ok(VerifiedLookupHistory {
@@ -3558,11 +3466,8 @@ where
                 p.shard_id as usize,
                 &p.placement_merkle_path,
             );
-            let live_root = verify_merkle_path::<E, P>(
-                &fr.shard_commit,
-                fr.shard_id as usize,
-                &fr.merkle_path,
-            );
+            let live_root =
+                verify_merkle_path::<E, P>(&fr.shard_commit, fr.shard_id as usize, &fr.merkle_path);
 
             let point = bool_index_to_point::<E::ScalarField>(&p.slot_bits);
 
@@ -3619,10 +3524,9 @@ where
                 placement_root: Some(placement_root),
                 live_root: Some(live_root),
             })
-        },
+        }
     }
 }
-
 
 // ================ two-layer routing verifiers ========================
 
@@ -3674,12 +3578,12 @@ where
             verifier
                 .verify_h_shard(ctr, label, &rprobe.vrf_proof, ctx.log_n_shards)
                 .map_err(|e| match e {
-                    super::hash::VrfVerifyError::Malformed(_) => AegonError::Verification(
-                        "two-layer route probe vrf_proof failed to parse",
-                    ),
-                    super::hash::VrfVerifyError::InvalidProof(_) => AegonError::Verification(
-                        "two-layer route probe vrf_proof did not verify",
-                    ),
+                    super::hash::VrfVerifyError::Malformed(_) => {
+                        AegonError::Verification("two-layer route probe vrf_proof failed to parse")
+                    }
+                    super::hash::VrfVerifyError::InvalidProof(_) => {
+                        AegonError::Verification("two-layer route probe vrf_proof did not verify")
+                    }
                 })?
         } else {
             H::h_shard(ctr, label, ctx.log_n_shards)
@@ -3751,12 +3655,12 @@ where
             verifier
                 .verify_h_slot(slot_ctr, label, &sprobe.vrf_proof, shard_log_capacity)
                 .map_err(|e| match e {
-                    super::hash::VrfVerifyError::Malformed(_) => AegonError::Verification(
-                        "two-layer slot probe vrf_proof failed to parse",
-                    ),
-                    super::hash::VrfVerifyError::InvalidProof(_) => AegonError::Verification(
-                        "two-layer slot probe vrf_proof did not verify",
-                    ),
+                    super::hash::VrfVerifyError::Malformed(_) => {
+                        AegonError::Verification("two-layer slot probe vrf_proof failed to parse")
+                    }
+                    super::hash::VrfVerifyError::InvalidProof(_) => {
+                        AegonError::Verification("two-layer slot probe vrf_proof did not verify")
+                    }
                 })?
         } else {
             H::h_slot(slot_ctr, label, shard_log_capacity)
@@ -3832,12 +3736,7 @@ where
     P: AegonPcs<E>,
     H: HashSuite<E::ScalarField>,
 {
-    let slot = verify_lookup_label_two_layer::<E, P, H>(
-        ctx,
-        commit,
-        label,
-        &proof.label_proof,
-    )?;
+    let slot = verify_lookup_label_two_layer::<E, P, H>(ctx, commit, label, &proof.label_proof)?;
     // Rebuild a `ShardedValueProof` from the bundled value parts +
     // the residency-verified dest leaf/path so we can reuse the
     // existing value-side verifier.
@@ -3854,7 +3753,6 @@ where
     }
     Ok(true)
 }
-
 
 /// Verify a two-layer consistency proof. Returns `Ok(true)` iff the
 /// route, intra-shard openings, and rand_value openings all verify
@@ -4273,9 +4171,7 @@ fn merkle_parent(left: &EpochDigest, right: &EpochDigest) -> EpochDigest {
 /// it builds the root + every shard's sibling path in one pass and
 /// caches the result. This standalone helper stays for the auditor /
 /// verifier paths that only have `per_shard` in hand.
-pub fn merkle_root<E: Pairing, P: AegonPcs<E>>(
-    per_shard: &[EpochCommitment<E, P>],
-) -> EpochDigest {
+pub fn merkle_root<E: Pairing, P: AegonPcs<E>>(per_shard: &[EpochCommitment<E, P>]) -> EpochDigest {
     build_merkle_root_and_paths::<E, P>(per_shard).0
 }
 
@@ -4359,7 +4255,7 @@ pub fn verify_merkle_path<E: Pairing, P: AegonPcs<E>>(
     let mut hash = merkle_leaf(leaf);
     let mut idx = leaf_index;
     for sibling in path {
-        hash = if idx % 2 == 0 {
+        hash = if idx.is_multiple_of(2) {
             merkle_parent(&hash, sibling)
         } else {
             merkle_parent(sibling, &hash)
@@ -4405,16 +4301,12 @@ pub fn rederive_sharded_fs_scalars<E: Pairing, P: AegonPcs<E>>(
     let r_index = index_groups
         .iter()
         .zip(prev_r_index)
-        .map(|(commits, prev)| {
-            audit_fs.chain_scalar(b"aegon.sharded.fs.r_index", *prev, commits)
-        })
+        .map(|(commits, prev)| audit_fs.chain_scalar(b"aegon.sharded.fs.r_index", *prev, commits))
         .collect();
     let r_value = value_groups
         .iter()
         .zip(prev_r_value)
-        .map(|(commits, prev)| {
-            audit_fs.chain_scalar(b"aegon.sharded.fs.r_value", *prev, commits)
-        })
+        .map(|(commits, prev)| audit_fs.chain_scalar(b"aegon.sharded.fs.r_value", *prev, commits))
         .collect();
     Ok((r_index, r_value))
 }

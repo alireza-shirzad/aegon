@@ -1,3 +1,8 @@
+// Copyright (c) The Aegon Authors.
+//
+// This source code is licensed under the MIT license found in the
+// LICENSE file in the root directory of this source tree.
+
 //! End-to-end smoke tests for Aegon over KZH-k.
 //!
 //! Three layers exercised:
@@ -14,10 +19,10 @@ use akd::aegon::{
     verify_consistency, verify_invariance, verify_lookup, Aegon, AegonConfig, AuditState,
     Sha256Hash, VerifierContext,
 };
+use akd_core::aegon_crypto::pcs::kzhk::KZHK;
 use ark_bn254::Bn254;
 use rand_chacha::rand_core::SeedableRng;
 use rand_chacha::ChaCha20Rng;
-use akd_core::aegon_crypto::pcs::kzhk::KZHK;
 
 type Pcs = KZHK<Bn254>;
 type AegonKzh = Aegon<Bn254, Pcs, Sha256Hash>;
@@ -75,8 +80,8 @@ fn init_rejects_inconsistent_private_flag() {
     use akd_core::aegon_crypto::pcs::kzhk::structs::KZHKConfig;
     let bad = AegonConfig::<Bn254, Pcs>::new(
         LOG_CAPACITY,
-        true,                            // user says: private
-        KZHKConfig::new(KZH_K, false),   // PCS says: non-zk
+        true,                          // user says: private
+        KZHKConfig::new(KZH_K, false), // PCS says: non-zk
     );
     let mut rng = ChaCha20Rng::seed_from_u64(0xDEADBEEF);
     let result = AegonKzh::setup(&mut rng, &bad);
@@ -124,7 +129,10 @@ fn verify_rejects_wrong_value() {
         &b"different-value".to_vec(),
         &proof,
     );
-    assert!(matches!(result, Err(akd::aegon::AegonError::Verification(_))));
+    assert!(matches!(
+        result,
+        Err(akd::aegon::AegonError::Verification(_))
+    ));
 }
 
 #[test]
@@ -132,7 +140,10 @@ fn lookup_unknown_label_errors() {
     let mut server = fresh_aegon();
     let _ = server.publish(&[]).expect("empty publish");
     let result = server.lookup(&b"never-registered".to_vec());
-    assert!(matches!(result, Err(akd::aegon::AegonError::UnknownLabel(_))));
+    assert!(matches!(
+        result,
+        Err(akd::aegon::AegonError::UnknownLabel(_))
+    ));
 }
 
 #[test]
@@ -165,7 +176,10 @@ fn republish_updates_value_in_place() {
         &b"v1".to_vec(),
         &proof,
     );
-    assert!(matches!(result, Err(akd::aegon::AegonError::Verification(_))));
+    assert!(matches!(
+        result,
+        Err(akd::aegon::AegonError::Verification(_))
+    ));
 }
 
 // --------------------------------------------------------------------
@@ -180,8 +194,8 @@ fn verify_invariance_accepts_honest_chain() {
     let mut audit_state = AuditState::<<Bn254 as ark_ec::pairing::Pairing>::ScalarField>::default();
 
     let com1 = server.publish(&[]).expect("publish empty");
-    let ok = verify_invariance::<Bn254, Pcs>(&ctx, &mut audit_state, &prev0, &com1)
-        .expect("audit 0->1");
+    let ok =
+        verify_invariance::<Bn254, Pcs>(&ctx, &mut audit_state, &prev0, &com1).expect("audit 0->1");
     assert!(ok);
 
     let com2 = server
@@ -190,15 +204,15 @@ fn verify_invariance_accepts_honest_chain() {
             (b"bob".to_vec(), b"b1".to_vec()),
         ])
         .expect("publish two labels");
-    let ok = verify_invariance::<Bn254, Pcs>(&ctx, &mut audit_state, &com1, &com2)
-        .expect("audit 1->2");
+    let ok =
+        verify_invariance::<Bn254, Pcs>(&ctx, &mut audit_state, &com1, &com2).expect("audit 1->2");
     assert!(ok);
 
     let com3 = server
         .publish(&[(b"alice".to_vec(), b"a2".to_vec())])
         .expect("publish update");
-    let ok = verify_invariance::<Bn254, Pcs>(&ctx, &mut audit_state, &com2, &com3)
-        .expect("audit 2->3");
+    let ok =
+        verify_invariance::<Bn254, Pcs>(&ctx, &mut audit_state, &com2, &com3).expect("audit 2->3");
     assert!(ok);
 }
 
@@ -215,7 +229,10 @@ fn verify_invariance_rejects_skipped_epoch() {
         &prev0,
         &com2,
     );
-    assert!(matches!(result, Err(akd::aegon::AegonError::Verification(_))));
+    assert!(matches!(
+        result,
+        Err(akd::aegon::AegonError::Verification(_))
+    ));
 }
 
 // --------------------------------------------------------------------
@@ -306,7 +323,10 @@ fn verify_consistency_rejects_wrong_expected_ctr0() {
         bogus,
         &proof,
     );
-    assert!(matches!(result, Err(akd::aegon::AegonError::Verification(_))));
+    assert!(matches!(
+        result,
+        Err(akd::aegon::AegonError::Verification(_))
+    ));
 }
 
 // --------------------------------------------------------------------
@@ -335,8 +355,8 @@ fn private_mode_lookup_and_audit_roundtrip() {
 
     // Auditor invariance
     let mut audit_state = AuditState::<<Bn254 as ark_ec::pairing::Pairing>::ScalarField>::default();
-    let ok = verify_invariance::<Bn254, Pcs>(&ctx, &mut audit_state, &prev, &commitment)
-        .expect("audit");
+    let ok =
+        verify_invariance::<Bn254, Pcs>(&ctx, &mut audit_state, &prev, &commitment).expect("audit");
     assert!(ok);
 }
 
@@ -351,45 +371,50 @@ fn end_to_end_two_batches_with_idle_epochs() {
     let mut server = fresh_aegon();
     let ctx = server.verifier_context();
     let prev0 = server.current_commitment();
-    let mut audit_state =
-        AuditState::<<Bn254 as ark_ec::pairing::Pairing>::ScalarField>::default();
+    let mut audit_state = AuditState::<<Bn254 as ark_ec::pairing::Pairing>::ScalarField>::default();
 
     let batch1: Vec<(Vec<u8>, Vec<u8>)> = (0..5u32)
-        .map(|i| (format!("alice-{i}").into_bytes(), format!("alice-key-{i}").into_bytes()))
+        .map(|i| {
+            (
+                format!("alice-{i}").into_bytes(),
+                format!("alice-key-{i}").into_bytes(),
+            )
+        })
         .collect();
     let batch2: Vec<(Vec<u8>, Vec<u8>)> = (0..5u32)
-        .map(|i| (format!("bob-{i}").into_bytes(), format!("bob-key-{i}").into_bytes()))
+        .map(|i| {
+            (
+                format!("bob-{i}").into_bytes(),
+                format!("bob-key-{i}").into_bytes(),
+            )
+        })
         .collect();
 
     // Epoch 1: batch1 signs up.
     let com1 = server.publish(&batch1).expect("publish batch1");
     assert!(
-        verify_invariance::<Bn254, Pcs>(&ctx, &mut audit_state, &prev0, &com1)
-            .expect("audit 0->1"),
+        verify_invariance::<Bn254, Pcs>(&ctx, &mut audit_state, &prev0, &com1).expect("audit 0->1"),
         "auditor must accept honest 0->1 transition",
     );
 
     // Epoch 2: an idle epoch passes (no signups, no value updates).
     let com2 = server.publish(&[]).expect("idle epoch 1->2");
     assert!(
-        verify_invariance::<Bn254, Pcs>(&ctx, &mut audit_state, &com1, &com2)
-            .expect("audit 1->2"),
+        verify_invariance::<Bn254, Pcs>(&ctx, &mut audit_state, &com1, &com2).expect("audit 1->2"),
         "auditor must accept honest idle 1->2 transition",
     );
 
     // Epoch 3: batch2 signs up.
     let com3 = server.publish(&batch2).expect("publish batch2");
     assert!(
-        verify_invariance::<Bn254, Pcs>(&ctx, &mut audit_state, &com2, &com3)
-            .expect("audit 2->3"),
+        verify_invariance::<Bn254, Pcs>(&ctx, &mut audit_state, &com2, &com3).expect("audit 2->3"),
         "auditor must accept honest 2->3 transition",
     );
 
     // Epoch 4: another idle epoch passes.
     let com4 = server.publish(&[]).expect("idle epoch 3->4");
     assert!(
-        verify_invariance::<Bn254, Pcs>(&ctx, &mut audit_state, &com3, &com4)
-            .expect("audit 3->4"),
+        verify_invariance::<Bn254, Pcs>(&ctx, &mut audit_state, &com3, &com4).expect("audit 3->4"),
         "auditor must accept honest idle 3->4 transition",
     );
     assert_eq!(com4.epoch, 4);
@@ -400,27 +425,16 @@ fn end_to_end_two_batches_with_idle_epochs() {
     // that the returned data matches what was published.
     for (label, expected_value) in batch1.iter().chain(batch2.iter()) {
         let proof = server.lookup(label).expect("lookup at epoch 4");
-        let ok = verify_lookup::<Bn254, Pcs, Sha256Hash>(
-            &ctx,
-            &com4,
-            label,
-            expected_value,
-            &proof,
-        )
-        .expect("verify_lookup");
+        let ok =
+            verify_lookup::<Bn254, Pcs, Sha256Hash>(&ctx, &com4, label, expected_value, &proof)
+                .expect("verify_lookup");
         assert!(ok, "lookup must verify for {label:?} at epoch 4");
 
         // Cross-check: a wrong value must be rejected. Guards against a
         // verifier that accepts unconditionally.
         let mut tampered = expected_value.clone();
         tampered.push(0xFF);
-        let bad = verify_lookup::<Bn254, Pcs, Sha256Hash>(
-            &ctx,
-            &com4,
-            label,
-            &tampered,
-            &proof,
-        );
+        let bad = verify_lookup::<Bn254, Pcs, Sha256Hash>(&ctx, &com4, label, &tampered, &proof);
         assert!(
             matches!(bad, Err(akd::aegon::AegonError::Verification(_))),
             "wrong-value lookup must be rejected for {label:?}",
@@ -477,5 +491,8 @@ fn consistency_proof_unknown_epoch_errors() {
         .publish(&[(b"alice".to_vec(), b"a1".to_vec())])
         .expect("e1");
     let result = server.consistency_proof(&b"alice".to_vec(), 999);
-    assert!(matches!(result, Err(akd::aegon::AegonError::InvalidEpoch(_))));
+    assert!(matches!(
+        result,
+        Err(akd::aegon::AegonError::InvalidEpoch(_))
+    ));
 }

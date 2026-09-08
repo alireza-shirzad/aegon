@@ -1,3 +1,8 @@
+// Copyright (c) The Aegon Authors.
+//
+// This source code is licensed under the MIT license found in the
+// LICENSE file in the root directory of this source tree.
+
 //! Fiat-Shamir helpers shared by server and verifiers.
 //!
 //! Two derivations are needed:
@@ -14,19 +19,15 @@
 //!   evaluations. The point must depend on every commitment in the
 //!   relation so the prover cannot adaptively choose it.
 
+use akd_core::aegon_crypto::transcript::IOPTranscript;
 use ark_ec::pairing::Pairing;
 use ark_ff::PrimeField;
 use ark_serialize::CanonicalSerialize;
-use akd_core::aegon_crypto::transcript::IOPTranscript;
 
 /// Derive `r_n = O(prev_r, new_commitment)` per Fig. 3. The label
 /// distinguishes the index chain from the value chain so they can never
 /// collide.
-pub(crate) fn derive_chain_scalar<F, C>(
-    label: &'static [u8],
-    prev_r: F,
-    new_commitment: &C,
-) -> F
+pub(crate) fn derive_chain_scalar<F, C>(label: &'static [u8], prev_r: F, new_commitment: &C) -> F
 where
     F: PrimeField,
     C: CanonicalSerialize,

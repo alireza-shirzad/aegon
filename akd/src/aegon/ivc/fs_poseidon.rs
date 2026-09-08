@@ -1,3 +1,8 @@
+// Copyright (c) The Aegon Authors.
+//
+// This source code is licensed under the MIT license found in the
+// LICENSE file in the root directory of this source tree.
+
 //! Poseidon Fiat–Shamir for the audit path — the *native* side.
 //!
 //! ## Why the audit FS has to change at all
@@ -289,10 +294,20 @@ mod tests {
     fn chain_scalar_is_deterministic() {
         let c = ro_constants();
         let commits: Vec<_> = (0..4).map(pt).collect();
-        let a =
-            poseidon_chain_scalar(&c, domain::CHAIN_INDEX, params(), ArkFr::from(7u64), &commits);
-        let b =
-            poseidon_chain_scalar(&c, domain::CHAIN_INDEX, params(), ArkFr::from(7u64), &commits);
+        let a = poseidon_chain_scalar(
+            &c,
+            domain::CHAIN_INDEX,
+            params(),
+            ArkFr::from(7u64),
+            &commits,
+        );
+        let b = poseidon_chain_scalar(
+            &c,
+            domain::CHAIN_INDEX,
+            params(),
+            ArkFr::from(7u64),
+            &commits,
+        );
         assert_eq!(a, b);
     }
 
@@ -302,18 +317,35 @@ mod tests {
     fn chain_scalar_binds_every_input() {
         let c = ro_constants();
         let commits: Vec<_> = (0..4).map(pt).collect();
-        let base =
-            poseidon_chain_scalar(&c, domain::CHAIN_INDEX, params(), ArkFr::from(7u64), &commits);
+        let base = poseidon_chain_scalar(
+            &c,
+            domain::CHAIN_INDEX,
+            params(),
+            ArkFr::from(7u64),
+            &commits,
+        );
 
         // different domain (index vs value chain)
         assert_ne!(
             base,
-            poseidon_chain_scalar(&c, domain::CHAIN_VALUE, params(), ArkFr::from(7u64), &commits)
+            poseidon_chain_scalar(
+                &c,
+                domain::CHAIN_VALUE,
+                params(),
+                ArkFr::from(7u64),
+                &commits
+            )
         );
         // different previous chain scalar
         assert_ne!(
             base,
-            poseidon_chain_scalar(&c, domain::CHAIN_INDEX, params(), ArkFr::from(8u64), &commits)
+            poseidon_chain_scalar(
+                &c,
+                domain::CHAIN_INDEX,
+                params(),
+                ArkFr::from(8u64),
+                &commits
+            )
         );
         // different shape
         let other_params = FsParams {
@@ -335,14 +367,26 @@ mod tests {
         tweaked[2] = pt(99);
         assert_ne!(
             base,
-            poseidon_chain_scalar(&c, domain::CHAIN_INDEX, params(), ArkFr::from(7u64), &tweaked)
+            poseidon_chain_scalar(
+                &c,
+                domain::CHAIN_INDEX,
+                params(),
+                ArkFr::from(7u64),
+                &tweaked
+            )
         );
         // reordered commitments (shard-id order is part of the statement)
         let mut swapped = commits.clone();
         swapped.swap(0, 1);
         assert_ne!(
             base,
-            poseidon_chain_scalar(&c, domain::CHAIN_INDEX, params(), ArkFr::from(7u64), &swapped)
+            poseidon_chain_scalar(
+                &c,
+                domain::CHAIN_INDEX,
+                params(),
+                ArkFr::from(7u64),
+                &swapped
+            )
         );
     }
 
@@ -377,10 +421,20 @@ mod tests {
     fn sigma_challenge_binds_every_input() {
         let c = ro_constants();
         let (a, b, d, e, f) = (pt(1), pt(2), pt(3), pt(4), pt(5));
-        let base = poseidon_sigma_challenge(&c, params().num_vars, &a, &b, &d, &e, ArkFr::from(3u64), &f);
+        let base =
+            poseidon_sigma_challenge(&c, params().num_vars, &a, &b, &d, &e, ArkFr::from(3u64), &f);
         assert_ne!(
             base,
-            poseidon_sigma_challenge(&c, params().num_vars, &pt(9), &b, &d, &e, ArkFr::from(3u64), &f)
+            poseidon_sigma_challenge(
+                &c,
+                params().num_vars,
+                &pt(9),
+                &b,
+                &d,
+                &e,
+                ArkFr::from(3u64),
+                &f
+            )
         );
         assert_ne!(
             base,
@@ -388,7 +442,16 @@ mod tests {
         );
         assert_ne!(
             base,
-            poseidon_sigma_challenge(&c, params().num_vars, &a, &b, &d, &e, ArkFr::from(3u64), &pt(9))
+            poseidon_sigma_challenge(
+                &c,
+                params().num_vars,
+                &a,
+                &b,
+                &d,
+                &e,
+                ArkFr::from(3u64),
+                &pt(9)
+            )
         );
         // argument order must matter: swapping prev/next changes the claim
         assert_ne!(
@@ -436,10 +499,20 @@ mod tests {
     fn identity_commitment_is_distinguishable() {
         let c = ro_constants();
         let ident = ArkG1Affine::identity();
-        let d0 =
-            poseidon_chain_scalar(&c, domain::CHAIN_INDEX, params(), ArkFr::from(0u64), &[ident]);
-        let d1 =
-            poseidon_chain_scalar(&c, domain::CHAIN_INDEX, params(), ArkFr::from(0u64), &[pt(0)]);
+        let d0 = poseidon_chain_scalar(
+            &c,
+            domain::CHAIN_INDEX,
+            params(),
+            ArkFr::from(0u64),
+            &[ident],
+        );
+        let d1 = poseidon_chain_scalar(
+            &c,
+            domain::CHAIN_INDEX,
+            params(),
+            ArkFr::from(0u64),
+            &[pt(0)],
+        );
         assert_ne!(d0, d1);
     }
 }

@@ -1,9 +1,7 @@
 // Copyright (c) Meta Platforms, Inc. and affiliates.
 //
-// This source code is dual-licensed under either the MIT license found in the
-// LICENSE-MIT file in the root directory of this source tree or the Apache
-// License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-// of this source tree. You may select, at your option, one of the above-listed licenses.
+// This source code is licensed under the MIT license found in the
+// LICENSE file in the root directory of this source tree.
 
 //! Aegon-native verifier surface for AKD.
 //!
@@ -23,11 +21,11 @@ use crate::directory::{decode_lookup_payload, DirectoryE, DirectoryPcs};
 use crate::errors::AkdError;
 use crate::{AkdLabel, LookupProof};
 
-use crate::aegon::AegonError;
-use crate::aegon::EcVrfHash;
 use crate::aegon::verify_sharded_consistency_two_layer as aegon_verify_consistency;
 use crate::aegon::verify_sharded_invariance as aegon_verify_invariance;
 use crate::aegon::verify_sharded_lookup_two_layer as aegon_verify_lookup;
+use crate::aegon::AegonError;
+use crate::aegon::EcVrfHash;
 
 /// Sharded epoch commitment specialised to AKD's BN254+KZHK backend.
 pub type EpochCommitment = crate::aegon::ShardedEpochCommitment<DirectoryE, DirectoryPcs>;
@@ -36,7 +34,8 @@ pub type ConsistencyProof = crate::aegon::ShardedConsistencyProofTwoLayer<Direct
 /// Sharded verifier context specialised to AKD's BN254+KZHK backend.
 pub type VerifierContext = crate::aegon::ShardedVerifierContext<DirectoryE, DirectoryPcs>;
 /// Aegon `AuditState` over BN254's scalar field.
-pub type AuditState = crate::aegon::AuditState<<DirectoryE as ark_ec::pairing::Pairing>::ScalarField>;
+pub type AuditState =
+    crate::aegon::AuditState<<DirectoryE as ark_ec::pairing::Pairing>::ScalarField>;
 /// Sharded audit state over BN254's scalar field. Carries one
 /// Fiat-Shamir accumulator per chain group; `Default` is the
 /// single-group deployment.
@@ -80,10 +79,8 @@ pub fn verify_lookup_aegon(
     value: &crate::aegon::Value,
     proof: &crate::aegon::ShardedLookupProofTwoLayer<DirectoryE, DirectoryPcs>,
 ) -> Result<bool, AkdError> {
-    aegon_verify_lookup::<DirectoryE, DirectoryPcs, EcVrfHash>(
-        ctx, commitment, label, value, proof,
-    )
-    .map_err(map_aegon_err)
+    aegon_verify_lookup::<DirectoryE, DirectoryPcs, EcVrfHash>(ctx, commitment, label, value, proof)
+        .map_err(map_aegon_err)
 }
 
 /// Verify a single-transition sharded invariance relation. Callers walk

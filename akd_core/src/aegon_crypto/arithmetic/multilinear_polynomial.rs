@@ -1,8 +1,11 @@
+// Copyright (c) The Aegon Authors.
+//
+// This source code is licensed under the MIT license found in the
+// LICENSE file in the root directory of this source tree.
+
 use ark_ff::{Field, PrimeField};
 pub use ark_poly::DenseMultilinearExtension;
-use ark_poly::{
-    univariate::DenseOrSparsePolynomial, MultilinearExtension, SparseMultilinearExtension,
-};
+use ark_poly::{MultilinearExtension, SparseMultilinearExtension};
 use ark_std::{
     cfg_iter,
     rand::{Rng, RngCore},
@@ -10,8 +13,7 @@ use ark_std::{
 };
 #[cfg(feature = "parallel")]
 use rayon::iter::{
-    IndexedParallelIterator, IntoParallelIterator, IntoParallelRefIterator,
-    IntoParallelRefMutIterator, ParallelIterator,
+    IndexedParallelIterator, IntoParallelRefIterator, IntoParallelRefMutIterator, ParallelIterator,
 };
 use std::{
     collections::{BTreeMap, HashSet},
@@ -73,12 +75,10 @@ pub fn random_zero_mle_list<F: PrimeField, R: RngCore>(
         }
     }
 
-    let list = multiplicands
+    multiplicands
         .into_iter()
         .map(|x| Arc::new(DenseMultilinearExtension::from_evaluations_vec(nv, x)))
-        .collect();
-
-    list
+        .collect()
 }
 
 pub fn identity_permutation<F: PrimeField>(num_vars: usize, num_chunks: usize) -> Vec<F> {
@@ -344,7 +344,7 @@ pub fn partially_eval_dense_poly_on_bool_point<F: Field>(
         .collect()
 }
 
-use std::ops::{Bound::Included, Bound::Excluded};
+use std::ops::{Bound::Excluded, Bound::Included};
 
 #[inline]
 pub fn partially_eval_sparse_poly_on_bool_point<'a, F: 'a + Field>(
@@ -355,7 +355,7 @@ pub fn partially_eval_sparse_poly_on_bool_point<'a, F: 'a + Field>(
     debug_assert!(n > 0 && n.is_power_of_two(), "n must be a power of two");
     let total = 1usize << sparse_poly.num_vars;
     debug_assert!(n <= total, "n must be <= 2^num_vars");
-    debug_assert!(total % n == 0, "n must divide 2^num_vars");
+    debug_assert!(total.is_multiple_of(n), "n must divide 2^num_vars");
     let num_prefix_assignments = total / n;
     debug_assert!(index < num_prefix_assignments, "index out of range");
 
@@ -436,13 +436,11 @@ pub fn rand_sparse_mle<F: Field, R: Rng>(
 
 #[cfg(test)]
 mod fix_last_sparse_vs_dense {
-    use std::collections::HashSet;
-
     use super::*; // brings types + functions from the current module (adjust if needed)
     use ark_bn254::Fr;
     use ark_ff::Field;
     use ark_poly::MultilinearExtension;
-    use ark_std::{rand::Rng, test_rng, One, UniformRand, Zero};
+    use ark_std::{test_rng, One, UniformRand, Zero};
     /// Helper: build a truly sparse MLE from a dense one by dropping zeros.
     fn dense_to_sparse<F: Field>(
         dense: &DenseMultilinearExtension<F>,

@@ -1,10 +1,13 @@
+// Copyright (c) The Aegon Authors.
+//
+// This source code is licensed under the MIT license found in the
+// LICENSE file in the root directory of this source tree.
+
 use ark_ff::Field;
 use ark_poly::{
     DenseMultilinearExtension, MultilinearExtension, Polynomial, SparseMultilinearExtension,
 };
-use ark_serialize::{
-    CanonicalDeserialize, CanonicalSerialize, Read, SerializationError, Valid, Write,
-};
+use ark_serialize::{SerializationError, Valid};
 use ark_std::{
     fmt::Debug,
     ops::{Add, AddAssign, Index, Neg, Sub, SubAssign},
@@ -72,7 +75,7 @@ impl<F: Field> DenseOrSparseMLE<F> {
         match self {
             DenseOrSparseMLE::Dense(_) => {
                 panic!("Cannot convert Dense Multilinear Extension to Sparse")
-            },
+            }
             DenseOrSparseMLE::Sparse(mle) => mle.clone(),
         }
     }
@@ -95,11 +98,11 @@ impl<F: Field> ark_serialize::CanonicalSerialize for DenseOrSparseMLE<F> {
             DenseOrSparseMLE::Dense(mle) => {
                 writer.write_all(&[0])?;
                 mle.serialize_with_mode(writer, compress)
-            },
+            }
             DenseOrSparseMLE::Sparse(mle) => {
                 writer.write_all(&[1])?;
                 mle.serialize_with_mode(writer, compress)
-            },
+            }
         }
     }
 }
@@ -148,7 +151,7 @@ impl<F: Field> MultilinearExtension<F> for DenseOrSparseMLE<F> {
         Self::Sparse(SparseMultilinearExtension::rand(num_vars, rng))
     }
 
-    fn relabel(&self, mut a: usize, mut b: usize, k: usize) -> Self {
+    fn relabel(&self, a: usize, b: usize, k: usize) -> Self {
         match self {
             DenseOrSparseMLE::Dense(mle) => DenseOrSparseMLE::Dense(mle.relabel(a, b, k)),
             DenseOrSparseMLE::Sparse(mle) => DenseOrSparseMLE::Sparse(mle.relabel(a, b, k)),
@@ -159,10 +162,10 @@ impl<F: Field> MultilinearExtension<F> for DenseOrSparseMLE<F> {
         match self {
             DenseOrSparseMLE::Dense(mle) => {
                 DenseOrSparseMLE::Dense(mle.fix_variables(partial_point))
-            },
+            }
             DenseOrSparseMLE::Sparse(mle) => {
                 DenseOrSparseMLE::Sparse(mle.fix_variables(partial_point))
-            },
+            }
         }
     }
 
@@ -218,31 +221,31 @@ impl<F: Field> Add for DenseOrSparseMLE<F> {
         match (self, other) {
             (DenseOrSparseMLE::Dense(lhs), DenseOrSparseMLE::Dense(rhs)) => {
                 DenseOrSparseMLE::Dense(lhs + rhs)
-            },
+            }
             (DenseOrSparseMLE::Sparse(lhs), DenseOrSparseMLE::Sparse(rhs)) => {
                 DenseOrSparseMLE::Sparse(lhs + rhs)
-            },
+            }
             _ => {
                 panic!("Cannot add Dense and Sparse Multilinear Extensions together");
-            },
+            }
         }
     }
 }
 
-impl<'a, 'b, F: Field> Add<&'a DenseOrSparseMLE<F>> for &'b DenseOrSparseMLE<F> {
+impl<'a, F: Field> Add<&'a DenseOrSparseMLE<F>> for &DenseOrSparseMLE<F> {
     type Output = DenseOrSparseMLE<F>;
 
     fn add(self, rhs: &'a DenseOrSparseMLE<F>) -> Self::Output {
         match (self, rhs) {
             (DenseOrSparseMLE::Dense(lhs), DenseOrSparseMLE::Dense(rhs)) => {
                 DenseOrSparseMLE::Dense(lhs + rhs)
-            },
+            }
             (DenseOrSparseMLE::Sparse(lhs), DenseOrSparseMLE::Sparse(rhs)) => {
                 DenseOrSparseMLE::Sparse(lhs + rhs)
-            },
+            }
             _ => {
                 panic!("Cannot add Dense and Sparse Multilinear Extensions together");
-            },
+            }
         }
     }
 }
@@ -252,13 +255,13 @@ impl<F: Field> AddAssign for DenseOrSparseMLE<F> {
         match (self, other) {
             (DenseOrSparseMLE::Dense(lhs), DenseOrSparseMLE::Dense(rhs)) => {
                 lhs.add_assign(rhs);
-            },
+            }
             (DenseOrSparseMLE::Sparse(lhs), DenseOrSparseMLE::Sparse(rhs)) => {
                 lhs.add_assign(rhs);
-            },
+            }
             _ => {
                 panic!("Cannot add Dense and Sparse Multilinear Extensions together");
-            },
+            }
         }
     }
 }
@@ -268,13 +271,13 @@ impl<'a, F: Field> AddAssign<&'a DenseOrSparseMLE<F>> for DenseOrSparseMLE<F> {
         match (self, other) {
             (DenseOrSparseMLE::Dense(lhs), DenseOrSparseMLE::Dense(rhs)) => {
                 lhs.add_assign(rhs);
-            },
+            }
             (DenseOrSparseMLE::Sparse(lhs), DenseOrSparseMLE::Sparse(rhs)) => {
                 lhs.add_assign(rhs);
-            },
+            }
             _ => {
                 panic!("Cannot add Dense and Sparse Multilinear Extensions together");
-            },
+            }
         }
     }
 }
@@ -284,13 +287,13 @@ impl<'a, F: Field> AddAssign<(F, &'a DenseOrSparseMLE<F>)> for DenseOrSparseMLE<
         match (self, other) {
             (DenseOrSparseMLE::Dense(lhs), DenseOrSparseMLE::Dense(rhs)) => {
                 lhs.add_assign((f, rhs));
-            },
+            }
             (DenseOrSparseMLE::Sparse(lhs), DenseOrSparseMLE::Sparse(rhs)) => {
                 lhs.add_assign((f, rhs));
-            },
+            }
             _ => {
                 panic!("Cannot add Dense and Sparse Multilinear Extensions together");
-            },
+            }
         }
     }
 }
@@ -313,31 +316,31 @@ impl<F: Field> Sub for DenseOrSparseMLE<F> {
         match (self, other) {
             (DenseOrSparseMLE::Dense(lhs), DenseOrSparseMLE::Dense(rhs)) => {
                 DenseOrSparseMLE::Dense(lhs - rhs)
-            },
+            }
             (DenseOrSparseMLE::Sparse(lhs), DenseOrSparseMLE::Sparse(rhs)) => {
                 DenseOrSparseMLE::Sparse(lhs - rhs)
-            },
+            }
             _ => {
                 panic!("Cannot subtract Dense and Sparse Multilinear Extensions together");
-            },
+            }
         }
     }
 }
 
-impl<'a, 'b, F: Field> Sub<&'a DenseOrSparseMLE<F>> for &'b DenseOrSparseMLE<F> {
+impl<'a, F: Field> Sub<&'a DenseOrSparseMLE<F>> for &DenseOrSparseMLE<F> {
     type Output = DenseOrSparseMLE<F>;
 
     fn sub(self, rhs: &'a DenseOrSparseMLE<F>) -> Self::Output {
         match (self, rhs) {
             (DenseOrSparseMLE::Dense(lhs), DenseOrSparseMLE::Dense(rhs)) => {
                 DenseOrSparseMLE::Dense(lhs - rhs)
-            },
+            }
             (DenseOrSparseMLE::Sparse(lhs), DenseOrSparseMLE::Sparse(rhs)) => {
                 DenseOrSparseMLE::Sparse(lhs - rhs)
-            },
+            }
             _ => {
                 panic!("Cannot subtract Dense and Sparse Multilinear Extensions together");
-            },
+            }
         }
     }
 }
@@ -347,13 +350,13 @@ impl<F: Field> SubAssign for DenseOrSparseMLE<F> {
         match (self, other) {
             (DenseOrSparseMLE::Dense(lhs), DenseOrSparseMLE::Dense(rhs)) => {
                 lhs.sub_assign(rhs);
-            },
+            }
             (DenseOrSparseMLE::Sparse(lhs), DenseOrSparseMLE::Sparse(rhs)) => {
                 lhs.sub_assign(rhs);
-            },
+            }
             _ => {
                 panic!("Cannot subtract Dense and Sparse Multilinear Extensions together");
-            },
+            }
         }
     }
 }
@@ -363,13 +366,13 @@ impl<'a, F: Field> SubAssign<&'a DenseOrSparseMLE<F>> for DenseOrSparseMLE<F> {
         match (self, other) {
             (DenseOrSparseMLE::Dense(lhs), DenseOrSparseMLE::Dense(rhs)) => {
                 lhs.sub_assign(rhs);
-            },
+            }
             (DenseOrSparseMLE::Sparse(lhs), DenseOrSparseMLE::Sparse(rhs)) => {
                 lhs.sub_assign(rhs);
-            },
+            }
             _ => {
                 panic!("Cannot subtract Dense and Sparse Multilinear Extensions together");
-            },
+            }
         }
     }
 }

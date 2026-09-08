@@ -1,9 +1,7 @@
 // Copyright (c) Meta Platforms, Inc. and affiliates.
 //
-// This source code is dual-licensed under either the MIT license found in the
-// LICENSE-MIT file in the root directory of this source tree or the Apache
-// License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-// of this source tree. You may select, at your option, one of the above-listed licenses.
+// This source code is licensed under the MIT license found in the
+// LICENSE file in the root directory of this source tree.
 
 //! Core utilities for the auditable key directory `akd` crate.
 //! Mainly contains (1) hashing utilities for the core cryptographic operations
@@ -204,8 +202,17 @@
 #![cfg_attr(feature = "nostd", no_std)]
 extern crate alloc;
 
-#[cfg(all(feature = "protobuf", not(feature = "nostd")))]
+// `aegon_crypto` depends only on the (non-optional) arkworks stack, not on
+// protobuf. It was previously gated on `feature = "protobuf"`, which meant the
+// crate's core cryptography silently vanished under default features and
+// `cargo test -p akd_core` exercised none of it.
+#[cfg(not(feature = "nostd"))]
 pub mod aegon_crypto;
+
+// `proto` is generated from the .proto specs and refers to the `protobuf`
+// crate, which is an optional dependency. Gating the module on the feature
+// that supplies it is what lets `akd_core` build on its own.
+#[cfg(feature = "protobuf")]
 pub mod proto;
 
 pub mod ecvrf;

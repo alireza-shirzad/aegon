@@ -1,3 +1,8 @@
+// Copyright (c) The Aegon Authors.
+//
+// This source code is licensed under the MIT license found in the
+// LICENSE file in the root directory of this source tree.
+
 //! `aegon_setup_bench` — single-process setup benchmark.
 //!
 //! Measures three things at one `(shard_log_capacity, kzh_k)`
@@ -134,7 +139,9 @@ fn render_json(
 
 fn main() -> ExitCode {
     let args = Args::parse();
-    let k = args.kzh_k.unwrap_or_else(|| optimal_kzh_k(args.shard_log_capacity));
+    let k = args
+        .kzh_k
+        .unwrap_or_else(|| optimal_kzh_k(args.shard_log_capacity));
     let label = args
         .label
         .clone()
@@ -158,7 +165,7 @@ fn main() -> ExitCode {
         Err(e) => {
             eprintln!("[setup-bench] gen failed: {e}");
             return ExitCode::from(1);
-        },
+        }
     };
     let gen_duration = gen_start.elapsed();
     eprintln!(
@@ -173,7 +180,7 @@ fn main() -> ExitCode {
         Err(e) => {
             eprintln!("[setup-bench] trim failed: {e}");
             return ExitCode::from(1);
-        },
+        }
     };
     let trim_duration = trim_start.elapsed();
 
@@ -218,7 +225,7 @@ fn main() -> ExitCode {
             Err(e) => {
                 eprintln!("[setup-bench] write '{}' failed: {e}", path.display());
                 return ExitCode::from(1);
-            },
+            }
         }
     } else {
         println!("{json}");

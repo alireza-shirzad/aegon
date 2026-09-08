@@ -1,3 +1,8 @@
+// Copyright (c) The Aegon Authors.
+//
+// This source code is licensed under the MIT license found in the
+// LICENSE file in the root directory of this source tree.
+
 //! User-side consistency check (paper §5.2 / §6.1).
 //!
 //! Given two epoch commitments `s0 < s1` (both fetched from the
@@ -19,8 +24,8 @@
 //! polynomials are unanchored and equality at `s0`/`s1` proves
 //! nothing.
 
-use ark_ec::pairing::Pairing;
 use akd_core::aegon_crypto::transcript::IOPTranscript;
+use ark_ec::pairing::Pairing;
 
 use super::config::VerifierContext;
 use super::error::AegonError;

@@ -1,3 +1,8 @@
+// Copyright (c) The Aegon Authors.
+//
+// This source code is licensed under the MIT license found in the
+// LICENSE file in the root directory of this source tree.
+
 //! `aegon_coordinator_server` — user-facing coordinator binary.
 //!
 //! Sets up a `ShardedAegon`, connects to every shard via gRPC, and
@@ -187,7 +192,7 @@ fn main() -> ExitCode {
         Err(e) => {
             eprintln!("error: config invalid: {e}");
             return ExitCode::from(2);
-        },
+        }
     };
 
     eprintln!(
@@ -204,7 +209,7 @@ fn main() -> ExitCode {
         Err(e) => {
             eprintln!("error: setup failed: {e}");
             return ExitCode::from(1);
-        },
+        }
     };
     eprintln!(
         "coordinator: setup OK in {:.1} ms",
@@ -261,7 +266,7 @@ fn main() -> ExitCode {
             Err(e) => {
                 eprintln!("error: seed publish failed: {e}");
                 return ExitCode::from(1);
-            },
+            }
         }
     }
 
@@ -270,15 +275,14 @@ fn main() -> ExitCode {
         Err(e) => {
             eprintln!("error: invalid --listen {:?}: {e}", args.listen);
             return ExitCode::from(2);
-        },
+        }
     };
 
     // Wrap the (possibly already-seeded) `ShardedAegon` in the gRPC
     // adapter and serve. Drops into a tokio runtime here because the
     // setup phase is sync but the serve path is async.
-    let server = CoordinatorServer::<Bn254, Pcs, EcVrfHash>::from_shared(Arc::new(
-        AsyncRwLock::new(state),
-    ));
+    let server =
+        CoordinatorServer::<Bn254, Pcs, EcVrfHash>::from_shared(Arc::new(AsyncRwLock::new(state)));
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -287,7 +291,7 @@ fn main() -> ExitCode {
         Err(e) => {
             eprintln!("error: failed to build tokio runtime: {e}");
             return ExitCode::from(1);
-        },
+        }
     };
     eprintln!("coordinator: serving on {addr}");
     if let Err(e) = runtime.block_on(server.serve(addr)) {
@@ -325,10 +329,7 @@ mod tests {
         assert_eq!(bytes[hex.len()], b'\n');
         // Tmp sibling must not survive a successful rename.
         let mut tmp = path.clone();
-        let fname = format!(
-            "{}.tmp",
-            path.file_name().unwrap().to_string_lossy()
-        );
+        let fname = format!("{}.tmp", path.file_name().unwrap().to_string_lossy());
         tmp.set_file_name(fname);
         assert!(
             !tmp.exists(),
@@ -341,8 +342,7 @@ mod tests {
     fn refuses_to_clobber_existing_file() {
         let path = unique_path("clobber");
         std::fs::write(&path, b"stale").expect("seed existing file");
-        let err = write_pubkey_atomic(&path, "deadbeef")
-            .expect_err("must refuse existing file");
+        let err = write_pubkey_atomic(&path, "deadbeef").expect_err("must refuse existing file");
         assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
         // Existing content untouched.
         let bytes = std::fs::read(&path).expect("read back");

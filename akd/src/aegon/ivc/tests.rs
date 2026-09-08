@@ -1,3 +1,8 @@
+// Copyright (c) The Aegon Authors.
+//
+// This source code is licensed under the MIT license found in the
+// LICENSE file in the root directory of this source tree.
+
 //! End-to-end IVC audit tests: fold a real chain of epochs, then
 //! verify it as an auditor would.
 
@@ -14,9 +19,7 @@ use super::verifier::{initial_state, verify_against_merkle_root, verify_ivc_audi
 /// Nova setup and folding stay fast enough for a unit test; the shard
 /// count does not change the statement, only its width.
 fn small_setup(n_shards: usize) -> Arc<IvcAuditParams> {
-    Arc::new(
-        IvcAuditParams::setup(params(n_shards), test_h()).expect("IVC parameter setup"),
-    )
+    Arc::new(IvcAuditParams::setup(params(n_shards), test_h()).expect("IVC parameter setup"))
 }
 
 /// Fold three honest epochs and verify the single resulting proof.
@@ -206,16 +209,10 @@ fn merkle_root_binding_is_enforced() {
     let last = epochs.last().expect("non-empty");
     let published = [7u8; 32];
 
-    assert!(verify_against_merkle_root(
-        &ivc,
-        proof,
-        2,
-        prover.z0(),
-        last,
-        published,
-        || published,
-    )
-    .is_ok());
+    assert!(
+        verify_against_merkle_root(&ivc, proof, 2, prover.z0(), last, published, || published,)
+            .is_ok()
+    );
 
     assert!(
         verify_against_merkle_root(&ivc, proof, 2, prover.z0(), last, published, || [9u8; 32])
@@ -257,10 +254,7 @@ fn state_digest_matches_native_after_folding() {
         .verify(ivc.public_params(), 1, prover.z0())
         .expect("verify");
     assert_eq!(z[0], super::bridge::CircuitField::from(1u64));
-    assert_eq!(
-        z[3],
-        poseidon_state_digest(ivc.ro_consts(), p, &epochs[1])
-    );
+    assert_eq!(z[3], poseidon_state_digest(ivc.ro_consts(), p, &epochs[1]));
     let _ = ArkFr::from(0u64);
 }
 
@@ -285,9 +279,8 @@ fn compressed_proof_verifies_and_stays_bound() {
     let compressed = compress(&ivc, &pk, prover.proof().expect("proof")).expect("compress");
     let last = epochs.last().expect("non-empty");
 
-    let verified =
-        verify_compressed_ivc_audit(&ivc, &vk, &compressed, 2, prover.z0(), last)
-            .expect("compressed audit verifies");
+    let verified = verify_compressed_ivc_audit(&ivc, &vk, &compressed, 2, prover.z0(), last)
+        .expect("compressed audit verifies");
     assert_eq!(verified.epochs, 2);
 
     // Still bound to its epoch.
@@ -402,13 +395,8 @@ fn tampering_any_group_is_caught() {
     let mut tampered = epochs[1].clone();
     tampered[3].rand_value = rand_point(&mut r);
 
-    let res = verify_grouped_folding_proofs(
-        &gp,
-        &proofs,
-        prover.num_steps(),
-        &epochs[0],
-        &tampered,
-    );
+    let res =
+        verify_grouped_folding_proofs(&gp, &proofs, prover.num_steps(), &epochs[0], &tampered);
     assert!(
         res.is_err(),
         "a tampered shard in group 1 must be rejected, not just one in group 0"
@@ -569,4 +557,3 @@ fn more_groups_means_a_proportionally_smaller_circuit() {
          {marginal_hi} vs {marginal_lo}"
     );
 }
-

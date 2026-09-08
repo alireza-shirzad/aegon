@@ -1,3 +1,8 @@
+// Copyright (c) The Aegon Authors.
+//
+// This source code is licensed under the MIT license found in the
+// LICENSE file in the root directory of this source tree.
+
 //! gRPC transport for sharded Aegon.
 //!
 //! The in-process `ShardedAegon` coordinator owns a `Vec<Aegon<E,P,H>>`
@@ -31,19 +36,22 @@ use tonic::transport::{Certificate, Channel, ClientTlsConfig, Identity, Server, 
 use tonic::{Request, Response, Status};
 
 use super::config::VerifierContext;
-use super::error::AegonError;
-use super::hash::{HashSuite, Sha256Hash};
-use super::server::Aegon;
 use super::db::{
     key_history_openings_local, key_label_placement, key_shard_state, key_value, key_value_history,
     Db, DbOp, DbSource, RedisDb,
 };
+use super::error::AegonError;
+use super::hash::{HashSuite, Sha256Hash};
+use super::server::Aegon;
 use super::server::AegonCheckpoint;
 use super::sharded::ShardWrite;
 use super::types::{AegonPcs, EpochCommitment, Label, Value};
 
 // Generated tonic code lives in this module. `tonic-build` emits one
 // rust module per proto package; ours is `aegon.shard.v1`.
+// Generated code carries no rustdoc; the crate-level `warn(missing_docs)`
+// cannot be satisfied for types we do not author.
+#[allow(missing_docs)]
 pub mod proto {
     tonic::include_proto!("aegon.shard.v1");
 }
@@ -53,13 +61,12 @@ use proto::shard_service_server::{ShardService, ShardServiceServer};
 use proto::{
     ApplyPersistenceOpsRequest, ApplyPersistenceOpsResponse, CommitmentResponse, Empty,
     FetchHistoryOpeningsRequest, FetchHistoryOpeningsResponse, FetchLabelPlacementRequest,
-    FetchLabelPlacementResponse, FetchValueHistoryRequest, FetchValueHistoryResponse,
-    FetchLabelProofTrailRequest, FetchLabelProofTrailResponse, FetchValueRequest,
-    FetchValueResponse, FindLabelSlotRequest, FindLabelSlotResponse,
-    OpenResponse, PublishBatchRequest, PublishBatchResponse, PublishPhase1Request,
-    PublishPhase1Response, PublishPhase2AndPersistRequest, PublishPhase2AndPersistResponse,
-    ReconfigurePrefillRequest, ReconfigurePrefillResponse, SlotEpochRequest,
-    SlotOccupiedResponse, SlotRequest,
+    FetchLabelPlacementResponse, FetchLabelProofTrailRequest, FetchLabelProofTrailResponse,
+    FetchValueHistoryRequest, FetchValueHistoryResponse, FetchValueRequest, FetchValueResponse,
+    FindLabelSlotRequest, FindLabelSlotResponse, OpenResponse, PublishBatchRequest,
+    PublishBatchResponse, PublishPhase1Request, PublishPhase1Response,
+    PublishPhase2AndPersistRequest, PublishPhase2AndPersistResponse, ReconfigurePrefillRequest,
+    ReconfigurePrefillResponse, SlotEpochRequest, SlotOccupiedResponse, SlotRequest,
 };
 
 // ---------- wire encoding helpers --------------------------------------
@@ -198,11 +205,7 @@ where
     /// impl, which has no path to call into a remote shard's prefill,
     /// can keep the no-op default — remote prefill is driven at boot
     /// time via `aegon_shard_server --prefill-count`.
-    fn prefill_random_in_place(
-        &mut self,
-        _count: usize,
-        _seed: u64,
-    ) -> Result<(), AegonError> {
+    fn prefill_random_in_place(&mut self, _count: usize, _seed: u64) -> Result<(), AegonError> {
         Err(AegonError::Config(
             "prefill_random_in_place not supported via this transport — set --prefill-count at shard boot time"
                 .into(),
@@ -239,8 +242,7 @@ where
         P::Commitment: Clone,
     {
         Err(AegonError::Config(
-            "publish_batch not supported via this transport — wire up the PublishBatch RPC"
-                .into(),
+            "publish_batch not supported via this transport — wire up the PublishBatch RPC".into(),
         ))
     }
 
@@ -341,20 +343,14 @@ where
     /// `&self` context like `persist_publish_to_db`. The remote impl
     /// constructs a fresh `ShardServiceClient` from the cached Channel
     /// per call; the in-process default is a no-op.
-    fn apply_persistence_ops(
-        &self,
-        _ops_bytes: &[u8],
-    ) -> Result<(), AegonError> {
+    fn apply_persistence_ops(&self, _ops_bytes: &[u8]) -> Result<(), AegonError> {
         Ok(())
     }
 
     /// Read the raw value bytes for `label` from this shard's DB.
     /// Returns `Ok(None)` when the shard has no DB (in-process tests)
     /// or when the label is absent.
-    fn fetch_value(
-        &self,
-        _label: &super::types::Label,
-    ) -> Result<Option<Vec<u8>>, AegonError> {
+    fn fetch_value(&self, _label: &super::types::Label) -> Result<Option<Vec<u8>>, AegonError> {
         Ok(None)
     }
 
@@ -466,13 +462,9 @@ where
 
     /// Read the `HistoryOpenings<E,P>` bytes for `epoch` from this
     /// shard's DB. `Ok(None)` when missing.
-    fn fetch_history_openings(
-        &self,
-        _epoch: u64,
-    ) -> Result<Option<Vec<u8>>, AegonError> {
+    fn fetch_history_openings(&self, _epoch: u64) -> Result<Option<Vec<u8>>, AegonError> {
         Ok(None)
     }
-
 }
 
 // ---------- in-process impl: Aegon directly is a ShardHandle -----------
@@ -599,18 +591,16 @@ where
         let prev_epoch = entry.epoch.saturating_sub(1);
         let post_epoch = entry.epoch;
         // Fetch all three tau snapshots up front (cheap reads).
-        let rand_value_pre_tau =
-            self.rand_value_tau_at_epoch(prev_epoch).ok_or_else(|| {
-                AegonError::Config(format!(
-                    "remask_value_history_entry: rand_value tau missing for epoch {prev_epoch}"
-                ))
-            })?;
-        let rand_value_post_tau =
-            self.rand_value_tau_at_epoch(post_epoch).ok_or_else(|| {
-                AegonError::Config(format!(
-                    "remask_value_history_entry: rand_value tau missing for epoch {post_epoch}"
-                ))
-            })?;
+        let rand_value_pre_tau = self.rand_value_tau_at_epoch(prev_epoch).ok_or_else(|| {
+            AegonError::Config(format!(
+                "remask_value_history_entry: rand_value tau missing for epoch {prev_epoch}"
+            ))
+        })?;
+        let rand_value_post_tau = self.rand_value_tau_at_epoch(post_epoch).ok_or_else(|| {
+            AegonError::Config(format!(
+                "remask_value_history_entry: rand_value tau missing for epoch {post_epoch}"
+            ))
+        })?;
         let value_post_tau = self.value_tau_at_epoch(post_epoch).ok_or_else(|| {
             AegonError::Config(format!(
                 "remask_value_history_entry: value tau missing for epoch {post_epoch}"
@@ -626,43 +616,42 @@ where
         // saves ~2/3 of the wall (~50 ms → ~17 ms per entry); with a
         // real masking server it cuts the fetch+apply RTT × 3 down to
         // a single concurrent burst.
-        let ((rand_value_pre_proof, rand_value_post_proof), value_post_proof) =
-            rayon::join(
-                || {
-                    rayon::join(
-                        || {
-                            self.remask_value_side_proof(
-                                &entry.prev_shard_commit.rand_value_commitment,
-                                &entry.slot_bits,
-                                &entry.rand_value_pre_eval,
-                                entry.rand_value_pre_proof.clone(),
-                                &rand_value_pre_tau,
-                                b"aegon.rand_value.open",
-                            )
-                        },
-                        || {
-                            self.remask_value_side_proof(
-                                &entry.post_shard_commit.rand_value_commitment,
-                                &entry.slot_bits,
-                                &entry.rand_value_post_eval,
-                                entry.rand_value_post_proof.clone(),
-                                &rand_value_post_tau,
-                                b"aegon.rand_value.open",
-                            )
-                        },
-                    )
-                },
-                || {
-                    self.remask_value_side_proof(
-                        &entry.post_shard_commit.value_commitment,
-                        &entry.slot_bits,
-                        &entry.value_post_eval,
-                        entry.value_post_proof.clone(),
-                        &value_post_tau,
-                        b"aegon.value.open",
-                    )
-                },
-            );
+        let ((rand_value_pre_proof, rand_value_post_proof), value_post_proof) = rayon::join(
+            || {
+                rayon::join(
+                    || {
+                        self.remask_value_side_proof(
+                            &entry.prev_shard_commit.rand_value_commitment,
+                            &entry.slot_bits,
+                            &entry.rand_value_pre_eval,
+                            entry.rand_value_pre_proof.clone(),
+                            &rand_value_pre_tau,
+                            b"aegon.rand_value.open",
+                        )
+                    },
+                    || {
+                        self.remask_value_side_proof(
+                            &entry.post_shard_commit.rand_value_commitment,
+                            &entry.slot_bits,
+                            &entry.rand_value_post_eval,
+                            entry.rand_value_post_proof.clone(),
+                            &rand_value_post_tau,
+                            b"aegon.rand_value.open",
+                        )
+                    },
+                )
+            },
+            || {
+                self.remask_value_side_proof(
+                    &entry.post_shard_commit.value_commitment,
+                    &entry.slot_bits,
+                    &entry.value_post_eval,
+                    entry.value_post_proof.clone(),
+                    &value_post_tau,
+                    b"aegon.value.open",
+                )
+            },
+        );
         let rand_value_pre_proof = rand_value_pre_proof?;
         let rand_value_post_proof = rand_value_post_proof?;
         let value_post_proof = value_post_proof?;
@@ -682,11 +671,7 @@ where
         Aegon::verifier_context(self)
     }
 
-    fn prefill_random_in_place(
-        &mut self,
-        count: usize,
-        seed: u64,
-    ) -> Result<(), AegonError> {
+    fn prefill_random_in_place(&mut self, count: usize, seed: u64) -> Result<(), AegonError> {
         use ark_std::rand::SeedableRng;
         // Reset back to epoch-0 first so multi-stage fill-percent
         // sweeps can call this repeatedly on the same Aegon —
@@ -788,10 +773,7 @@ impl ShardServerTlsConfig {
     /// Load a PEM-encoded server certificate + matching private key
     /// from disk. The cert may be a chain (concatenated PEM blocks);
     /// the key must be the matching leaf.
-    pub fn from_pem_files(
-        cert_path: &Path,
-        key_path: &Path,
-    ) -> Result<Self, AegonError> {
+    pub fn from_pem_files(cert_path: &Path, key_path: &Path) -> Result<Self, AegonError> {
         let cert = std::fs::read(cert_path).map_err(|e| {
             AegonError::Config(format!("read tls cert '{}': {e}", cert_path.display()))
         })?;
@@ -872,7 +854,7 @@ where
                 return Err(AegonError::Config(
                     "ShardServer::new_with_checkpoint requires a Redis or Rocks DbSource".into(),
                 ));
-            },
+            }
             DbSource::Redis(url) => Arc::new(RedisDb::connect(&url)?),
             DbSource::Rocks(path) => Arc::new(crate::aegon::db::RocksDb::open(&path)?),
         };
@@ -884,15 +866,9 @@ where
     }
 
     /// Bind and serve indefinitely on `addr` (plaintext HTTP/2).
-    pub async fn serve(
-        self,
-        addr: std::net::SocketAddr,
-    ) -> Result<(), tonic::transport::Error> {
+    pub async fn serve(self, addr: std::net::SocketAddr) -> Result<(), tonic::transport::Error> {
         let service = Self::wrap_service(self);
-        Self::tuned_builder()
-            .add_service(service)
-            .serve(addr)
-            .await
+        Self::tuned_builder().add_service(service).serve(addr).await
     }
 
     /// Bind and serve indefinitely on `addr` with TLS. The
@@ -1204,10 +1180,7 @@ where
         Ok(Response::new(ReconfigurePrefillResponse {}))
     }
 
-    async fn clear_dictionary(
-        &self,
-        _req: Request<Empty>,
-    ) -> Result<Response<Empty>, Status> {
+    async fn clear_dictionary(&self, _req: Request<Empty>) -> Result<Response<Empty>, Status> {
         let mut aegon = self.aegon.write().await;
         // Restores from the in-memory `setup_baseline` — see
         // `Aegon::clear_dictionary` on the server side. Cheap relative
@@ -1352,9 +1325,7 @@ where
     ) -> Result<Response<proto::FetchFullValueHistoryResponse>, Status> {
         let label = req.into_inner().label;
         let db = self.db.as_ref().ok_or_else(|| {
-            Status::failed_precondition(
-                "shard has no DB configured for FetchFullValueHistory",
-            )
+            Status::failed_precondition("shard has no DB configured for FetchFullValueHistory")
         })?;
         // Read sliding window directly from this shard's DB.
         let mut raw_entries = db
@@ -1430,24 +1401,22 @@ where
     ) -> Result<Response<proto::FetchFullLabelHistoryResponse>, Status> {
         let label = req.into_inner().label;
         let db = self.db.as_ref().ok_or_else(|| {
-            Status::failed_precondition(
-                "shard has no DB configured for FetchFullLabelHistory",
-            )
+            Status::failed_precondition("shard has no DB configured for FetchFullLabelHistory")
         })?;
-        let Some(placement_bytes) =
-            db.get(&key_label_placement(&label)).map_err(err_to_status)?
+        let Some(placement_bytes) = db
+            .get(&key_label_placement(&label))
+            .map_err(err_to_status)?
         else {
             return Ok(Response::new(proto::FetchFullLabelHistoryResponse {
                 found: false,
                 full_uncompressed: Vec::new(),
             }));
         };
-        let placement = super::sharded::StoredLabelPlacement::<E, P>::deserialize_uncompressed_unchecked(
-            &placement_bytes[..],
-        )
-        .map_err(|e| {
-            Status::internal(format!("decode label placement: {e}"))
-        })?;
+        let placement =
+            super::sharded::StoredLabelPlacement::<E, P>::deserialize_uncompressed_unchecked(
+                &placement_bytes[..],
+            )
+            .map_err(|e| Status::internal(format!("decode label placement: {e}")))?;
         let aegon = self.aegon.read().await;
         let (freshness_eval, freshness_proof) = aegon
             .open_rand_index_at_slot_current(&placement.slot_bits)
@@ -1485,7 +1454,6 @@ where
             },
         }))
     }
-
 }
 
 // ---------- gRPC client: implements ShardHandle ------------------------
@@ -1660,9 +1628,9 @@ where
             if let Some(domain) = &cfg.tls_domain {
                 tls = tls.domain_name(domain);
             }
-            endpoint = endpoint.tls_config(tls).map_err(|e| {
-                AegonError::Config(format!("tls config: {e}"))
-            })?;
+            endpoint = endpoint
+                .tls_config(tls)
+                .map_err(|e| AegonError::Config(format!("tls config: {e}")))?;
         }
 
         let channel = runtime
@@ -1726,8 +1694,7 @@ where
     P: AegonPcs<E>,
     P::VerifierParam: CanonicalDeserialize + Clone,
 {
-    let runtime = Runtime::new()
-        .map_err(|e| AegonError::Config(format!("tokio runtime: {e}")))?;
+    let runtime = Runtime::new().map_err(|e| AegonError::Config(format!("tokio runtime: {e}")))?;
     let ep = tonic::transport::Endpoint::from_shared(endpoint.clone())
         .map_err(|e| AegonError::Config(format!("endpoint '{endpoint}': {e}")))?
         .connect_timeout(Duration::from_secs(10));
@@ -1757,7 +1724,6 @@ where
     P::Commitment: CanonicalDeserialize + Send + Sync,
     P::VerifierParam: Clone + Send + Sync,
 {
-
     /// Run `op` against a fresh client, retrying on transport-level
     /// failures only (`Status::code() == Unavailable | Unknown`). The
     /// `op` closure is async, awaited from this method's owned tokio
@@ -1777,17 +1743,15 @@ where
                 match op(self.client()).await {
                     Ok(v) => return Ok(v),
                     Err(s) => {
-                        let retriable = matches!(
-                            s.code(),
-                            tonic::Code::Unavailable | tonic::Code::Unknown
-                        );
+                        let retriable =
+                            matches!(s.code(), tonic::Code::Unavailable | tonic::Code::Unknown);
                         last_err = Some(s);
                         if !retriable || attempt + 1 == self.retry.max_attempts {
                             break;
                         }
                         tokio::time::sleep(backoff).await;
                         backoff = (backoff * 2).min(self.retry.max_backoff);
-                    },
+                    }
                 }
             }
             Err(status_to_err(last_err.expect("at least one attempt")))
@@ -1989,11 +1953,9 @@ where
     }
 
     fn current_commitment(&self) -> EpochCommitment<E, P> {
-        self.with_retry(|mut client| async move {
-            client.current_commitment(Empty {}).await
-        })
-        .and_then(|r| decode(&r.into_inner().epoch_commitment))
-        .expect("current_commitment RPC")
+        self.with_retry(|mut client| async move { client.current_commitment(Empty {}).await })
+            .and_then(|r| decode(&r.into_inner().epoch_commitment))
+            .expect("current_commitment RPC")
     }
 
     fn verifier_context(&self) -> VerifierContext<E, P> {
@@ -2004,26 +1966,21 @@ where
         self.cached_log_capacity
     }
 
-    fn prefill_random_in_place(
-        &mut self,
-        count: usize,
-        seed: u64,
-    ) -> Result<(), AegonError> {
+    fn prefill_random_in_place(&mut self, count: usize, seed: u64) -> Result<(), AegonError> {
         let req = ReconfigurePrefillRequest {
             count: count as u64,
             seed,
         };
         let _ = self.with_retry(move |mut client| {
-            let req = req.clone();
+            let req = req;
             async move { client.reconfigure_prefill(req).await }
         })?;
         Ok(())
     }
 
     fn clear_dictionary(&mut self) -> Result<(), AegonError> {
-        let _ = self.with_retry(|mut client| async move {
-            client.clear_dictionary(Empty {}).await
-        })?;
+        let _ =
+            self.with_retry(|mut client| async move { client.clear_dictionary(Empty {}).await })?;
         Ok(())
     }
 
@@ -2126,27 +2083,18 @@ where
         Ok(())
     }
 
-    fn fetch_value(
-        &self,
-        label: &super::types::Label,
-    ) -> Result<Option<Vec<u8>>, AegonError> {
+    fn fetch_value(&self, label: &super::types::Label) -> Result<Option<Vec<u8>>, AegonError> {
         let req = FetchValueRequest {
             label: label.clone(),
         };
-        let resp = self.runtime.block_on(async {
-            self.client()
-                .fetch_value(req)
-                .await
-                .map_err(status_to_err)
-        })?;
+        let resp = self
+            .runtime
+            .block_on(async { self.client().fetch_value(req).await.map_err(status_to_err) })?;
         let inner = resp.into_inner();
         Ok(if inner.found { Some(inner.value) } else { None })
     }
 
-    fn fetch_value_history(
-        &self,
-        label: &super::types::Label,
-    ) -> Result<Vec<Vec<u8>>, AegonError> {
+    fn fetch_value_history(&self, label: &super::types::Label) -> Result<Vec<Vec<u8>>, AegonError> {
         let req = FetchValueHistoryRequest {
             label: label.clone(),
         };
@@ -2180,8 +2128,7 @@ where
                 freshness_proof: None,
             });
         }
-        let full: super::sharded::FullValueHistory<E, P> =
-            decode(&inner.history_uncompressed)?;
+        let full: super::sharded::FullValueHistory<E, P> = decode(&inner.history_uncompressed)?;
         Ok(full)
     }
 
@@ -2223,8 +2170,7 @@ where
         if !inner.found {
             return Ok(None);
         }
-        let full: super::sharded::FullLabelHistory<E, P> =
-            decode(&inner.full_uncompressed)?;
+        let full: super::sharded::FullLabelHistory<E, P> = decode(&inner.full_uncompressed)?;
         Ok(Some(full))
     }
 
@@ -2243,7 +2189,6 @@ where
             None
         })
     }
-
 }
 
 // Unused but useful to anchor the type aliases at module-scope.

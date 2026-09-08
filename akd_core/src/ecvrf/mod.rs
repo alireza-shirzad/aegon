@@ -1,9 +1,7 @@
 // Copyright (c) Meta Platforms, Inc. and affiliates.
 //
-// This source code is dual-licensed under either the MIT license found in the
-// LICENSE-MIT file in the root directory of this source tree or the Apache
-// License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-// of this source tree. You may select, at your option, one of the above-listed licenses.
+// This source code is licensed under the MIT license found in the
+// LICENSE file in the root directory of this source tree.
 
 //! This module contains implementations of a
 //! [verifiable random function](https://en.wikipedia.org/wiki/Verifiable_random_function)
@@ -26,8 +24,7 @@ mod ecvrf_impl;
 mod traits;
 // export the functionality we want visible
 pub use crate::ecvrf::ecvrf_impl::{
-    Output, Proof, VRFExpandedPrivateKey, VRFPrivateKey, VRFPublicKey, OUTPUT_LENGTH,
-    PROOF_LENGTH,
+    Output, Proof, VRFExpandedPrivateKey, VRFPrivateKey, VRFPublicKey, OUTPUT_LENGTH, PROOF_LENGTH,
 };
 pub use crate::ecvrf::traits::VRFKeyStorage;
 #[cfg(feature = "nostd")]

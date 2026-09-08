@@ -1,3 +1,8 @@
+// Copyright (c) The Aegon Authors.
+//
+// This source code is licensed under the MIT license found in the
+// LICENSE file in the root directory of this source tree.
+
 //! Runtime RSS instrumentation for diagnosing shard memory spikes.
 //!
 //! Cheap when disabled (one relaxed atomic load). Enable via

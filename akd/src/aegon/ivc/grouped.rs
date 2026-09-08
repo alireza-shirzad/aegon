@@ -1,3 +1,8 @@
+// Copyright (c) The Aegon Authors.
+//
+// This source code is licensed under the MIT license found in the
+// LICENSE file in the root directory of this source tree.
+
 //! Group-sharded auditing: split the shard set into `G` independent
 //! folding chains that prove in parallel.
 //!
@@ -52,7 +57,6 @@ use std::sync::Arc;
 
 use ark_bn254::G1Affine as ArkG1Affine;
 use rayon::prelude::*;
-
 
 use super::circuit::SigmaWitness;
 use super::fs_poseidon::{FsParams, ShardCommitments};
@@ -244,10 +248,7 @@ pub struct GroupedAuditProof {
 impl GroupedAuditProof {
     /// Total wire size an auditor downloads, in bytes.
     pub fn size_bytes(&self) -> usize {
-        self.per_group
-            .iter()
-            .map(compressed_proof_size_bytes)
-            .sum()
+        self.per_group.iter().map(compressed_proof_size_bytes).sum()
     }
 
     /// Number of groups this proof covers.

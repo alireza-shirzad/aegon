@@ -1,3 +1,8 @@
+// Copyright (c) The Aegon Authors.
+//
+// This source code is licensed under the MIT license found in the
+// LICENSE file in the root directory of this source tree.
+
 //! End-to-end exercise of the audit-path sigma protocol (§7).
 //!
 //! Confirms three things on the zk publish/audit path:
@@ -24,8 +29,8 @@
 //! having to fix the unrelated test_errors gating.
 
 use akd::aegon::{
-    verify_sharded_invariance, ShardedAuditState, DbSource, EcVrfHash, ShardTransport, ShardedAegon,
-    ShardedAegonConfig, VrfProver, BENCH_VRF_SEED,
+    verify_sharded_invariance, DbSource, EcVrfHash, ShardTransport, ShardedAegon,
+    ShardedAegonConfig, ShardedAuditState, VrfProver, BENCH_VRF_SEED,
 };
 use akd_core::aegon_crypto::pcs::kzhk::KZHK;
 use ark_bn254::{Bn254, Fr};
@@ -55,14 +60,19 @@ fn run_zk_path() {
     server.set_vrf_prover(VrfProver::from_seed(&BENCH_VRF_SEED));
 
     let ctx = server.sharded_verifier_context();
-    let prev = server
-        .epoch_commitment(0)
-        .expect("epoch-0 commit retained");
+    let prev = server.epoch_commitment(0).expect("epoch-0 commit retained");
 
     let updates: Vec<(Vec<u8>, Vec<u8>)> = (0..6)
-        .map(|i| (format!("alice-{i}").into_bytes(), format!("pk-{i}").into_bytes()))
+        .map(|i| {
+            (
+                format!("alice-{i}").into_bytes(),
+                format!("pk-{i}").into_bytes(),
+            )
+        })
         .collect();
-    let next = server.publish_two_layer(&updates).expect("publish_two_layer zk");
+    let next = server
+        .publish_two_layer(&updates)
+        .expect("publish_two_layer zk");
     println!("  published epoch {}.", next.epoch);
 
     // (1) Each per-shard leaf must carry a sigma proof under hiding SRS.
@@ -88,14 +98,14 @@ fn run_zk_path() {
     // the proof was generated against, and `s·h ≠ R + e·residue`.
     {
         let mut tampered = next.clone();
-        let swapped = tampered.per_shard[1].value_commitment.clone();
+        let swapped = tampered.per_shard[1].value_commitment;
         tampered.per_shard[0].value_commitment = swapped;
         // Rebuild merkle root so the structural pre-check passes and
         // the audit actually reaches verify_chain.
         tampered.merkle_root = akd::aegon::merkle_root(&tampered.per_shard);
         let mut audit_state = ShardedAuditState::<Fr>::default();
-        let ok = verify_sharded_invariance(&ctx, &mut audit_state, &prev, &tampered)
-            .expect("audit");
+        let ok =
+            verify_sharded_invariance(&ctx, &mut audit_state, &prev, &tampered).expect("audit");
         assert!(!ok, "tampered value_commitment must trip the sigma check");
     }
     println!("  ✓ tampered next.value_commitment is rejected.");
@@ -110,8 +120,8 @@ fn run_zk_path() {
         }
         stripped.merkle_root = akd::aegon::merkle_root(&stripped.per_shard);
         let mut audit_state = ShardedAuditState::<Fr>::default();
-        let ok = verify_sharded_invariance(&ctx, &mut audit_state, &prev, &stripped)
-            .expect("audit");
+        let ok =
+            verify_sharded_invariance(&ctx, &mut audit_state, &prev, &stripped).expect("audit");
         assert!(!ok, "missing sigma proof in zk mode must be rejected");
     }
     println!("  ✓ missing proof in zk mode is rejected (policy gate).");
@@ -128,9 +138,16 @@ fn run_non_zk_path() {
     let ctx = server.sharded_verifier_context();
     let prev = server.epoch_commitment(0).expect("epoch 0");
     let updates: Vec<(Vec<u8>, Vec<u8>)> = (0..6)
-        .map(|i| (format!("bob-{i}").into_bytes(), format!("pk-{i}").into_bytes()))
+        .map(|i| {
+            (
+                format!("bob-{i}").into_bytes(),
+                format!("pk-{i}").into_bytes(),
+            )
+        })
         .collect();
-    let next = server.publish_two_layer(&updates).expect("publish_two_layer non-zk");
+    let next = server
+        .publish_two_layer(&updates)
+        .expect("publish_two_layer non-zk");
 
     for (i, shard_commit) in next.per_shard.iter().enumerate() {
         assert!(
@@ -141,9 +158,11 @@ fn run_non_zk_path() {
     println!("  ✓ every per-shard EpochCommitment has None proof slot.");
 
     let mut audit_state = ShardedAuditState::<Fr>::default();
-    let ok =
-        verify_sharded_invariance(&ctx, &mut audit_state, &prev, &next).expect("audit non-zk");
-    assert!(ok, "honest non-zk transition must pass the bare chain check");
+    let ok = verify_sharded_invariance(&ctx, &mut audit_state, &prev, &next).expect("audit non-zk");
+    assert!(
+        ok,
+        "honest non-zk transition must pass the bare chain check"
+    );
     println!("  ✓ honest non-zk transition accepts via bare equality.");
 }
 

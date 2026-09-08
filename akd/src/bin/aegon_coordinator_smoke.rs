@@ -1,3 +1,8 @@
+// Copyright (c) The Aegon Authors.
+//
+// This source code is licensed under the MIT license found in the
+// LICENSE file in the root directory of this source tree.
+
 //! `aegon_coordinator_smoke` — end-to-end smoke test for a remote
 //! shard cluster. Run on the coordinator machine after all shard
 //! servers are up. Connects to every shard listed in `--endpoints`,
@@ -120,7 +125,7 @@ fn main() -> ExitCode {
         Err(e) => {
             eprintln!("error: config invalid: {e}");
             return ExitCode::from(2);
-        },
+        }
     };
 
     // Setup: this is the only step that contacts every shard up-front
@@ -139,7 +144,7 @@ fn main() -> ExitCode {
         Err(e) => {
             eprintln!("error: setup failed: {e}");
             return ExitCode::from(1);
-        },
+        }
     };
     server.set_vrf_prover(VrfProver::from_env());
     let setup_ms = t0.elapsed().as_millis();
@@ -147,7 +152,12 @@ fn main() -> ExitCode {
 
     // Publish a batch.
     let updates: Vec<(Vec<u8>, Vec<u8>)> = (0..args.n_users)
-        .map(|i| (format!("user-{i}").into_bytes(), format!("v-{i}").into_bytes()))
+        .map(|i| {
+            (
+                format!("user-{i}").into_bytes(),
+                format!("v-{i}").into_bytes(),
+            )
+        })
         .collect();
     let t0 = Instant::now();
     let commit = match server.publish_two_layer(&updates) {
@@ -155,7 +165,7 @@ fn main() -> ExitCode {
         Err(e) => {
             eprintln!("error: publish failed: {e}");
             return ExitCode::from(1);
-        },
+        }
     };
     let publish_ms = t0.elapsed().as_millis();
     eprintln!(
@@ -179,7 +189,7 @@ fn main() -> ExitCode {
                 eprintln!("error: lookup {label:?} failed: {e}");
                 failures += 1;
                 continue;
-            },
+            }
         };
         if using_db && &db_value != value {
             eprintln!(
@@ -190,17 +200,21 @@ fn main() -> ExitCode {
         }
         let verify_value = if using_db { &db_value } else { value };
         match verify_sharded_lookup_two_layer::<Bn254, Pcs, EcVrfHash>(
-            &ctx, &commit, label, verify_value, &proof,
+            &ctx,
+            &commit,
+            label,
+            verify_value,
+            &proof,
         ) {
-            Ok(true) => {},
+            Ok(true) => {}
             Ok(false) => {
                 eprintln!("error: verify_sharded_lookup_two_layer REJECTED for {label:?}");
                 failures += 1;
-            },
+            }
             Err(e) => {
                 eprintln!("error: verify {label:?} failed: {e}");
                 failures += 1;
-            },
+            }
         }
     }
     let lookup_ms = t0.elapsed().as_millis();

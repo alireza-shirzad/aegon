@@ -1,3 +1,8 @@
+// Copyright (c) The Aegon Authors.
+//
+// This source code is licensed under the MIT license found in the
+// LICENSE file in the root directory of this source tree.
+
 //! `aegon_masking_server` — pre-builds opening-point-agnostic
 //! `KZHKMaskingPackage`s and serves them over gRPC. One per cluster.
 //!
@@ -87,9 +92,9 @@ async fn main() -> ExitCode {
                 Err(e) => {
                     eprintln!("error loading SRS: {e}");
                     return ExitCode::from(1);
-                },
+                }
             }
-        },
+        }
         (None, Some(seed)) => {
             eprintln!(
                 "WARNING: generating hiding SRS in-process from seed {seed} (test mode only)"
@@ -104,7 +109,7 @@ async fn main() -> ExitCode {
                 Err(e) => {
                     eprintln!("error generating SRS: {e:?}");
                     return ExitCode::from(1);
-                },
+                }
             };
             match <Pcs as PolynomialCommitmentScheme<Bn254>>::trim(&srs, None, Some(args.num_vars))
             {
@@ -112,15 +117,17 @@ async fn main() -> ExitCode {
                 Err(e) => {
                     eprintln!("error trimming SRS: {e:?}");
                     return ExitCode::from(1);
-                },
+                }
             }
-        },
+        }
         (None, None) => unreachable!("checked above"),
     };
 
-    let producers = args
-        .producers
-        .unwrap_or_else(|| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4));
+    let producers = args.producers.unwrap_or_else(|| {
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4)
+    });
 
     eprintln!(
         "aegon_masking_server listening on {} (num_vars={}, kzh_k={}, queue_size={}, producers={})",

@@ -1,3 +1,8 @@
+// Copyright (c) The Aegon Authors.
+//
+// This source code is licensed under the MIT license found in the
+// LICENSE file in the root directory of this source tree.
+
 //! Client-side verification of an Aegon lookup proof.
 //!
 //! Re-derives the open-addressing trace from `(label, ctr0)`, verifies the
@@ -12,9 +17,9 @@
 //!   - At `ctr = ctr0` : `index_n(x_ctr0) == H_F(label)`.
 //!   - The value opening verifies and equals `H_F(value)`.
 
+use akd_core::aegon_crypto::transcript::IOPTranscript;
 use ark_ec::pairing::Pairing;
 use ark_ff::Zero;
-use akd_core::aegon_crypto::transcript::IOPTranscript;
 
 use super::config::VerifierContext;
 use super::error::AegonError;

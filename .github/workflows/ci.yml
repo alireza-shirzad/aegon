@@ -1,0 +1,88 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  # Debug symbols dominate target/ size for this dependency graph (arkworks
+  # and nova built from git, plus rocksdb and mysql). A standard runner has
+  # roughly 14 GB free, and keeping them overruns it: the linker dies with
+  # "signal 7 [Bus error]" and then the runner reports no space left.
+  # Nothing here needs a debugger.
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  check:
+    name: fmt + clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler libclang-dev clang
+      # The toolchain (and rustfmt/clippy) comes from rust-toolchain.toml, so
+      # it is pinned identically to the benchmark hosts.
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: rustfmt
+        run: cargo fmt --all -- --check
+      # No `-D` flags on purpose: the lint policy lives in the workspace
+      # manifest's [workspace.lints], and command-line flags override it.
+      # clippy type-checks every target, so this is also the build check.
+      - name: clippy (default features)
+        run: cargo clippy --workspace --all-targets
+      - name: clippy (ivc_audit)
+        run: cargo clippy --workspace --all-targets --features ivc_audit
+
+  test:
+    name: test (${{ matrix.features }})
+    runs-on: ubuntu-latest
+    # The IVC suite folds and compresses real Nova proofs; it is slow.
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - features: default
+            flags: ""
+          - features: ivc_audit
+            flags: "--features ivc_audit"
+    steps:
+      - uses: actions/checkout@v4
+      # Reclaim ~25 GB of preinstalled toolchains we do not use. Without this
+      # the linker runs the runner out of disk part-way through the build.
+      - name: Free disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
+          sudo apt-get clean
+          df -h /
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler libclang-dev clang
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Known-failing tests are marked `#[ignore]` with the reason inline; see
+      # "Test status" in the README. These steps must stay green.
+      #
+      # The two crates are tested in separate invocations on purpose. A
+      # combined `-p akd -p akd_core` unifies features, which switches
+      # `akd_core` to `parallel` (that is how `akd` depends on it) and runs
+      # akd_core's own SRS-heavy unit tests under nested rayon pools. That
+      # currently exhausts the thread limit inside arkworks' MSM.
+      - name: Test akd
+        run: cargo test -p akd ${{ matrix.flags }}
+      - name: Test akd_core
+        run: cargo test -p akd_core
+      - name: Disk usage after
+        if: always()
+        run: df -h /

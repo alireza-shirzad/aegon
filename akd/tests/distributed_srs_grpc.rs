@@ -1,3 +1,8 @@
+// Copyright (c) The Aegon Authors.
+//
+// This source code is licensed under the MIT license found in the
+// LICENSE file in the root directory of this source tree.
+
 //! End-to-end test of the distributed SRS protocol over real gRPC.
 //!
 //! Spins up `n_shards` tonic servers on ephemeral localhost ports,
@@ -142,9 +147,7 @@ async fn distributed_srs_end_to_end() {
     // (not actually exercised in this test, but maintains the
     // invariant the state machine documents).
     for state in &states {
-        state
-            .set_phase(Phase::Ready, "test-complete")
-            .await;
+        state.set_phase(Phase::Ready, "test-complete").await;
     }
 
     // ---- verify: every shard's SRS == in-process reference ----
@@ -240,7 +243,7 @@ async fn distributed_srs_end_to_end() {
                 assert_eq!(resp.pk_bytes, pk);
                 assert_eq!(resp.vk_bytes, vk);
                 assert_eq!(resp.universal_bytes, up);
-            },
+            }
         }
         total_inbound += resp.inbound_slab_bytes;
         total_outbound += resp.outbound_slab_bytes;
@@ -287,12 +290,18 @@ async fn distributed_srs_end_to_end() {
         };
         let state2 = SrsBootstrapState::<E>::new(cfg);
         let hit = try_cache_hit::<E>(&state2).await.expect("try_cache_hit");
-        assert!(hit.is_some(), "second boot for shard {shard_id} should hit cache");
+        assert!(
+            hit.is_some(),
+            "second boot for shard {shard_id} should hit cache"
+        );
 
         let (up2, _, _) = hit.unwrap();
         let mut bytes = Vec::new();
         up2.serialize_uncompressed(&mut bytes).expect("ser");
-        assert_eq!(bytes, ref_bytes, "cache-loaded SRS != reference (shard {shard_id})");
+        assert_eq!(
+            bytes, ref_bytes,
+            "cache-loaded SRS != reference (shard {shard_id})"
+        );
         assert_eq!(
             state2.phase().await,
             Phase::Initializing,
