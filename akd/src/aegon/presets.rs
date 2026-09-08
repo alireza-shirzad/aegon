@@ -1,11 +1,16 @@
+// Copyright (c) The Aegon Authors.
+//
+// This source code is licensed under the MIT license found in the
+// LICENSE file in the root directory of this source tree.
+
 //! Convenience constructors for `AegonConfig` over specific PCS
 //! backends. Importing this module pulls in the relevant PCS crate;
 //! the rest of the Aegon library does not.
 
-use ark_ec::pairing::Pairing;
-use std::marker::PhantomData;
 use akd_core::aegon_crypto::pcs::kzhk::structs::KZHKConfig;
 use akd_core::aegon_crypto::pcs::kzhk::KZHK;
+use ark_ec::pairing::Pairing;
+use std::marker::PhantomData;
 
 use super::config::AegonConfig;
 
@@ -72,11 +77,7 @@ pub fn optimal_kzh_k(log_capacity: usize) -> usize {
 ///   proofs at the cost of more server work.
 /// * `private` — whether to run in privacy-preserving mode. Wires
 ///   `zk = private` into `KZHKConfig`.
-pub fn kzh<E: Pairing>(
-    log_capacity: usize,
-    k: usize,
-    private: bool,
-) -> AegonConfig<E, KZHK<E>> {
+pub fn kzh<E: Pairing>(log_capacity: usize, k: usize, private: bool) -> AegonConfig<E, KZHK<E>> {
     assert!(log_capacity > 0, "log_capacity must be positive");
     assert!(k > 0 && k <= log_capacity, "k must be in 1..=log_capacity");
     AegonConfig {

@@ -1,3 +1,8 @@
+// Copyright (c) The Aegon Authors.
+//
+// This source code is licensed under the MIT license found in the
+// LICENSE file in the root directory of this source tree.
+
 //! Microbench for the ECVRF prove/verify path used by `EcVrfHash`.
 //!
 //! What this measures: per-call cost of
@@ -66,7 +71,7 @@ fn verifier() -> &'static VrfVerifier {
     V.get_or_init(|| VrfVerifier::new(prover().public_key().clone()))
 }
 
-#[divan::bench(args = num_vars().iter().copied().collect::<Vec<_>>(), sample_count = 50)]
+#[divan::bench(args = num_vars().to_vec(), sample_count = 50)]
 fn vrf_prove(bencher: divan::Bencher, nv: usize) {
     let p = prover();
     bencher.bench_local(|| {
@@ -75,7 +80,7 @@ fn vrf_prove(bencher: divan::Bencher, nv: usize) {
     });
 }
 
-#[divan::bench(args = num_vars().iter().copied().collect::<Vec<_>>(), sample_count = 50)]
+#[divan::bench(args = num_vars().to_vec(), sample_count = 50)]
 fn vrf_verify(bencher: divan::Bencher, nv: usize) {
     let p = prover();
     let v = verifier();
@@ -88,7 +93,7 @@ fn vrf_verify(bencher: divan::Bencher, nv: usize) {
     });
 }
 
-#[divan::bench(args = num_vars().iter().copied().collect::<Vec<_>>(), sample_count = 50)]
+#[divan::bench(args = num_vars().to_vec(), sample_count = 50)]
 fn sha256_h_bits(bencher: divan::Bencher, nv: usize) {
     bencher.bench_local(|| {
         let bits = <Sha256Hash as HashSuite<Fr>>::h_bits(CTR, LABEL, nv);

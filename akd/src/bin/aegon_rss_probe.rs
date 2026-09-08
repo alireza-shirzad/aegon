@@ -1,3 +1,8 @@
+// Copyright (c) The Aegon Authors.
+//
+// This source code is licensed under the MIT license found in the
+// LICENSE file in the root directory of this source tree.
+
 //! In-process driver for diagnosing publish-time memory spikes.
 //!
 //! Builds a single-shard `ShardedAegon`, climbs to `--fill-count`
@@ -19,9 +24,9 @@ use std::time::Instant;
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-use akd::aegon::{optimal_kzh_k, EcVrfHash};
 use akd::aegon::config::AegonConfig;
 use akd::aegon::server::Aegon;
+use akd::aegon::{optimal_kzh_k, EcVrfHash};
 use akd_core::aegon_crypto::pcs::kzhk::structs::KZHKConfig;
 use ark_bn254::Bn254;
 use ark_std::rand::SeedableRng;
@@ -108,7 +113,7 @@ fn main() -> ExitCode {
         Err(e) => {
             eprintln!("setup failed: {e}");
             return ExitCode::from(1);
-        },
+        }
     };
     if args.no_retain_epoch_polys {
         server.set_retain_epoch_polys(false);
@@ -128,7 +133,10 @@ fn main() -> ExitCode {
 
     let mut published = 0usize;
     if args.fill_count > 0 {
-        eprintln!("--- climb start: target={} batch={} ---", args.fill_count, args.climb_batch);
+        eprintln!(
+            "--- climb start: target={} batch={} ---",
+            args.fill_count, args.climb_batch
+        );
         let t0 = Instant::now();
         while published < args.fill_count {
             let remaining = args.fill_count - published;
@@ -149,7 +157,10 @@ fn main() -> ExitCode {
             }
             let dt = t_pub.elapsed().as_secs_f64();
             published += this_batch;
-            eprintln!("climb: published {this_batch} in {dt:.2}s (total {published}/{})", args.fill_count);
+            eprintln!(
+                "climb: published {this_batch} in {dt:.2}s (total {published}/{})",
+                args.fill_count
+            );
         }
         eprintln!("climb OK in {:.2}s", t0.elapsed().as_secs_f64());
     }
@@ -157,7 +168,10 @@ fn main() -> ExitCode {
 
     // Probe sweep: same pattern as publish-bench in aegon_lookup_bench.
     for &batch_size in &probe_batches {
-        eprintln!("--- probe batch={batch_size} samples={} ---", args.probe_samples);
+        eprintln!(
+            "--- probe batch={batch_size} samples={} ---",
+            args.probe_samples
+        );
         for sample in 0..args.probe_samples {
             let batch: Vec<(Vec<u8>, Vec<u8>)> = (0..batch_size)
                 .map(|i| {

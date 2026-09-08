@@ -1,3 +1,8 @@
+// Copyright (c) The Aegon Authors.
+//
+// This source code is licensed under the MIT license found in the
+// LICENSE file in the root directory of this source tree.
+
 //! Verifies that the precomputed Merkle path cache inside
 //! `ShardedEpochCommitment` is byte-identical to the bare
 //! `build_merkle_path` walk it replaces, and that the cache survives
@@ -53,7 +58,8 @@ fn cached_paths_match_bare_walk_at_every_shard() {
             let cached = commit.merkle_path(i);
             let bare = build_merkle_path::<Bn254, Pcs>(&commit.per_shard, i);
             assert_eq!(
-                cached, bare.as_slice(),
+                cached,
+                bare.as_slice(),
                 "path mismatch at n_shards={n_shards} shard_id={i}"
             );
         }
@@ -88,10 +94,7 @@ fn cache_round_trips_through_canonical_serialize() {
     let mut a = Vec::new();
     let mut b = Vec::new();
     commit.per_shard.serialize_uncompressed(&mut a).unwrap();
-    restored
-        .per_shard
-        .serialize_uncompressed(&mut b)
-        .unwrap();
+    restored.per_shard.serialize_uncompressed(&mut b).unwrap();
     assert_eq!(a, b, "per_shard bytes drift across round trip");
     // Path cache must be reconstructed identically.
     for i in 0..commit.per_shard.len() {

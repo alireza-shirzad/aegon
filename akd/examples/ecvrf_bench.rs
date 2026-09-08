@@ -1,3 +1,8 @@
+// Copyright (c) The Aegon Authors.
+//
+// This source code is licensed under the MIT license found in the
+// LICENSE file in the root directory of this source tree.
+
 //! Micro-benchmark for EcVrfHash vs Sha256Hash. Reports per-call ns.
 fn main() {
     use akd::aegon::{EcVrfHash, HashSuite, Sha256Hash};
@@ -30,5 +35,8 @@ fn main() {
 
     println!("EcVrfHash::h_bits  : {} ns/call", ecvrf_ns);
     println!("Sha256Hash::h_bits : {} ns/call", sha_ns);
-    println!("slowdown factor    : {:.0}x", ecvrf_ns as f64 / sha_ns as f64);
+    println!(
+        "slowdown factor    : {:.0}x",
+        ecvrf_ns as f64 / sha_ns as f64
+    );
 }

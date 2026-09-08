@@ -1,0 +1,41 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite the accompanying paper."
+title: "Aegon: Self-Auditable Key Transparency"
+abstract: >-
+  Reference implementation of Aegon, a sharded, polynomial-commitment-backed
+  transparent dictionary with constant-cost auditing and optional
+  fast-forward (IVC) audit proofs.
+license: MIT
+repository-code: "https://github.com/alireza-shirzad/aegon"
+authors:
+  - family-names: Hafezi
+    given-names: Hossein
+  - family-names: Shirzad
+    given-names: Alireza
+  - family-names: "Bünz"
+    given-names: Benedikt
+  - family-names: Lewi
+    given-names: Kevin
+  - family-names: George
+    given-names: Dillon
+  - family-names: Bonneau
+    given-names: Joseph
+preferred-citation:
+  type: article
+  title: "Aegon: Self-Auditable Key Transparency"
+  year: 2026
+  url: "https://eprint.iacr.org/2026/1681"
+  notes: "Cryptology ePrint Archive, Paper 2026/1681"
+  authors:
+    - family-names: Hafezi
+      given-names: Hossein
+    - family-names: Shirzad
+      given-names: Alireza
+    - family-names: "Bünz"
+      given-names: Benedikt
+    - family-names: Lewi
+      given-names: Kevin
+    - family-names: George
+      given-names: Dillon
+    - family-names: Bonneau
+      given-names: Joseph

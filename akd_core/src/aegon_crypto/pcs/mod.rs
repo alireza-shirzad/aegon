@@ -1,16 +1,21 @@
+// Copyright (c) The Aegon Authors.
+//
+// This source code is licensed under the MIT license found in the
+// LICENSE file in the root directory of this source tree.
+
 mod errors;
 pub mod kzhk;
 pub mod prelude;
 mod structs;
 
+use crate::aegon_crypto::poly::DenseOrSparseMLERef;
+use crate::aegon_crypto::transcript::IOPTranscript;
 use ark_ec::pairing::Pairing;
 use ark_ff::Field;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::rand::Rng;
 use errors::PCSError;
-use std::{borrow::Borrow, default, fmt::Debug, hash::Hash};
-use crate::aegon_crypto::poly::DenseOrSparseMLERef;
-use crate::aegon_crypto::transcript::IOPTranscript;
+use std::{borrow::Borrow, fmt::Debug, hash::Hash};
 
 /// This trait defines APIs for polynomial commitment schemes.
 pub trait PolynomialCommitmentScheme<E: Pairing> {
@@ -52,23 +57,13 @@ pub trait PolynomialCommitmentScheme<E: Pairing> {
     /// can precompute in bulk and a prover consumes at open-time to
     /// produce a hiding opening. PCSs that don't support the
     /// masking-server protocol leave this as `()`.
-    type MaskingPackage: Clone
-        + CanonicalSerialize
-        + CanonicalDeserialize
-        + Debug
-        + Send
-        + Sync;
+    type MaskingPackage: Clone + CanonicalSerialize + CanonicalDeserialize + Debug + Send + Sync;
     /// Per-polynomial hiding-state snapshot needed to re-mask a stored
     /// non-ZK opening into a ZK one (see
     /// [`Self::remask_with_package`]). For Pedersen-MSM-based hiding
     /// PCSs this is the polynomial's blinding scalar `tau` at the time
     /// the non-ZK opening was produced.
-    type HidingScalar: Clone
-        + CanonicalSerialize
-        + CanonicalDeserialize
-        + Debug
-        + Send
-        + Sync;
+    type HidingScalar: Clone + CanonicalSerialize + CanonicalDeserialize + Debug + Send + Sync;
 
     fn gen_srs_for_testing<R: Rng>(
         conf: Self::Config,
@@ -144,10 +139,10 @@ pub trait PolynomialCommitmentScheme<E: Pairing> {
     }
 
     fn update_state(
-        prover_param: impl Borrow<Self::ProverParam>,
-        polynomial: &Self::Polynomial,
-        com: &Self::Commitment,
-        state: &mut Self::State,
+        _prover_param: impl Borrow<Self::ProverParam>,
+        _polynomial: &Self::Polynomial,
+        _com: &Self::Commitment,
+        _state: &mut Self::State,
     ) -> Result<(), PCSError> {
         unimplemented!()
     }
@@ -194,7 +189,7 @@ pub trait PolynomialCommitmentScheme<E: Pairing> {
 
     fn multi_open(
         _prover_param: impl Borrow<Self::ProverParam>,
-        commitment: &Self::Commitment,
+        _commitment: &Self::Commitment,
         _polynomials: &[DenseOrSparseMLERef<'_, E::ScalarField>],
         _point: &Self::Point,
         _states: &[Self::State],
@@ -353,7 +348,7 @@ pub trait StructuredReferenceString<E: Pairing>: Sized + PCSGlobalParam {
     /// Prover parameters
     type ProverParam: PCSGlobalParam;
     /// Verifier parameters
-    type VerifierParam:PCSGlobalParam;
+    type VerifierParam: PCSGlobalParam;
 
     /// Extract the prover parameters from the public parameters.
     fn extract_prover_param(&self, supported_size: usize) -> Self::ProverParam;

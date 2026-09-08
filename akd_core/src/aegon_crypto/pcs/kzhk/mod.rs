@@ -1,3 +1,8 @@
+// Copyright (c) The Aegon Authors.
+//
+// This source code is licensed under the MIT license found in the
+// LICENSE file in the root directory of this source tree.
+
 //! # KZH-k multilinear polynomial commitment scheme
 //!
 //! Implementation of the KZH-k polynomial commitment scheme from the IronDict
@@ -33,15 +38,13 @@
 //!
 //! The unified [`KZHKConfig`] struct (fields `k` and `zk`) selects the
 //! variant when generating the SRS.
-#[cfg(feature = "parallel")]
-use rayon::iter::IntoParallelRefMutIterator;
-use std::collections::BTreeMap;
+use crate::aegon_crypto::transcript::IOPTranscript;
 use crate::aegon_crypto::{
     pcs::{
         kzhk::{
             msm::{msm, naive_msm, NAIVE_THRESHOLD},
             srs::{KZHKProverParam, KZHKUniversalParams, KZHKVerifierParam},
-            structs::{AuxRow, KZHKState, KZHKCommitment, KZHKConfig, KZHKOpeningProof},
+            structs::{AuxRow, KZHKCommitment, KZHKConfig, KZHKOpeningProof, KZHKState},
         },
         PCSGlobalParam,
     },
@@ -52,19 +55,17 @@ use ark_ec::{pairing::Pairing, AffineRepr, CurveGroup, VariableBaseMSM};
 use ark_ff::One;
 use ark_poly::{DenseMultilinearExtension, MultilinearExtension, SparseMultilinearExtension};
 use ark_serialize::CanonicalDeserialize;
-use ark_std::{
-    cfg_into_iter, cfg_iter, cfg_iter_mut,
-    rand::Rng,
-    test_rng, Zero,
-};
+use ark_std::{cfg_into_iter, cfg_iter, cfg_iter_mut, rand::Rng, test_rng, Zero};
+#[cfg(feature = "parallel")]
+use rayon::iter::IntoParallelRefMutIterator;
+use std::collections::BTreeMap;
 use std::{
     borrow::Borrow,
     env::current_dir,
     fs::{create_dir_all, File},
-    io::{BufReader, BufWriter, Read, Write},
+    io::{BufReader, BufWriter, Write},
     marker::PhantomData,
 };
-use crate::aegon_crypto::transcript::IOPTranscript;
 pub mod msm;
 pub mod srs;
 pub mod structs;
@@ -72,8 +73,7 @@ use crate::aegon_crypto::arithmetic::{
     bits_le_to_usize,
     multilinear_polynomial::{
         fix_last_variables, fix_last_variables_boolean, fix_last_variables_sparse,
-        partially_eval_dense_poly_on_bool_point, partially_eval_sparse_poly_on_bool_point,
-        rand_sparse_mle,
+        partially_eval_dense_poly_on_bool_point, rand_sparse_mle,
     },
     virtual_polynomial::build_eq_x_r,
 };
@@ -81,9 +81,9 @@ use ark_serialize::CanonicalSerialize;
 use ark_std::UniformRand;
 #[cfg(feature = "parallel")]
 use rayon::iter::{
-    IndexedParallelIterator, IntoParallelIterator, IntoParallelRefIterator,
-    ParallelIterator,
+    IndexedParallelIterator, IntoParallelIterator, IntoParallelRefIterator, ParallelIterator,
 };
+#[cfg(test)]
 mod test;
 
 /// Type-level handle for the KZH-k PCS. All methods are associated
@@ -162,17 +162,37 @@ where
                     panic!("could not create directory for SRS at {:?}", parent)
                 });
             }
-            // Stream the serialization directly into the file. The
-            // previous code serialized into an intermediate `Vec<u8>`
-            // first and then wrote that buffer out — at nv ≥ 28 the
-            // intermediate copy is tens of GB on top of the live SRS,
-            // which OOMs even before any disk I/O happens.
+            // Write to a process-unique temporary file and rename it into
+            // place. `rename` is atomic on POSIX, so a concurrent reader
+            // either sees no file at all or sees a complete one.
+            //
+            // Without this the check-then-write above is a race: the test
+            // binary runs cases concurrently, and two cases sharing a
+            // `(k, size, zk)` key would have one observe a half-written
+            // file and fail deserialization. `akd` depends on `akd_core`
+            // with `parallel` on, so that is the configuration the tests
+            // actually run under.
+            //
+            // Streaming (rather than serializing into an intermediate
+            // `Vec<u8>`) matters independently: at nv >= 28 the buffer
+            // would be tens of GB on top of the live SRS.
+            let tmp_path = srs_path.with_extension(format!(
+                "tmp.{}.{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0)
+            ));
             let mut writer = BufWriter::new(
-                File::create(srs_path.clone())
-                    .unwrap_or_else(|_| panic!("could not create file for SRS at {:?}", srs_path)),
+                File::create(&tmp_path)
+                    .unwrap_or_else(|_| panic!("could not create file for SRS at {:?}", tmp_path)),
             );
             srs.serialize_uncompressed(&mut writer).unwrap();
             writer.flush().unwrap();
+            drop(writer);
+            std::fs::rename(&tmp_path, &srs_path)
+                .unwrap_or_else(|e| panic!("could not move SRS into place at {srs_path:?}: {e}"));
             srs
         };
         Ok(srs)
@@ -281,7 +301,14 @@ where
         let result = if !prover_param.borrow().is_zk() {
             Self::open_non_zk(prover_param, commitment, polynomial, point, state)
         } else {
-            Self::open_zk(prover_param, commitment, polynomial, point, state, transcript)
+            Self::open_zk(
+                prover_param,
+                commitment,
+                polynomial,
+                point,
+                state,
+                transcript,
+            )
         };
 
         result
@@ -322,9 +349,15 @@ where
         transcript: &mut IOPTranscript<E::ScalarField>,
     ) -> Result<bool, PCSError> {
         let result = match (proof.get_r_hide(), proof.get_y_r(), proof.get_rho_prime()) {
-            (Some(_), Some(_), Some(_)) => {
-                Self::verify_zk(verifier_param, commitment, point, value, None, proof, transcript)
-            },
+            (Some(_), Some(_), Some(_)) => Self::verify_zk(
+                verifier_param,
+                commitment,
+                point,
+                value,
+                None,
+                proof,
+                transcript,
+            ),
             _ => Self::verify_non_zk(verifier_param, commitment, point, value, None, proof),
         };
         result
@@ -399,10 +432,7 @@ where
             .unwrap_or_else(<E::ScalarField as Zero>::zero)
     }
 
-    fn rerandomise_hiding_scalar<R>(
-        state: &mut Self::State,
-        rng: &mut R,
-    ) -> Option<E::ScalarField>
+    fn rerandomise_hiding_scalar<R>(state: &mut Self::State, rng: &mut R) -> Option<E::ScalarField>
     where
         R: ark_std::rand::RngCore + ark_std::rand::CryptoRng,
     {
@@ -452,18 +482,16 @@ where
             pp.is_zk(),
             "generate_masking_package: prover param must be hiding (zk SRS)"
         );
-        let r_poly = rand_sparse_mle(
-            num_vars,
-            pp.get_hiding_sparsity().unwrap(),
-            &mut test_rng(),
-        );
+        let r_poly = rand_sparse_mle(num_vars, pp.get_hiding_sparsity().unwrap(), &mut test_rng());
         let r_poly_wrapped = DenseOrSparseMLE::Sparse(r_poly.clone());
         let (r_hide, mut r_state) = Self::commit(pp, &r_poly_wrapped)?;
         let rho = *r_state.get_tau();
         Self::update_state(pp, &r_poly_wrapped, &r_hide, &mut r_state)?;
-        Ok(crate::aegon_crypto::pcs::kzhk::structs::KZHKMaskingPackage::new(
-            num_vars, r_poly, r_hide, r_state, rho,
-        ))
+        Ok(
+            crate::aegon_crypto::pcs::kzhk::structs::KZHKMaskingPackage::new(
+                num_vars, r_poly, r_hide, r_state, rho,
+            ),
+        )
     }
 
     fn open_zk_with_package(
@@ -550,8 +578,8 @@ impl<E: Pairing> KZHK<E> {
             DenseOrSparseMLE::Sparse(poly) => Self::commit_sparse_inner(pp, poly, blinding)?,
         };
         let sparsity = sparsity_of(poly);
-        let result = Ok((com, KZHKState::new(Some(tau), None, Some(sparsity))));
-        result
+
+        Ok((com, KZHKState::new(Some(tau), None, Some(sparsity))))
     }
 
     /// Plain KZH-k commitment `C = <f, H_1>` (Figure 14, Commit). The
@@ -567,8 +595,8 @@ impl<E: Pairing> KZHK<E> {
         };
         let sparsity = sparsity_of(poly);
         let state = KZHKState::new(None, None, Some(sparsity));
-        let result = Ok((non_zk_com.unwrap(), state));
-        result
+
+        Ok((non_zk_com.unwrap(), state))
     }
 
     /// Computes the Boolean auxiliary table of row-commitments and stores
@@ -581,11 +609,14 @@ impl<E: Pairing> KZHK<E> {
         com: &KZHKCommitment<E>,
         state: &mut KZHKState<E>,
     ) -> Result<(), PCSError> {
-        let result = match polynomial {
-            DenseOrSparseMLE::Dense(poly) => Self::update_state_dense(prover_param, poly, com, state),
-            DenseOrSparseMLE::Sparse(poly) => Self::update_state_sparse(prover_param, poly, com, state),
-        };
-        result
+        match polynomial {
+            DenseOrSparseMLE::Dense(poly) => {
+                Self::update_state_dense(prover_param, poly, com, state)
+            }
+            DenseOrSparseMLE::Sparse(poly) => {
+                Self::update_state_sparse(prover_param, poly, com, state)
+            }
+        }
     }
 
     /// Non-ZK opening implementing Figure 14, step 2: for each level
@@ -604,21 +635,21 @@ impl<E: Pairing> KZHK<E> {
     ) -> Result<(KZHKOpeningProof<E>, E::ScalarField), PCSError> {
         //TODO: Make the iters here parallel
         let is_boolean_point = point.iter().all(|&x| x.is_zero() || x.is_one());
-        let result = match (is_boolean_point, polynomial) {
+
+        match (is_boolean_point, polynomial) {
             (true, DenseOrSparseMLERef::Dense(poly)) => {
                 Self::open_dense_bool_inner(prover_param, poly, point, state)
-            },
+            }
             (true, DenseOrSparseMLERef::Sparse(poly)) => {
                 Self::open_sparse_bool_inner(prover_param, poly, point, state)
-            },
+            }
             (false, DenseOrSparseMLERef::Dense(poly)) => {
                 Self::open_dense_non_bool_inner(prover_param, poly, point, state)
-            },
+            }
             (false, DenseOrSparseMLERef::Sparse(poly)) => {
                 Self::open_sparse_non_bool_inner(prover_param, poly, point, state)
-            },
-        };
-        result
+            }
+        }
     }
 
     /// zk opening from Appendix D. Samples a sparse masking polynomial
@@ -648,8 +679,13 @@ impl<E: Pairing> KZHK<E> {
         let (r_hide, mut r_state) = Self::commit(prover_param, &r_poly_wrapped)?;
         let rho = *r_state.get_tau();
         Self::update_state(prover_param, &r_poly_wrapped, &r_hide, &mut r_state)?;
-        let (r_opening, y_r) =
-            Self::open_non_zk(prover_param, &r_hide, r_poly_wrapped.as_ref(), point, &r_state)?;
+        let (r_opening, y_r) = Self::open_non_zk(
+            prover_param,
+            &r_hide,
+            r_poly_wrapped.as_ref(),
+            point,
+            &r_state,
+        )?;
         // Fiat-Shamir: derive alpha from the prover's first-round messages.
         // Verifier replays the same appends in the same order — see
         // `verify_zk`. Once both sides commit to (C, point, y, R_hide)
@@ -690,7 +726,7 @@ impl<E: Pairing> KZHK<E> {
         let alpha = Self::derive_alpha(transcript, commitment, point, value, &package.r_hide)?;
         let rho_prime = alpha * tau_f + package.rho;
         let mut output_opening = non_zk_opening * alpha + r_opening;
-        output_opening.set_r_hide(package.r_hide.clone());
+        output_opening.set_r_hide(package.r_hide);
         output_opening.set_y_r(y_r);
         output_opening.set_rho_prime(rho_prime);
         Ok(output_opening)
@@ -744,7 +780,7 @@ impl<E: Pairing> KZHK<E> {
                     }
                 }
                 (DenseOrSparseMLE::Dense(aggr_poly), aggr_state)
-            },
+            }
             DenseOrSparseMLERef::Sparse(_) => {
                 let mut aggr_poly =
                     SparseMultilinearExtension::from_evaluations(num_vars, Vec::new());
@@ -758,9 +794,15 @@ impl<E: Pairing> KZHK<E> {
                 }
 
                 (DenseOrSparseMLE::Sparse(aggr_poly), aggr_state)
-            },
+            }
         };
-        Self::open_non_zk(prover_param, commitment, agg_poly.as_ref(), point, &aggr_state)
+        Self::open_non_zk(
+            prover_param,
+            commitment,
+            agg_poly.as_ref(),
+            point,
+            &aggr_state,
+        )
     }
 
     /// zk verifier (Appendix D): reconstructs the non-hiding commitment
@@ -785,15 +827,15 @@ impl<E: Pairing> KZHK<E> {
         .into_affine();
         let lin_commitment = KZHKCommitment::new(c_lin, commitment.get_num_vars());
         let lin_value = *value * alpha + proof.get_y_r().unwrap();
-        let result = Self::verify_non_zk(
+
+        Self::verify_non_zk(
             verifier_param,
             &lin_commitment,
             point,
             &lin_value,
             None,
             proof,
-        );
-        result
+        )
     }
 
     /// Non-ZK verifier implementing Figure 14, Verify:
@@ -877,10 +919,10 @@ impl<E: Pairing> KZHK<E> {
         let eval_ok = match proof.get_f() {
             DenseOrSparseMLE::Dense(f) => {
                 fix_last_variables(f, &decomposed_point[k - 1])[0] == *value
-            },
+            }
             DenseOrSparseMLE::Sparse(f) => {
                 fix_last_variables_sparse(f, &decomposed_point[k - 1])[0] == *value
-            },
+            }
         };
         drop(eval_check_guard);
         Ok(eval_ok)
@@ -1028,14 +1070,12 @@ impl<E: Pairing> KZHK<E> {
             let mut d_j = vec![E::G1Affine::zero(); dj_size];
             if parallel_outer_safe {
                 cfg_iter_mut!(d_j).enumerate().for_each(|(i, d_j_i)| {
-                    let scalars =
-                        partially_eval_dense_poly_on_bool_point(polynomial, i, eval_len);
+                    let scalars = partially_eval_dense_poly_on_bool_point(polynomial, i, eval_len);
                     *d_j_i = msm::<E::G1>(h_slice, scalars.as_slice()).into_affine();
                 });
             } else {
                 d_j.iter_mut().enumerate().for_each(|(i, d_j_i)| {
-                    let scalars =
-                        partially_eval_dense_poly_on_bool_point(polynomial, i, eval_len);
+                    let scalars = partially_eval_dense_poly_on_bool_point(polynomial, i, eval_len);
                     *d_j_i = msm::<E::G1>(h_slice, scalars.as_slice()).into_affine();
                 });
             }
@@ -1122,17 +1162,17 @@ impl<E: Pairing> KZHK<E> {
             cells: Vec<(usize, std::ops::Range<usize>)>,
         }
         let level_arenas: Vec<LevelArena<E>> = {
-            let _span = tracing::info_span!(
-                "KZH::CompAux::BucketSort",
-                k = k - 1,
-                nnz = nnz
-            )
-            .entered();
+            let _span =
+                tracing::info_span!("KZH::CompAux::BucketSort", k = k - 1, nnz = nnz).entered();
             let mut arenas: Vec<LevelArena<E>> = Vec::with_capacity(k - 1);
             for j in 0..k - 1 {
                 let prefix_var = prefix_vars_vec[j];
                 let rem_vars = polynomial.num_vars() - prefix_var;
-                let mask = if rem_vars == 0 { 0 } else { (1usize << rem_vars) - 1 };
+                let mask = if rem_vars == 0 {
+                    0
+                } else {
+                    (1usize << rem_vars) - 1
+                };
                 let h_slice = prover_param.get_h_tensors()[j + 1]
                     .as_slice_memory_order()
                     .expect("H_t must be contiguous (standard layout)");
@@ -1199,10 +1239,7 @@ impl<E: Pairing> KZHK<E> {
         // or one giant cell that serialises the tail. Cheap: just a
         // sort + bucket count over `flat`, runs once per call.
         {
-            let mut sizes: Vec<usize> = flat
-                .iter()
-                .map(|(_, _, r)| r.end - r.start)
-                .collect();
+            let mut sizes: Vec<usize> = flat.iter().map(|(_, _, r)| r.end - r.start).collect();
             sizes.sort_unstable();
             let n = sizes.len();
             let sum: usize = sizes.iter().sum();
@@ -1291,11 +1328,8 @@ impl<E: Pairing> KZHK<E> {
         // we keep one flat output buffer aligned with `flat`. The
         // sequential phase below overwrites those placeholders.
         let mut projectives: Vec<E::G1> = {
-            let _span = tracing::info_span!(
-                "KZH::CompAux::ParallelMSM",
-                cells = flat.len()
-            )
-            .entered();
+            let _span =
+                tracing::info_span!("KZH::CompAux::ParallelMSM", cells = flat.len()).entered();
             cfg_iter!(flat)
                 .map(|(j, _prefix, range)| {
                     let arena = &level_arenas[*j];
@@ -1331,11 +1365,9 @@ impl<E: Pairing> KZHK<E> {
                 .iter()
                 .filter(|(_, _, r)| r.end - r.start >= SEQ_PIPP_THRESHOLD)
                 .count();
-            let _span = tracing::info_span!(
-                "KZH::CompAux::SequentialPippenger",
-                cells = large_count
-            )
-            .entered();
+            let _span =
+                tracing::info_span!("KZH::CompAux::SequentialPippenger", cells = large_count)
+                    .entered();
             for (i, (j, _prefix, range)) in flat.iter().enumerate() {
                 let len = range.end - range.start;
                 if len < SEQ_PIPP_THRESHOLD {
@@ -1351,11 +1383,9 @@ impl<E: Pairing> KZHK<E> {
         // Step 4: one batch normalization over every non-empty cell
         // across every level.
         let affines = {
-            let _span = tracing::info_span!(
-                "KZH::CompAux::NormalizeBatch",
-                cells = projectives.len()
-            )
-            .entered();
+            let _span =
+                tracing::info_span!("KZH::CompAux::NormalizeBatch", cells = projectives.len())
+                    .entered();
             <E::G1 as CurveGroup>::normalize_batch(&projectives)
         };
 

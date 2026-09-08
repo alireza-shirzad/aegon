@@ -1,3 +1,8 @@
+// Copyright (c) The Aegon Authors.
+//
+// This source code is licensed under the MIT license found in the
+// LICENSE file in the root directory of this source tree.
+
 //! KZH-k structured reference string (SRS).
 //!
 //! Implements the setup described in Figure 14 of ePrint 2025/1580: for
@@ -485,7 +490,7 @@ pub fn ceil_k_root_scaled(n: u128, k: u32) -> u128 {
     // Search m in [k*r_floor, k*(r_floor+1)] s.t. m is the smallest with (m/k)^k >=
     // n. Equivalently: m^k >= n * k^k.
     let lo = (r_floor).saturating_mul(k as u128);
-    let hi = ((r_floor + 1) as u128).saturating_mul(k as u128);
+    let hi = (r_floor + 1).saturating_mul(k as u128);
 
     let target = BigUint::from(n) * pow_big(&BigUint::from(k as u128), k);
     let mut l = BigUint::from(lo);

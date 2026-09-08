@@ -1,3 +1,8 @@
+// Copyright (c) The Aegon Authors.
+//
+// This source code is licensed under the MIT license found in the
+// LICENSE file in the root directory of this source tree.
+
 //! Distributed SRS generation for KZH-k.
 //!
 //! Replaces the "every shard re-derives the full SRS from
@@ -56,10 +61,10 @@ use tokio::sync::{Mutex, Notify};
 use tonic::transport::Channel;
 use tonic::{Request, Response, Status};
 
-use akd_core::aegon_crypto::pcs::kzhk::structs::Tensor;
 use akd_core::aegon_crypto::pcs::kzhk::srs::{
     KZHKProverParam, KZHKUniversalParams, KZHKVerifierParam,
 };
+use akd_core::aegon_crypto::pcs::kzhk::structs::Tensor;
 
 use super::error::AegonError;
 
@@ -71,6 +76,9 @@ use proto::{
 };
 
 // Generated tonic code for `aegon.srs.v1`.
+// Generated code carries no rustdoc; the crate-level `warn(missing_docs)`
+// cannot be satisfied for types we do not author.
+#[allow(missing_docs)]
 pub mod proto {
     tonic::include_proto!("aegon.srs.v1");
 }
@@ -250,37 +258,18 @@ pub fn compute_h_t_slab<E: Pairing>(
     while chunk_start < this_len {
         let this_chunk = (this_len - chunk_start).min(chunk_len);
 
-        let exps_chunk: Vec<E::ScalarField> = {
-            #[cfg(feature = "parallel")]
-            {
-                (0..this_chunk)
-                    .into_par_iter()
-                    .map(|c| {
-                        let global = range_start + chunk_start + c;
-                        let mut prod = E::ScalarField::one();
-                        for a in 0..m {
-                            let idx = (global / geom.strides[a]) % geom.shape[a];
-                            prod *= mu_mat[t + a][idx];
-                        }
-                        prod
-                    })
-                    .collect()
-            }
-            #[cfg(not(feature = "parallel"))]
-            {
-                (0..this_chunk)
-                    .map(|c| {
-                        let global = range_start + chunk_start + c;
-                        let mut prod = E::ScalarField::one();
-                        for a in 0..m {
-                            let idx = (global / geom.strides[a]) % geom.shape[a];
-                            prod *= mu_mat[t + a][idx];
-                        }
-                        prod
-                    })
-                    .collect()
-            }
-        };
+        let exps_chunk: Vec<E::ScalarField> = (0..this_chunk)
+            .into_par_iter()
+            .map(|c| {
+                let global = range_start + chunk_start + c;
+                let mut prod = E::ScalarField::one();
+                for a in 0..m {
+                    let idx = (global / geom.strides[a]) % geom.shape[a];
+                    prod *= mu_mat[t + a][idx];
+                }
+                prod
+            })
+            .collect();
 
         let aff_chunk: Vec<E::G1Affine> = table_g.batch_mul(&exps_chunk);
         out.extend(aff_chunk);
@@ -300,33 +289,17 @@ pub fn compute_v_mat<E: Pairing>(trapdoors: &Trapdoors<E>) -> Vec<Vec<E::G2Prepa
     let v = trapdoors.v.into_group();
     let k = trapdoors.k();
 
-    #[cfg(feature = "parallel")]
-    {
-        (0..k)
-            .into_par_iter()
-            .map(|j| {
-                let rows = 1usize << trapdoors.dimensions[j];
-                let table_v = BatchMulPreprocessing::new(v, rows);
-                let aff: Vec<E::G2Affine> = table_v.batch_mul(&trapdoors.mu_mat[j]);
-                aff.into_iter()
-                    .map(<E as Pairing>::G2Prepared::from)
-                    .collect()
-            })
-            .collect()
-    }
-    #[cfg(not(feature = "parallel"))]
-    {
-        (0..k)
-            .map(|j| {
-                let rows = 1usize << trapdoors.dimensions[j];
-                let table_v = BatchMulPreprocessing::new(v, rows);
-                let aff: Vec<E::G2Affine> = table_v.batch_mul(&trapdoors.mu_mat[j]);
-                aff.into_iter()
-                    .map(<E as Pairing>::G2Prepared::from)
-                    .collect()
-            })
-            .collect()
-    }
+    (0..k)
+        .into_par_iter()
+        .map(|j| {
+            let rows = 1usize << trapdoors.dimensions[j];
+            let table_v = BatchMulPreprocessing::new(v, rows);
+            let aff: Vec<E::G2Affine> = table_v.batch_mul(&trapdoors.mu_mat[j]);
+            aff.into_iter()
+                .map(<E as Pairing>::G2Prepared::from)
+                .collect()
+        })
+        .collect()
 }
 
 // ---------- assembly ----------------------------------------------------
@@ -368,7 +341,8 @@ pub fn build_universal_params<E: Pairing>(
     h_tensors: Vec<Tensor<E::G1Affine>>,
     v_mat: Vec<Vec<E::G2Prepared>>,
 ) -> KZHKUniversalParams<E> {
-    let hiding_sparsity = Some(ceil_k_root_scaled(1u128 << trapdoors.num_vars(), trapdoors.k() as u32) as usize);
+    let hiding_sparsity =
+        Some(ceil_k_root_scaled(1u128 << trapdoors.num_vars(), trapdoors.k() as u32) as usize);
     KZHKUniversalParams::new(
         trapdoors.dimensions.clone(),
         Arc::new(h_tensors),
@@ -768,7 +742,7 @@ impl<E: Pairing> SrsBootstrapState<E> {
                 drop(inner);
                 self.notify.notify_waiters();
                 false // not a cache hit
-            },
+            }
             _ => true, // already past bootstrap — cache hit (or progressed past)
         }
     }
@@ -948,7 +922,7 @@ impl<E: Pairing> SrsBootstrapState<E> {
                     if tokio::time::timeout(remaining, notified).await.is_err() {
                         // timed out — loop will catch and return on next pass
                     }
-                },
+                }
             }
         }
     }
@@ -1042,9 +1016,8 @@ where
                 n_shards
             )));
         }
-        let trapdoors = Trapdoors::<E>::decode(&req.trapdoors_uncompressed).map_err(|e| {
-            Status::invalid_argument(format!("decode trapdoors: {e}"))
-        })?;
+        let trapdoors = Trapdoors::<E>::decode(&req.trapdoors_uncompressed)
+            .map_err(|e| Status::invalid_argument(format!("decode trapdoors: {e}")))?;
         let cache_hit = self
             .state
             .accept_bootstrap(trapdoors, req.peer_endpoints)
@@ -1175,12 +1148,12 @@ pub async fn pull_slab_from_peer<E: Pairing>(
             Ok(c) => {
                 client_opt = Some(c);
                 break;
-            },
+            }
             Err(e) => {
                 last_err = Some(e);
                 tokio::time::sleep(Duration::from_secs(1)).await;
                 let _ = attempt;
-            },
+            }
         }
     }
     let mut client = client_opt.ok_or_else(|| {
@@ -1342,10 +1315,7 @@ where
                 let (slab, bytes_in) =
                     pull_slab_from_peer::<E>(&endpoint, t, start as u64, end as u64).await?;
                 Ok::<(usize, usize, Vec<E::G1Affine>, u64), AegonError>((
-                    t as usize,
-                    peer_id,
-                    slab,
-                    bytes_in,
+                    t as usize, peer_id, slab, bytes_in,
                 ))
             }));
         }
@@ -1362,9 +1332,7 @@ where
     communication_acc += comm_start.elapsed();
 
     // ---- assemble + write cache --------------------------------------
-    state
-        .set_phase(Phase::Assembling, "assembling-srs")
-        .await;
+    state.set_phase(Phase::Assembling, "assembling-srs").await;
     let assembly_start = Instant::now();
     let h_tensors = matrix_to_tensors::<E>(&geoms, matrix, n_shards)?;
     let v_mat = compute_v_mat(&trapdoors);
@@ -1377,9 +1345,7 @@ where
     };
     compute_acc += assembly_start.elapsed();
 
-    state
-        .set_phase(Phase::Assembling, "writing-cache")
-        .await;
+    state.set_phase(Phase::Assembling, "writing-cache").await;
     let cfg = state.config();
     let cache_path = cache_file_path(
         &cfg.cache_dir,
@@ -1387,7 +1353,12 @@ where
         cfg.k as usize,
         cfg.setup_seed,
     );
-    write_cache::<E>(&cache_path, &universal_params, &prover_param, &verifier_param)?;
+    write_cache::<E>(
+        &cache_path,
+        &universal_params,
+        &prover_param,
+        &verifier_param,
+    )?;
 
     // Snapshot the assembled sizes so `GetMetrics` can return them
     // without a second serialise pass.
@@ -1454,8 +1425,6 @@ where
             up.uncompressed_size() as u64,
         )
         .await;
-    state
-        .set_phase(Phase::Initializing, "cache-hit")
-        .await;
+    state.set_phase(Phase::Initializing, "cache-hit").await;
     Ok(Some((up, pk, vk)))
 }

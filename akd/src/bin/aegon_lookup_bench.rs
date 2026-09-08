@@ -1,3 +1,8 @@
+// Copyright (c) The Aegon Authors.
+//
+// This source code is licensed under the MIT license found in the
+// LICENSE file in the root directory of this source tree.
+
 //! `aegon_lookup_bench` — combined lookup + publish bench, sweeping
 //! preloaded dictionary sizes.
 //!
@@ -113,15 +118,15 @@ use akd::aegon::coordinator_grpc::{
     },
     CoordinatorServer,
 };
-use akd::aegon::{
-    optimal_kzh_k, verify_sharded_invariance, ShardedAuditState, DbSource, EcVrfHash, ShardTransport,
-    ShardedAegon, ShardedAegonConfig, SrsSource, VrfProver,
-};
 use akd::aegon::sharded::ShardedValueHistory;
-use ark_serialize::CanonicalDeserialize;
-use ark_ec::pairing::Pairing;
+use akd::aegon::{
+    optimal_kzh_k, verify_sharded_invariance, DbSource, EcVrfHash, ShardTransport, ShardedAegon,
+    ShardedAegonConfig, ShardedAuditState, SrsSource, VrfProver,
+};
 use akd_core::aegon_crypto::pcs::kzhk::KZHK;
 use ark_bn254::Bn254;
+use ark_ec::pairing::Pairing;
+use ark_serialize::CanonicalDeserialize;
 use ark_serialize::CanonicalSerialize;
 use ark_std::rand::SeedableRng;
 use clap::Parser;
@@ -178,7 +183,7 @@ fn read_self_rss_kb() -> Option<u64> {
     let s = std::fs::read_to_string("/proc/self/status").ok()?;
     for line in s.lines() {
         if let Some(rest) = line.strip_prefix("VmRSS:") {
-            let kb_str = rest.trim().split_whitespace().next()?;
+            let kb_str = rest.split_whitespace().next()?;
             return kb_str.parse().ok();
         }
     }
@@ -248,7 +253,7 @@ fn publish_with_retry(
                 );
                 std::thread::sleep(std::time::Duration::from_secs(delay_secs));
                 delay_secs = (delay_secs * 2).min(32);
-            },
+            }
         }
     }
     unreachable!("loop returns explicitly on every path");
@@ -524,7 +529,10 @@ fn main() -> ExitCode {
             ("--db-url", args.db_url.is_some()),
             ("--db-path", args.db_path.is_some()),
             ("--private", args.private),
-            ("--initial-prefill-count > 0", args.initial_prefill_count > 0),
+            (
+                "--initial-prefill-count > 0",
+                args.initial_prefill_count > 0,
+            ),
             ("--masking-addr", !args.masking_addr.is_empty()),
         ];
         for (flag, set) in conflicting {
@@ -589,12 +597,16 @@ fn main() -> ExitCode {
         return ExitCode::from(2);
     }
     if !args.publish_batch_sizes.is_empty() && args.publish_samples_per_batch == 0 {
-        eprintln!("error: --publish-samples-per-batch must be > 0 when --publish-batch-sizes is set");
+        eprintln!(
+            "error: --publish-samples-per-batch must be > 0 when --publish-batch-sizes is set"
+        );
         return ExitCode::from(2);
     }
 
     let log_n_shards = effective_n_shards.trailing_zeros() as usize;
-    let k = args.kzh_k.unwrap_or_else(|| optimal_kzh_k(args.shard_log_capacity));
+    let k = args
+        .kzh_k
+        .unwrap_or_else(|| optimal_kzh_k(args.shard_log_capacity));
 
     // Resolve preload_counts. Either taken directly from --preload-counts
     // or derived from --fill-percents × true_capacity, minus the initial
@@ -685,7 +697,7 @@ fn main() -> ExitCode {
             Err(e) => {
                 eprintln!("error: config invalid: {e}");
                 return ExitCode::from(2);
-            },
+            }
         };
 
         eprintln!(
@@ -703,7 +715,7 @@ fn main() -> ExitCode {
             Err(e) => {
                 eprintln!("error: setup failed: {e}");
                 return ExitCode::from(1);
-            },
+            }
         };
         state.set_vrf_prover(VrfProver::from_env());
         let setup_ms = t_setup.elapsed().as_secs_f64() * 1000.0;
@@ -772,7 +784,7 @@ fn main() -> ExitCode {
                     args.coordinator_listen
                 );
                 return ExitCode::from(2);
-            },
+            }
         };
         let server_state = Arc::clone(shared_ref);
         std::thread::spawn(move || {
@@ -787,10 +799,9 @@ fn main() -> ExitCode {
                 Err(e) => {
                     eprintln!("error: server tokio runtime: {e}");
                     return;
-                },
+                }
             };
-            let server =
-                CoordinatorServer::<Bn254, Pcs, EcVrfHash>::from_shared(server_state);
+            let server = CoordinatorServer::<Bn254, Pcs, EcVrfHash>::from_shared(server_state);
             if let Err(e) = rt.block_on(server.serve(listen_addr)) {
                 eprintln!("error: coordinator gRPC server exited: {e}");
             }
@@ -828,15 +839,15 @@ fn main() -> ExitCode {
         Err(e) => {
             eprintln!("error: driver tokio runtime: {e}");
             return ExitCode::from(1);
-        },
+        }
     };
     // Build the tonic channel + client once; reuse across all samples.
     // Same 1 GiB ceiling as the verifying client + server. We do a
     // single warm-up `current_commitment` round-trip after connect so
     // the first timed sample doesn't include the channel's lazy first-
     // message setup.
-    let raw_client: CoordinatorServiceClient<tonic::transport::Channel> = match driver_rt
-        .block_on(async {
+    let raw_client: CoordinatorServiceClient<tonic::transport::Channel> =
+        match driver_rt.block_on(async {
             // Patch 10: bump HTTP/2 flow-control windows. Tonic's
             // 64 KB defaults capped sustained per-connection
             // throughput at ~960 qps on the bench↔coord path under
@@ -862,12 +873,12 @@ fn main() -> ExitCode {
             let _ = c.current_commitment(Empty {}).await?;
             Ok::<_, Box<dyn std::error::Error + Send + Sync>>(c)
         }) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("error: raw client connect: {e}");
-            return ExitCode::from(1);
-        },
-    };
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("error: raw client connect: {e}");
+                return ExitCode::from(1);
+            }
+        };
 
     // ---- preload sweep ------------------------------------------------
     // `current_count` tracks how many labels have been published in the
@@ -930,10 +941,11 @@ fn main() -> ExitCode {
                     );
                     return ExitCode::from(1);
                 }
-                let req = PublishRequest { updates_bytes: bytes };
-                let ctx = format!(
-                    "preload publish (level={target}, batch {current_count}..{batch_end})"
-                );
+                let req = PublishRequest {
+                    updates_bytes: bytes,
+                };
+                let ctx =
+                    format!("preload publish (level={target}, batch {current_count}..{batch_end})");
                 match publish_with_retry(&raw_client, req, &driver_rt, &ctx) {
                     Ok(_resp) => Ok(()),
                     Err(e) => Err(akd::aegon::AegonError::Config(format!(
@@ -952,14 +964,14 @@ fn main() -> ExitCode {
                         batch_end,
                         ms
                     );
-                },
+                }
                 Err(e) => {
                     eprintln!(
                         "error: publish failed at level={target}, batch {}..{}: {e}",
                         current_count, batch_end
                     );
                     return ExitCode::from(1);
-                },
+                }
             }
             current_count = batch_end;
         }
@@ -981,7 +993,11 @@ fn main() -> ExitCode {
         // labels in the sampleable namespace yet). The stage still
         // runs the publish bench below — useful as a baseline at
         // fill_pct=0 stages.
-        let n_samples = if current_count == 0 { 0 } else { args.samples_per_level };
+        let n_samples = if current_count == 0 {
+            0
+        } else {
+            args.samples_per_level
+        };
         let mut samples_json: Vec<String> = Vec::with_capacity(n_samples);
         for sample_idx in 0..n_samples {
             // Deterministic spread: stride by a coprime increment to
@@ -1012,313 +1028,307 @@ fn main() -> ExitCode {
             //     accounting (the other response fields are already
             //     byte-encoded so we can use their lengths directly).
             if let Some(shared) = &shared {
+                // (a) Server-direct lookup_label. Read lock only — the
+                // server-direct path is the lower bound on what any
+                // remote client can achieve (no network, no serialization,
+                // no verify cost).
+                //
+                // We deliberately use `blocking_read` from the *main*
+                // (sync) thread rather than wrapping in
+                // `driver_rt.block_on(async { shared.read().await... })`.
+                // `ShardedAegon::lookup_label` is sync but iterates the
+                // probe trail sequentially, doing `shard_client.runtime
+                // .block_on(...)` on each shard's private runtime per
+                // probe. Calling that from inside `driver_rt.block_on`
+                // panics with "Cannot start a runtime from within a
+                // runtime" because the driver_rt's CONTEXT is set on the
+                // calling thread. `publish` dodges this because it
+                // dispatches to rayon worker threads (which have no tokio
+                // CONTEXT), but the sequential lookup loop has nowhere to
+                // hide. Main thread + blocking_read = no tokio CONTEXT,
+                // shard runtimes can be entered freely.
+                let t = Instant::now();
+                let server_label_result = {
+                    let s = shared.blocking_read();
+                    s.lookup_label_two_layer(&label)
+                };
+                let server_label_ns = t.elapsed().as_nanos() as u64;
+                let (slot, label_proof) = match server_label_result {
+                    Ok(p) => p,
+                    Err(e) => {
+                        eprintln!(
+                            "error: server-direct lookup_label({:?}) at level {target}: {e}",
+                            String::from_utf8_lossy(&label)
+                        );
+                        return ExitCode::from(1);
+                    }
+                };
 
-            // (a) Server-direct lookup_label. Read lock only — the
-            // server-direct path is the lower bound on what any
-            // remote client can achieve (no network, no serialization,
-            // no verify cost).
-            //
-            // We deliberately use `blocking_read` from the *main*
-            // (sync) thread rather than wrapping in
-            // `driver_rt.block_on(async { shared.read().await... })`.
-            // `ShardedAegon::lookup_label` is sync but iterates the
-            // probe trail sequentially, doing `shard_client.runtime
-            // .block_on(...)` on each shard's private runtime per
-            // probe. Calling that from inside `driver_rt.block_on`
-            // panics with "Cannot start a runtime from within a
-            // runtime" because the driver_rt's CONTEXT is set on the
-            // calling thread. `publish` dodges this because it
-            // dispatches to rayon worker threads (which have no tokio
-            // CONTEXT), but the sequential lookup loop has nowhere to
-            // hide. Main thread + blocking_read = no tokio CONTEXT,
-            // shard runtimes can be entered freely.
-            let t = Instant::now();
-            let server_label_result = {
-                let s = shared.blocking_read();
-                s.lookup_label_two_layer(&label)
-            };
-            let server_label_ns = t.elapsed().as_nanos() as u64;
-            let (slot, label_proof) = match server_label_result {
-                Ok(p) => p,
-                Err(e) => {
-                    eprintln!(
-                        "error: server-direct lookup_label({:?}) at level {target}: {e}",
-                        String::from_utf8_lossy(&label)
-                    );
+                // (b) Server-direct lookup_value at that slot. Same
+                // blocking_read pattern as (a).
+                let t = Instant::now();
+                let server_value_result = {
+                    let s = shared.blocking_read();
+                    s.lookup_value(&slot)
+                };
+                let server_value_ns = t.elapsed().as_nanos() as u64;
+                let value_proof = match server_value_result {
+                    Ok(p) => p,
+                    Err(e) => {
+                        eprintln!("error: server-direct lookup_value at level {target}: {e}");
+                        return ExitCode::from(1);
+                    }
+                };
+
+                // (c) Client lookup_label via raw tonic RPC (no verify).
+                // We re-clone the client per call because tonic's
+                // generated client takes `&mut self` and we need it to be
+                // Send across the await. Latency is read out of the
+                // server-reported `server_processing_micros` field on the
+                // response, so it excludes network RTT and client-side
+                // protobuf decode — what we actually report is "server
+                // handler wall time" (which under load includes tokio
+                // queue-wait).
+                let label_req = LookupLabelRequest {
+                    label: label.clone(),
+                };
+                let mut rc_label = raw_client.clone();
+                let client_label_result =
+                    driver_rt.block_on(async move { rc_label.lookup_label(label_req).await });
+                let client_label_ns = match &client_label_result {
+                    Ok(resp) => resp.get_ref().server_processing_micros.saturating_mul(1000),
+                    Err(_) => 0,
+                };
+                if let Err(e) = client_label_result {
+                    eprintln!("error: raw RPC lookup_label at level {target}: {e}");
                     return ExitCode::from(1);
-                },
-            };
+                }
 
-            // (b) Server-direct lookup_value at that slot. Same
-            // blocking_read pattern as (a).
-            let t = Instant::now();
-            let server_value_result = {
-                let s = shared.blocking_read();
-                s.lookup_value(&slot)
-            };
-            let server_value_ns = t.elapsed().as_nanos() as u64;
-            let value_proof = match server_value_result {
-                Ok(p) => p,
-                Err(e) => {
-                    eprintln!("error: server-direct lookup_value at level {target}: {e}");
+                // (d) Client lookup_value via raw tonic RPC (no verify).
+                // The slot we send is the one we got server-direct above —
+                // same bytes the verifying client would have sent.
+                let mut slot_req_bytes: Vec<u8> = Vec::with_capacity(slot.uncompressed_size());
+                if let Err(e) = slot.serialize_uncompressed(&mut slot_req_bytes) {
+                    eprintln!("error: serialize slot for RPC: {e}");
                     return ExitCode::from(1);
-                },
-            };
-
-            // (c) Client lookup_label via raw tonic RPC (no verify).
-            // We re-clone the client per call because tonic's
-            // generated client takes `&mut self` and we need it to be
-            // Send across the await. Latency is read out of the
-            // server-reported `server_processing_micros` field on the
-            // response, so it excludes network RTT and client-side
-            // protobuf decode — what we actually report is "server
-            // handler wall time" (which under load includes tokio
-            // queue-wait).
-            let label_req = LookupLabelRequest {
-                label: label.clone(),
-            };
-            let mut rc_label = raw_client.clone();
-            let client_label_result =
-                driver_rt.block_on(async move { rc_label.lookup_label(label_req).await });
-            let client_label_ns = match &client_label_result {
-                Ok(resp) => resp.get_ref().server_processing_micros.saturating_mul(1000),
-                Err(_) => 0,
-            };
-            if let Err(e) = client_label_result {
-                eprintln!("error: raw RPC lookup_label at level {target}: {e}");
-                return ExitCode::from(1);
-            }
-
-            // (d) Client lookup_value via raw tonic RPC (no verify).
-            // The slot we send is the one we got server-direct above —
-            // same bytes the verifying client would have sent.
-            let mut slot_req_bytes: Vec<u8> = Vec::with_capacity(slot.uncompressed_size());
-            if let Err(e) = slot.serialize_uncompressed(&mut slot_req_bytes) {
-                eprintln!("error: serialize slot for RPC: {e}");
-                return ExitCode::from(1);
-            }
-            let value_req = LookupValueRequest {
-                slot: slot_req_bytes,
-            };
-            let mut rc_value = raw_client.clone();
-            let client_value_result =
-                driver_rt.block_on(async move { rc_value.lookup_value(value_req).await });
-            let client_value_ns = match &client_value_result {
-                Ok(resp) => resp.get_ref().server_processing_micros.saturating_mul(1000),
-                Err(_) => 0,
-            };
-            if let Err(e) = client_value_result {
-                eprintln!("error: raw RPC lookup_value at level {target}: {e}");
-                return ExitCode::from(1);
-            }
-
-            // (e) Server-direct lookup_history. Same blocking_read
-            // pattern as (a)/(b). Returns up to HISTORY_WINDOW entries
-            // most-recent first; at this preload level each sampled
-            // label has been published exactly once so we expect
-            // entries.len() == 1.
-            let t = Instant::now();
-            let server_history_result = {
-                let s = shared.blocking_read();
-                s.lookup_history(&label)
-            };
-            let server_history_ns = t.elapsed().as_nanos() as u64;
-            let history = match server_history_result {
-                Ok(h) => h,
-                Err(e) => {
-                    eprintln!("error: server-direct lookup_history at level {target}: {e}");
+                }
+                let value_req = LookupValueRequest {
+                    slot: slot_req_bytes,
+                };
+                let mut rc_value = raw_client.clone();
+                let client_value_result =
+                    driver_rt.block_on(async move { rc_value.lookup_value(value_req).await });
+                let client_value_ns = match &client_value_result {
+                    Ok(resp) => resp.get_ref().server_processing_micros.saturating_mul(1000),
+                    Err(_) => 0,
+                };
+                if let Err(e) = client_value_result {
+                    eprintln!("error: raw RPC lookup_value at level {target}: {e}");
                     return ExitCode::from(1);
-                },
-            };
+                }
 
-            // (f) Client lookup_history via raw tonic RPC (no verify).
-            let history_req = LookupHistoryRequest {
-                label: label.clone(),
-            };
-            let mut rc_history = raw_client.clone();
-            let client_history_result =
-                driver_rt.block_on(async move { rc_history.lookup_history(history_req).await });
-            let client_history_ns = match &client_history_result {
-                Ok(resp) => resp.get_ref().server_processing_micros.saturating_mul(1000),
-                Err(_) => 0,
-            };
-            if let Err(e) = client_history_result {
-                eprintln!("error: raw RPC lookup_history at level {target}: {e}");
-                return ExitCode::from(1);
-            }
+                // (e) Server-direct lookup_history. Same blocking_read
+                // pattern as (a)/(b). Returns up to HISTORY_WINDOW entries
+                // most-recent first; at this preload level each sampled
+                // label has been published exactly once so we expect
+                // entries.len() == 1.
+                let t = Instant::now();
+                let server_history_result = {
+                    let s = shared.blocking_read();
+                    s.lookup_history(&label)
+                };
+                let server_history_ns = t.elapsed().as_nanos() as u64;
+                let history = match server_history_result {
+                    Ok(h) => h,
+                    Err(e) => {
+                        eprintln!("error: server-direct lookup_history at level {target}: {e}");
+                        return ExitCode::from(1);
+                    }
+                };
 
-            // (g) Server-direct lookup_label_history. Same
-            // blocking_read pattern. Returns the placement record +
-            // a live opening of rand_index_poly at the slot; under
-            // the system's current invariants (labels placed
-            // exactly once) the response will always be Some(...)
-            // for any label we've published in this bench.
-            let t = Instant::now();
-            let server_label_history_result = {
-                let s = shared.blocking_read();
-                s.lookup_label_history(&label)
-            };
-            let server_label_history_ns = t.elapsed().as_nanos() as u64;
-            let label_history = match server_label_history_result {
-                Ok(h) => h,
-                Err(e) => {
-                    eprintln!(
-                        "error: server-direct lookup_label_history at level {target}: {e}"
-                    );
+                // (f) Client lookup_history via raw tonic RPC (no verify).
+                let history_req = LookupHistoryRequest {
+                    label: label.clone(),
+                };
+                let mut rc_history = raw_client.clone();
+                let client_history_result =
+                    driver_rt.block_on(async move { rc_history.lookup_history(history_req).await });
+                let client_history_ns = match &client_history_result {
+                    Ok(resp) => resp.get_ref().server_processing_micros.saturating_mul(1000),
+                    Err(_) => 0,
+                };
+                if let Err(e) = client_history_result {
+                    eprintln!("error: raw RPC lookup_history at level {target}: {e}");
                     return ExitCode::from(1);
-                },
-            };
+                }
 
-            // (h) Client lookup_label_history via raw tonic RPC.
-            let label_history_req = LookupLabelHistoryRequest {
-                label: label.clone(),
-            };
-            let mut rc_lh = raw_client.clone();
-            let client_label_history_result = driver_rt
-                .block_on(async move { rc_lh.lookup_label_history(label_history_req).await });
-            let client_label_history_ns = match &client_label_history_result {
-                Ok(resp) => resp.get_ref().server_processing_micros.saturating_mul(1000),
-                Err(_) => 0,
-            };
-            if let Err(e) = client_label_history_result {
-                eprintln!("error: raw RPC lookup_label_history at level {target}: {e}");
-                return ExitCode::from(1);
-            }
+                // (g) Server-direct lookup_label_history. Same
+                // blocking_read pattern. Returns the placement record +
+                // a live opening of rand_index_poly at the slot; under
+                // the system's current invariants (labels placed
+                // exactly once) the response will always be Some(...)
+                // for any label we've published in this bench.
+                let t = Instant::now();
+                let server_label_history_result = {
+                    let s = shared.blocking_read();
+                    s.lookup_label_history(&label)
+                };
+                let server_label_history_ns = t.elapsed().as_nanos() as u64;
+                let label_history = match server_label_history_result {
+                    Ok(h) => h,
+                    Err(e) => {
+                        eprintln!(
+                            "error: server-direct lookup_label_history at level {target}: {e}"
+                        );
+                        return ExitCode::from(1);
+                    }
+                };
 
-            // ---- size accounting -------------------------------------
-            //
-            // Per the user's spec, each lookup type reports three
-            // numbers: `*_data_bytes`, `*_proof_bytes`,
-            // `*_total_bytes = data + proof`. "Data" is the literal
-            // application-level payload (label/value bytes); "proof" is
-            // the cryptographic-opening byte cost; "total" is their
-            // sum.
-            //
-            //   * label lookup: data = label bytes (the user's queried
-            //     identifier); proof = `serialize_uncompressed(label_
-            //     proof)` (does NOT contain the label bytes). The
-            //     full gRPC response also ships back the slot bytes —
-            //     reported as `label_slot_bytes` for transparency but
-            //     NOT included in proof (the user spec sums only data
-            //     + proof).
-            //
-            //   * value lookup: data = value bytes; proof =
-            //     `serialize_uncompressed(value_proof)` (does NOT
-            //     contain the value bytes — the protobuf sends them
-            //     in a separate `value` field).
-            //
-            //   * value history: data = sum of `value_bytes.len()`
-            //     across entries (each entry carries one value
-            //     snapshot). proof = serialize_uncompressed length of
-            //     the full `ShardedValueHistory` struct MINUS data
-            //     (the struct embeds value_bytes inline, so we
-            //     subtract to avoid double-counting in
-            //     total = data + proof). For HISTORY_WINDOW = 1
-            //     entry × 256-byte values the proof dwarfs data, and
-            //     `total` matches the full struct's
-            //     `serialize_uncompressed` length.
-            //
-            //   * label history: data = label bytes (per the user
-            //     spec — "the one and only label in label history").
-            //     proof = serialize_uncompressed length of the full
-            //     `ShardedLabelHistory` struct MINUS the label bytes
-            //     it inlines (the struct has its own `label: Vec<u8>`
-            //     field; subtracting keeps total = data + proof from
-            //     double-counting). `total` then equals the struct's
-            //     `serialize_uncompressed` length.
-            //
-            // Also recorded for cross-checking: the actual protobuf-
-            // encoded gRPC response sizes (`*_wire_bytes`), so a
-            // reader can confirm `data + proof + framing ≈ wire`.
+                // (h) Client lookup_label_history via raw tonic RPC.
+                let label_history_req = LookupLabelHistoryRequest {
+                    label: label.clone(),
+                };
+                let mut rc_lh = raw_client.clone();
+                let client_label_history_result = driver_rt
+                    .block_on(async move { rc_lh.lookup_label_history(label_history_req).await });
+                let client_label_history_ns = match &client_label_history_result {
+                    Ok(resp) => resp.get_ref().server_processing_micros.saturating_mul(1000),
+                    Err(_) => 0,
+                };
+                if let Err(e) = client_label_history_result {
+                    eprintln!("error: raw RPC lookup_label_history at level {target}: {e}");
+                    return ExitCode::from(1);
+                }
 
-            let mut slot_bytes: Vec<u8> = Vec::with_capacity(slot.uncompressed_size());
-            if let Err(e) = slot.serialize_uncompressed(&mut slot_bytes) {
-                eprintln!("error: serialize slot: {e}");
-                return ExitCode::from(1);
-            }
-            let mut label_proof_bytes: Vec<u8> =
-                Vec::with_capacity(label_proof.uncompressed_size());
-            if let Err(e) = label_proof.serialize_uncompressed(&mut label_proof_bytes) {
-                eprintln!("error: serialize label proof: {e}");
-                return ExitCode::from(1);
-            }
-            let mut value_proof_bytes: Vec<u8> =
-                Vec::with_capacity(value_proof.uncompressed_size());
-            if let Err(e) = value_proof.serialize_uncompressed(&mut value_proof_bytes) {
-                eprintln!("error: serialize value proof: {e}");
-                return ExitCode::from(1);
-            }
-            let mut history_bytes: Vec<u8> = Vec::with_capacity(history.uncompressed_size());
-            if let Err(e) = history.serialize_uncompressed(&mut history_bytes) {
-                eprintln!("error: serialize history: {e}");
-                return ExitCode::from(1);
-            }
-            let mut label_history_bytes: Vec<u8> =
-                Vec::with_capacity(label_history.uncompressed_size());
-            if let Err(e) = label_history.serialize_uncompressed(&mut label_history_bytes) {
-                eprintln!("error: serialize label_history: {e}");
-                return ExitCode::from(1);
-            }
+                // ---- size accounting -------------------------------------
+                //
+                // Per the user's spec, each lookup type reports three
+                // numbers: `*_data_bytes`, `*_proof_bytes`,
+                // `*_total_bytes = data + proof`. "Data" is the literal
+                // application-level payload (label/value bytes); "proof" is
+                // the cryptographic-opening byte cost; "total" is their
+                // sum.
+                //
+                //   * label lookup: data = label bytes (the user's queried
+                //     identifier); proof = `serialize_uncompressed(label_
+                //     proof)` (does NOT contain the label bytes). The
+                //     full gRPC response also ships back the slot bytes —
+                //     reported as `label_slot_bytes` for transparency but
+                //     NOT included in proof (the user spec sums only data
+                //     + proof).
+                //
+                //   * value lookup: data = value bytes; proof =
+                //     `serialize_uncompressed(value_proof)` (does NOT
+                //     contain the value bytes — the protobuf sends them
+                //     in a separate `value` field).
+                //
+                //   * value history: data = sum of `value_bytes.len()`
+                //     across entries (each entry carries one value
+                //     snapshot). proof = serialize_uncompressed length of
+                //     the full `ShardedValueHistory` struct MINUS data
+                //     (the struct embeds value_bytes inline, so we
+                //     subtract to avoid double-counting in
+                //     total = data + proof). For HISTORY_WINDOW = 1
+                //     entry × 256-byte values the proof dwarfs data, and
+                //     `total` matches the full struct's
+                //     `serialize_uncompressed` length.
+                //
+                //   * label history: data = label bytes (per the user
+                //     spec — "the one and only label in label history").
+                //     proof = serialize_uncompressed length of the full
+                //     `ShardedLabelHistory` struct MINUS the label bytes
+                //     it inlines (the struct has its own `label: Vec<u8>`
+                //     field; subtracting keeps total = data + proof from
+                //     double-counting). `total` then equals the struct's
+                //     `serialize_uncompressed` length.
+                //
+                // Also recorded for cross-checking: the actual protobuf-
+                // encoded gRPC response sizes (`*_wire_bytes`), so a
+                // reader can confirm `data + proof + framing ≈ wire`.
 
-            // Protobuf wire sizes (for cross-checks / `wire == data +
-            // proof + framing` sanity).
-            let label_resp = LookupLabelResponse {
-                slot: slot_bytes.clone(),
-                proof: label_proof_bytes.clone(),
-                server_processing_micros: 0,
-            };
-            let value_resp_with_value = LookupValueResponse {
-                proof: value_proof_bytes.clone(),
-                value: value.clone(),
-                server_processing_micros: 0,
-            };
-            let history_resp = LookupHistoryResponse {
-                history: history_bytes.clone(),
-                server_processing_micros: 0,
-            };
-            let label_history_resp = LookupLabelHistoryResponse {
-                history: label_history_bytes.clone(),
-                server_processing_micros: 0,
-            };
-            let label_wire_bytes = label_resp.encoded_len();
-            let value_wire_bytes = value_resp_with_value.encoded_len();
-            let history_wire_bytes = history_resp.encoded_len();
-            let label_history_wire_bytes = label_history_resp.encoded_len();
+                let mut slot_bytes: Vec<u8> = Vec::with_capacity(slot.uncompressed_size());
+                if let Err(e) = slot.serialize_uncompressed(&mut slot_bytes) {
+                    eprintln!("error: serialize slot: {e}");
+                    return ExitCode::from(1);
+                }
+                let mut label_proof_bytes: Vec<u8> =
+                    Vec::with_capacity(label_proof.uncompressed_size());
+                if let Err(e) = label_proof.serialize_uncompressed(&mut label_proof_bytes) {
+                    eprintln!("error: serialize label proof: {e}");
+                    return ExitCode::from(1);
+                }
+                let mut value_proof_bytes: Vec<u8> =
+                    Vec::with_capacity(value_proof.uncompressed_size());
+                if let Err(e) = value_proof.serialize_uncompressed(&mut value_proof_bytes) {
+                    eprintln!("error: serialize value proof: {e}");
+                    return ExitCode::from(1);
+                }
+                let mut history_bytes: Vec<u8> = Vec::with_capacity(history.uncompressed_size());
+                if let Err(e) = history.serialize_uncompressed(&mut history_bytes) {
+                    eprintln!("error: serialize history: {e}");
+                    return ExitCode::from(1);
+                }
+                let mut label_history_bytes: Vec<u8> =
+                    Vec::with_capacity(label_history.uncompressed_size());
+                if let Err(e) = label_history.serialize_uncompressed(&mut label_history_bytes) {
+                    eprintln!("error: serialize label_history: {e}");
+                    return ExitCode::from(1);
+                }
 
-            let history_entries = history.entries.len();
-            let value_history_value_bytes_sum: usize = history
-                .entries
-                .iter()
-                .map(|e| e.value_bytes.len())
-                .sum();
+                // Protobuf wire sizes (for cross-checks / `wire == data +
+                // proof + framing` sanity).
+                let label_resp = LookupLabelResponse {
+                    slot: slot_bytes.clone(),
+                    proof: label_proof_bytes.clone(),
+                    server_processing_micros: 0,
+                };
+                let value_resp_with_value = LookupValueResponse {
+                    proof: value_proof_bytes.clone(),
+                    value: value.clone(),
+                    server_processing_micros: 0,
+                };
+                let history_resp = LookupHistoryResponse {
+                    history: history_bytes.clone(),
+                    server_processing_micros: 0,
+                };
+                let label_history_resp = LookupLabelHistoryResponse {
+                    history: label_history_bytes.clone(),
+                    server_processing_micros: 0,
+                };
+                let label_wire_bytes = label_resp.encoded_len();
+                let value_wire_bytes = value_resp_with_value.encoded_len();
+                let history_wire_bytes = history_resp.encoded_len();
+                let label_history_wire_bytes = label_history_resp.encoded_len();
 
-            // Per-type data/proof/total triples.
-            let label_lookup_data_bytes = label.len();
-            let label_lookup_proof_bytes = label_proof_bytes.len();
-            let label_lookup_total_bytes =
-                label_lookup_data_bytes + label_lookup_proof_bytes;
+                let history_entries = history.entries.len();
+                let value_history_value_bytes_sum: usize =
+                    history.entries.iter().map(|e| e.value_bytes.len()).sum();
 
-            let value_lookup_data_bytes = value.len();
-            let value_lookup_proof_bytes = value_proof_bytes.len();
-            let value_lookup_total_bytes =
-                value_lookup_data_bytes + value_lookup_proof_bytes;
+                // Per-type data/proof/total triples.
+                let label_lookup_data_bytes = label.len();
+                let label_lookup_proof_bytes = label_proof_bytes.len();
+                let label_lookup_total_bytes = label_lookup_data_bytes + label_lookup_proof_bytes;
 
-            let value_history_lookup_data_bytes = value_history_value_bytes_sum;
-            let value_history_lookup_proof_bytes = history_bytes
-                .len()
-                .saturating_sub(value_history_lookup_data_bytes);
-            let value_history_lookup_total_bytes =
-                value_history_lookup_data_bytes + value_history_lookup_proof_bytes;
+                let value_lookup_data_bytes = value.len();
+                let value_lookup_proof_bytes = value_proof_bytes.len();
+                let value_lookup_total_bytes = value_lookup_data_bytes + value_lookup_proof_bytes;
 
-            let label_history_lookup_data_bytes = label.len();
-            let label_history_lookup_proof_bytes = label_history_bytes
-                .len()
-                .saturating_sub(label_history_lookup_data_bytes);
-            let label_history_lookup_total_bytes =
-                label_history_lookup_data_bytes + label_history_lookup_proof_bytes;
+                let value_history_lookup_data_bytes = value_history_value_bytes_sum;
+                let value_history_lookup_proof_bytes = history_bytes
+                    .len()
+                    .saturating_sub(value_history_lookup_data_bytes);
+                let value_history_lookup_total_bytes =
+                    value_history_lookup_data_bytes + value_history_lookup_proof_bytes;
 
-            samples_json.push(format!(
-                concat!(
+                let label_history_lookup_data_bytes = label.len();
+                let label_history_lookup_proof_bytes = label_history_bytes
+                    .len()
+                    .saturating_sub(label_history_lookup_data_bytes);
+                let label_history_lookup_total_bytes =
+                    label_history_lookup_data_bytes + label_history_lookup_proof_bytes;
+
+                samples_json.push(format!(
+                    concat!(
                     "        {{\n",
                     "          \"sample_idx\": {sample_idx},\n",
                     "          \"label_idx\": {idx},\n",
@@ -1350,57 +1360,57 @@ fn main() -> ExitCode {
                     "          \"label_history_response_wire_bytes\": {lh_w}\n",
                     "        }}"
                 ),
-                sample_idx = sample_idx,
-                idx = idx,
-                server_label_ns = server_label_ns,
-                server_value_ns = server_value_ns,
-                server_history_ns = server_history_ns,
-                server_label_history_ns = server_label_history_ns,
-                client_label_ns = client_label_ns,
-                client_value_ns = client_value_ns,
-                client_history_ns = client_history_ns,
-                client_label_history_ns = client_label_history_ns,
-                history_entries = history_entries,
-                l_d = label_lookup_data_bytes,
-                l_p = label_lookup_proof_bytes,
-                l_t = label_lookup_total_bytes,
-                v_d = value_lookup_data_bytes,
-                v_p = value_lookup_proof_bytes,
-                v_t = value_lookup_total_bytes,
-                vh_d = value_history_lookup_data_bytes,
-                vh_p = value_history_lookup_proof_bytes,
-                vh_t = value_history_lookup_total_bytes,
-                lh_d = label_history_lookup_data_bytes,
-                lh_p = label_history_lookup_proof_bytes,
-                lh_t = label_history_lookup_total_bytes,
-                slot_b = slot_bytes.len(),
-                l_w = label_wire_bytes,
-                v_w = value_wire_bytes,
-                h_w = history_wire_bytes,
-                lh_w = label_history_wire_bytes,
-            ));
+                    sample_idx = sample_idx,
+                    idx = idx,
+                    server_label_ns = server_label_ns,
+                    server_value_ns = server_value_ns,
+                    server_history_ns = server_history_ns,
+                    server_label_history_ns = server_label_history_ns,
+                    client_label_ns = client_label_ns,
+                    client_value_ns = client_value_ns,
+                    client_history_ns = client_history_ns,
+                    client_label_history_ns = client_label_history_ns,
+                    history_entries = history_entries,
+                    l_d = label_lookup_data_bytes,
+                    l_p = label_lookup_proof_bytes,
+                    l_t = label_lookup_total_bytes,
+                    v_d = value_lookup_data_bytes,
+                    v_p = value_lookup_proof_bytes,
+                    v_t = value_lookup_total_bytes,
+                    vh_d = value_history_lookup_data_bytes,
+                    vh_p = value_history_lookup_proof_bytes,
+                    vh_t = value_history_lookup_total_bytes,
+                    lh_d = label_history_lookup_data_bytes,
+                    lh_p = label_history_lookup_proof_bytes,
+                    lh_t = label_history_lookup_total_bytes,
+                    slot_b = slot_bytes.len(),
+                    l_w = label_wire_bytes,
+                    v_w = value_wire_bytes,
+                    h_w = history_wire_bytes,
+                    lh_w = label_history_wire_bytes,
+                ));
 
-            if sample_idx == 0 || (sample_idx + 1) % 10 == 0 {
-                eprintln!(
-                    "  sample {}: server[lbl/val/vh/lh]={:.2}/{:.2}/{:.2}/{:.2}ms \
+                if sample_idx == 0 || (sample_idx + 1) % 10 == 0 {
+                    eprintln!(
+                        "  sample {}: server[lbl/val/vh/lh]={:.2}/{:.2}/{:.2}/{:.2}ms \
                      client[lbl/val/vh/lh]={:.2}/{:.2}/{:.2}/{:.2}ms \
                      totals[lbl/val/vh/lh]={}/{}/{}/{}B (vh_entries={})",
-                    sample_idx,
-                    server_label_ns as f64 / 1e6,
-                    server_value_ns as f64 / 1e6,
-                    server_history_ns as f64 / 1e6,
-                    server_label_history_ns as f64 / 1e6,
-                    client_label_ns as f64 / 1e6,
-                    client_value_ns as f64 / 1e6,
-                    client_history_ns as f64 / 1e6,
-                    client_label_history_ns as f64 / 1e6,
-                    label_lookup_total_bytes,
-                    value_lookup_total_bytes,
-                    value_history_lookup_total_bytes,
-                    label_history_lookup_total_bytes,
-                    history_entries,
-                );
-            }
+                        sample_idx,
+                        server_label_ns as f64 / 1e6,
+                        server_value_ns as f64 / 1e6,
+                        server_history_ns as f64 / 1e6,
+                        server_label_history_ns as f64 / 1e6,
+                        client_label_ns as f64 / 1e6,
+                        client_value_ns as f64 / 1e6,
+                        client_history_ns as f64 / 1e6,
+                        client_label_history_ns as f64 / 1e6,
+                        label_lookup_total_bytes,
+                        value_lookup_total_bytes,
+                        value_history_lookup_total_bytes,
+                        label_history_lookup_total_bytes,
+                        history_entries,
+                    );
+                }
             } else {
                 // ---- remote-coord branch ----
                 //
@@ -1417,7 +1427,9 @@ fn main() -> ExitCode {
                 // response byte lengths directly.
 
                 // (1) lookup_label via gRPC.
-                let label_req = LookupLabelRequest { label: label.clone() };
+                let label_req = LookupLabelRequest {
+                    label: label.clone(),
+                };
                 let mut rc = raw_client.clone();
                 let t = Instant::now();
                 let label_result =
@@ -1431,16 +1443,17 @@ fn main() -> ExitCode {
                             String::from_utf8_lossy(&label)
                         );
                         return ExitCode::from(1);
-                    },
+                    }
                 };
-                let server_label_ns =
-                    label_resp.server_processing_micros.saturating_mul(1000);
+                let server_label_ns = label_resp.server_processing_micros.saturating_mul(1000);
                 let slot_bytes = label_resp.slot;
                 let label_proof_bytes = label_resp.proof;
 
                 // (2) lookup_value via gRPC, passing through the slot
                 // bytes we just received from (1).
-                let value_req = LookupValueRequest { slot: slot_bytes.clone() };
+                let value_req = LookupValueRequest {
+                    slot: slot_bytes.clone(),
+                };
                 let mut rc = raw_client.clone();
                 let t = Instant::now();
                 let value_result =
@@ -1451,14 +1464,15 @@ fn main() -> ExitCode {
                     Err(e) => {
                         eprintln!("error: remote lookup_value at level {target}: {e}");
                         return ExitCode::from(1);
-                    },
+                    }
                 };
-                let server_value_ns =
-                    value_resp.server_processing_micros.saturating_mul(1000);
+                let server_value_ns = value_resp.server_processing_micros.saturating_mul(1000);
                 let value_proof_bytes = value_resp.proof;
 
                 // (3) lookup_history via gRPC.
-                let history_req = LookupHistoryRequest { label: label.clone() };
+                let history_req = LookupHistoryRequest {
+                    label: label.clone(),
+                };
                 let mut rc = raw_client.clone();
                 let t = Instant::now();
                 let history_result =
@@ -1469,39 +1483,36 @@ fn main() -> ExitCode {
                     Err(e) => {
                         eprintln!("error: remote lookup_history at level {target}: {e}");
                         return ExitCode::from(1);
-                    },
+                    }
                 };
-                let server_history_ns =
-                    history_resp.server_processing_micros.saturating_mul(1000);
+                let server_history_ns = history_resp.server_processing_micros.saturating_mul(1000);
                 let history_bytes = history_resp.history;
                 // Deserialize to recover `entries.len()` +
                 // value_bytes_sum (the only fields we can't derive from
                 // wire-byte lengths alone). Empty bytes means the coord
                 // had no DB / no history for this label — treat as 0
                 // entries.
-                let (history_entries, value_history_value_bytes_sum) =
-                    if history_bytes.is_empty() {
-                        (0usize, 0usize)
-                    } else {
-                        match ShardedValueHistory::<Bn254, Pcs>::deserialize_uncompressed_unchecked(
-                            &history_bytes[..],
-                        ) {
-                            Ok(h) => {
-                                let sum: usize =
-                                    h.entries.iter().map(|e| e.value_bytes.len()).sum();
-                                (h.entries.len(), sum)
-                            },
-                            Err(e) => {
-                                eprintln!(
-                                    "error: deserialize history at level {target}: {e}"
-                                );
-                                return ExitCode::from(1);
-                            },
+                let (history_entries, value_history_value_bytes_sum) = if history_bytes.is_empty() {
+                    (0usize, 0usize)
+                } else {
+                    match ShardedValueHistory::<Bn254, Pcs>::deserialize_uncompressed_unchecked(
+                        &history_bytes[..],
+                    ) {
+                        Ok(h) => {
+                            let sum: usize = h.entries.iter().map(|e| e.value_bytes.len()).sum();
+                            (h.entries.len(), sum)
                         }
-                    };
+                        Err(e) => {
+                            eprintln!("error: deserialize history at level {target}: {e}");
+                            return ExitCode::from(1);
+                        }
+                    }
+                };
 
                 // (4) lookup_label_history via gRPC.
-                let lh_req = LookupLabelHistoryRequest { label: label.clone() };
+                let lh_req = LookupLabelHistoryRequest {
+                    label: label.clone(),
+                };
                 let mut rc = raw_client.clone();
                 let t = Instant::now();
                 let lh_result =
@@ -1510,14 +1521,11 @@ fn main() -> ExitCode {
                 let lh_resp = match lh_result {
                     Ok(r) => r.into_inner(),
                     Err(e) => {
-                        eprintln!(
-                            "error: remote lookup_label_history at level {target}: {e}"
-                        );
+                        eprintln!("error: remote lookup_label_history at level {target}: {e}");
                         return ExitCode::from(1);
-                    },
+                    }
                 };
-                let server_label_history_ns =
-                    lh_resp.server_processing_micros.saturating_mul(1000);
+                let server_label_history_ns = lh_resp.server_processing_micros.saturating_mul(1000);
                 let label_history_bytes = lh_resp.history;
 
                 // Protobuf wire sizes (synthetic responses with the
@@ -1551,12 +1559,10 @@ fn main() -> ExitCode {
                 // the in-process branch).
                 let label_lookup_data_bytes = label.len();
                 let label_lookup_proof_bytes = label_proof_bytes.len();
-                let label_lookup_total_bytes =
-                    label_lookup_data_bytes + label_lookup_proof_bytes;
+                let label_lookup_total_bytes = label_lookup_data_bytes + label_lookup_proof_bytes;
                 let value_lookup_data_bytes = value.len();
                 let value_lookup_proof_bytes = value_proof_bytes.len();
-                let value_lookup_total_bytes =
-                    value_lookup_data_bytes + value_lookup_proof_bytes;
+                let value_lookup_total_bytes = value_lookup_data_bytes + value_lookup_proof_bytes;
                 let value_history_lookup_data_bytes = value_history_value_bytes_sum;
                 let value_history_lookup_proof_bytes = history_bytes
                     .len()
@@ -1693,12 +1699,10 @@ fn main() -> ExitCode {
                 Err(e) => {
                     eprintln!("error: remote audit_chain failed: {e}");
                     return ExitCode::from(1);
-                },
+                }
             };
             if resp.samples.is_empty() {
-                eprintln!(
-                    "  audit: skipped — coord reported no transitions to audit"
-                );
+                eprintln!("  audit: skipped — coord reported no transitions to audit");
             } else {
                 let audit_blocks: Vec<String> = resp
                     .samples
@@ -1746,9 +1750,7 @@ fn main() -> ExitCode {
             let shared = shared.as_ref().unwrap();
             let current_epoch = shared.blocking_read().current_commitment().epoch;
             if current_epoch < 1 {
-                eprintln!(
-                    "  audit: skipped — only epoch 0 available (no transitions to audit)"
-                );
+                eprintln!("  audit: skipped — only epoch 0 available (no transitions to audit)");
             } else {
                 // One-transition timing: pre-walk the chain to current_epoch-1
                 // so audit_state is in the right place, then time the final
@@ -1768,18 +1770,15 @@ fn main() -> ExitCode {
                     None => {
                         eprintln!("error: epoch 0 commitment missing");
                         return ExitCode::from(1);
-                    },
+                    }
                 };
                 for i in 0..prev_epoch {
                     let next_warmup = match shared.blocking_read().epoch_commitment(i + 1) {
                         Some(c) => c,
                         None => {
-                            eprintln!(
-                                "error: audit warmup: epoch_commitment({}) missing",
-                                i + 1
-                            );
+                            eprintln!("error: audit warmup: epoch_commitment({}) missing", i + 1);
                             return ExitCode::from(1);
-                        },
+                        }
                     };
                     match verify_sharded_invariance::<Bn254, Pcs>(
                         &verifier_ctx,
@@ -1787,7 +1786,7 @@ fn main() -> ExitCode {
                         &prev_commit,
                         &next_warmup,
                     ) {
-                        Ok(true) => {},
+                        Ok(true) => {}
                         Ok(false) => {
                             eprintln!(
                                 "error: audit warmup verify_sharded_invariance returned false at \
@@ -1795,7 +1794,7 @@ fn main() -> ExitCode {
                                 i + 1
                             );
                             return ExitCode::from(1);
-                        },
+                        }
                         Err(e) => {
                             eprintln!(
                                 "error: audit warmup verify_sharded_invariance failed at \
@@ -1803,7 +1802,7 @@ fn main() -> ExitCode {
                                 i + 1
                             );
                             return ExitCode::from(1);
-                        },
+                        }
                     }
                     prev_commit = next_warmup;
                 }
@@ -1811,11 +1810,9 @@ fn main() -> ExitCode {
                 let next_commit = match shared.blocking_read().epoch_commitment(next_epoch) {
                     Some(c) => c,
                     None => {
-                        eprintln!(
-                            "error: epoch_commitment({next_epoch}) missing during audit"
-                        );
+                        eprintln!("error: epoch_commitment({next_epoch}) missing during audit");
                         return ExitCode::from(1);
-                    },
+                    }
                 };
                 let audit_proof_bytes = next_commit.uncompressed_size() as u64;
                 let mut audit_blocks: Vec<String> = Vec::with_capacity(args.audit_samples);
@@ -1833,21 +1830,21 @@ fn main() -> ExitCode {
                     );
                     let audit_ns = t_audit.elapsed().as_nanos() as u64;
                     match ok {
-                        Ok(true) => {},
+                        Ok(true) => {}
                         Ok(false) => {
                             eprintln!(
                                 "error: verify_sharded_invariance returned false at \
                                  transition {prev_epoch} -> {next_epoch}"
                             );
                             return ExitCode::from(1);
-                        },
+                        }
                         Err(e) => {
                             eprintln!(
                                 "error: verify_sharded_invariance failed at transition \
                                  {prev_epoch} -> {next_epoch}: {e}"
                             );
                             return ExitCode::from(1);
-                        },
+                        }
                     }
                     audit_blocks.push(format!(
                         concat!(
@@ -1923,9 +1920,7 @@ fn main() -> ExitCode {
                 initial_prefill_ms,
                 &tmp_reports,
             );
-            match File::create(&args.output)
-                .and_then(|mut f| f.write_all(json.as_bytes()))
-            {
+            match File::create(&args.output).and_then(|mut f| f.write_all(json.as_bytes())) {
                 Ok(()) => eprintln!(
                     "[lookup-bench] CHECKPOINT: persisted level {}/{} lookup+audit ({})",
                     level_idx + 1,
@@ -1971,7 +1966,8 @@ fn main() -> ExitCode {
             }
 
             let rpc_timeout = Duration::from_secs(args.throughput_rpc_timeout_secs.max(1));
-            let mut sweep_blocks: Vec<String> = Vec::with_capacity(args.throughput_concurrencies.len());
+            let mut sweep_blocks: Vec<String> =
+                Vec::with_capacity(args.throughput_concurrencies.len());
             let mut aborted = false;
             for &concurrency in &args.throughput_concurrencies {
                 if concurrency == 0 {
@@ -1983,7 +1979,8 @@ fn main() -> ExitCode {
                 // it fails, the cluster is in trouble — bail the
                 // sweep so we don't make it worse.
                 if args.throughput_health_check_timeout_secs > 0 {
-                    let probe_timeout = Duration::from_secs(args.throughput_health_check_timeout_secs);
+                    let probe_timeout =
+                        Duration::from_secs(args.throughput_health_check_timeout_secs);
                     let probe_label = phone_label(0);
                     let mut probe_client = raw_client.clone();
                     let probe_ok = driver_rt.block_on(async {
@@ -2180,8 +2177,7 @@ fn main() -> ExitCode {
                     if sorted.is_empty() {
                         return f64::NAN;
                     }
-                    let idx =
-                        ((sorted.len() - 1) as f64 * frac).round() as usize;
+                    let idx = ((sorted.len() - 1) as f64 * frac).round() as usize;
                     sorted[idx.min(sorted.len() - 1)]
                 };
                 let p50 = q(0.50);
@@ -2190,7 +2186,11 @@ fn main() -> ExitCode {
                 let qps = n_requests as f64 / elapsed_s.max(1e-9);
                 let errs = err_count.load(Ordering::Relaxed);
                 let attempts = attempt_count.load(Ordering::Relaxed);
-                let err_rate = if attempts > 0 { errs as f64 / attempts as f64 } else { 0.0 };
+                let err_rate = if attempts > 0 {
+                    errs as f64 / attempts as f64
+                } else {
+                    0.0
+                };
                 eprintln!(
                     "    qps={qps:.0}  n={n_requests}  attempts={attempts}  errs={errs} ({err_pct:.1}%)  p50={p50:.1}ms  p90={p90:.1}ms  p99={p99:.1}ms",
                     err_pct = err_rate * 100.0,
@@ -2220,7 +2220,9 @@ fn main() -> ExitCode {
 
                 // Early-stop: bail before climbing concurrency
                 // further if either signal says we're in trouble.
-                if args.throughput_max_error_rate > 0.0 && err_rate >= args.throughput_max_error_rate {
+                if args.throughput_max_error_rate > 0.0
+                    && err_rate >= args.throughput_max_error_rate
+                {
                     eprintln!(
                         "  throughput_sweep: error rate {err_pct:.1}% ≥ threshold {thr:.1}% — \
                          stopping sweep at this fill level",
@@ -2314,15 +2316,17 @@ fn main() -> ExitCode {
                                      batch={batch_size}, sample={sample_idx}): {e}"
                                 );
                                 return ExitCode::from(1);
-                            },
+                            }
                         };
                         if commit_sizes.is_none() {
                             let (mut ic, mut vc, mut ric, mut rvc) = (0u64, 0u64, 0u64, 0u64);
                             for shard_commit in &commit.per_shard {
                                 ic += shard_commit.index_commitment.uncompressed_size() as u64;
                                 vc += shard_commit.value_commitment.uncompressed_size() as u64;
-                                ric += shard_commit.rand_index_commitment.uncompressed_size() as u64;
-                                rvc += shard_commit.rand_value_commitment.uncompressed_size() as u64;
+                                ric +=
+                                    shard_commit.rand_index_commitment.uncompressed_size() as u64;
+                                rvc +=
+                                    shard_commit.rand_value_commitment.uncompressed_size() as u64;
                             }
                             let total = commit.uncompressed_size() as u64;
                             Some((ic, vc, ric, rvc, total))
@@ -2341,7 +2345,9 @@ fn main() -> ExitCode {
                             );
                             return ExitCode::from(1);
                         }
-                        let req = PublishRequest { updates_bytes: bytes };
+                        let req = PublishRequest {
+                            updates_bytes: bytes,
+                        };
                         let ctx = format!(
                             "publish_bench (level={target}, batch={batch_size}, sample={sample_idx})"
                         );
@@ -2353,7 +2359,7 @@ fn main() -> ExitCode {
                                      batch={batch_size}, sample={sample_idx}): {e}"
                                 );
                                 return ExitCode::from(1);
-                            },
+                            }
                         };
                         if commit_sizes.is_none() {
                             Some((
@@ -2470,9 +2476,7 @@ fn main() -> ExitCode {
             initial_prefill_ms,
             &level_reports,
         );
-        match File::create(&args.output)
-            .and_then(|mut f| f.write_all(json.as_bytes()))
-        {
+        match File::create(&args.output).and_then(|mut f| f.write_all(json.as_bytes())) {
             Ok(()) => eprintln!(
                 "[lookup-bench] flushed {} ({} level(s) so far)",
                 args.output.display(),
@@ -2502,7 +2506,7 @@ fn main() -> ExitCode {
         Err(e) => {
             eprintln!("error: cannot create output {:?}: {e}", args.output);
             return ExitCode::from(1);
-        },
+        }
     };
     if let Err(e) = f.write_all(json.as_bytes()) {
         eprintln!("error: cannot write output: {e}");

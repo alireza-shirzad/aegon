@@ -1,3 +1,8 @@
+// Copyright (c) The Aegon Authors.
+//
+// This source code is licensed under the MIT license found in the
+// LICENSE file in the root directory of this source tree.
+
 //! `aegon_masking_throughput_bench` — measure the steady-state
 //! production rate of `generate_masking_package` for a given (num_vars,
 //! kzh_k) config.
@@ -14,10 +19,10 @@
 //! lookup QPS exceeds the masking server's production rate, the queue
 //! drains and value-side lookups stall.
 
-use std::process::ExitCode;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use akd::aegon::sharded::read_srs_from_file;
@@ -114,9 +119,9 @@ async fn main() -> ExitCode {
                 Err(e) => {
                     eprintln!("error loading SRS: {e}");
                     return ExitCode::from(1);
-                },
+                }
             }
-        },
+        }
         (None, Some(seed)) => {
             eprintln!("  generating SRS in-process from seed {seed}");
             let mut rng = ChaCha20Rng::seed_from_u64(seed);
@@ -129,24 +134,27 @@ async fn main() -> ExitCode {
                 Err(e) => {
                     eprintln!("error generating SRS: {e:?}");
                     return ExitCode::from(1);
-                },
+                }
             };
-            match <Pcs as PolynomialCommitmentScheme<Bn254>>::trim(&srs, None, Some(args.num_vars)) {
+            match <Pcs as PolynomialCommitmentScheme<Bn254>>::trim(&srs, None, Some(args.num_vars))
+            {
                 Ok((pk, _vk)) => pk,
                 Err(e) => {
                     eprintln!("error trimming SRS: {e:?}");
                     return ExitCode::from(1);
-                },
+                }
             }
-        },
+        }
         (None, None) => unreachable!("checked above"),
     };
     eprintln!("  SRS ready in {:.1}s", srs_t0.elapsed().as_secs_f64());
 
     let prover_param = Arc::new(prover_param);
-    let producers = args
-        .producers
-        .unwrap_or_else(|| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4));
+    let producers = args.producers.unwrap_or_else(|| {
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4)
+    });
     let num_vars = args.num_vars;
     let kzh_k = args.kzh_k;
 
@@ -193,11 +201,11 @@ async fn main() -> ExitCode {
                     Ok(Err(e)) => {
                         eprintln!("producer: PCS error {e:?}");
                         continue;
-                    },
+                    }
                     Err(e) => {
                         eprintln!("producer: join error {e}");
                         continue;
-                    },
+                    }
                 };
                 if measuring.load(Ordering::Relaxed) {
                     durs.push(dur_ms);

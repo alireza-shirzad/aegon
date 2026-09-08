@@ -1,3 +1,8 @@
+// Copyright (c) The Aegon Authors.
+//
+// This source code is licensed under the MIT license found in the
+// LICENSE file in the root directory of this source tree.
+
 //! Quick smoke for EcVrfHash. Verifies:
 //!   1. h_bits is deterministic (same input -> same output).
 //!   2. h_bits respects num_vars.
@@ -20,7 +25,10 @@ fn main() {
 
     // (2) different counter -> different bits w.h.p.
     let bits_c = <EcVrfHash as HashSuite<Fr>>::h_bits(ctr + 1, label, num_vars);
-    assert_ne!(bits_a, bits_c, "different counter should give different bits");
+    assert_ne!(
+        bits_a, bits_c,
+        "different counter should give different bits"
+    );
 
     // (3) verifiability: reconstruct alpha, run prove on the same key,
     //     check the proof verifies under the corresponding pk.
@@ -42,11 +50,16 @@ fn main() {
     let mut bits_from_proof = Vec::with_capacity(num_vars);
     'outer: for byte in out.iter() {
         for b in 0..8 {
-            if bits_from_proof.len() == num_vars { break 'outer; }
+            if bits_from_proof.len() == num_vars {
+                break 'outer;
+            }
             bits_from_proof.push((byte >> b) & 1 == 1);
         }
     }
     assert_eq!(bits_a, bits_from_proof, "h_bits must equal Output bits");
 
-    println!("EcVrfHash smoke OK: {} bits, deterministic, verifiable.", num_vars);
+    println!(
+        "EcVrfHash smoke OK: {} bits, deterministic, verifiable.",
+        num_vars
+    );
 }

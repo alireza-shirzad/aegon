@@ -1,9 +1,13 @@
+// Copyright (c) The Aegon Authors.
+//
+// This source code is licensed under the MIT license found in the
+// LICENSE file in the root directory of this source tree.
+
 pub mod errors;
 pub mod multilinear_polynomial;
 pub mod univariate_polynomial;
 pub mod util;
 pub mod virtual_polynomial;
-
 
 #[inline]
 pub fn bits_le_to_usize<F: ark_ff::Field>(bits: &[F]) -> usize {
@@ -38,5 +42,3 @@ pub fn usize_to_bits_le<F: ark_ff::Field>(x: usize, n_bits: usize) -> Vec<F> {
     debug_assert!(v == 0, "value {} does not fit in {} bits", x, n_bits);
     out
 }
-
-

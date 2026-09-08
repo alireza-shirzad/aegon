@@ -1,3 +1,8 @@
+// Copyright (c) The Aegon Authors.
+//
+// This source code is licensed under the MIT license found in the
+// LICENSE file in the root directory of this source tree.
+
 //! Folding driver: turn a sequence of published epoch commitments
 //! into a single Nova recursive proof.
 //!
@@ -114,7 +119,7 @@ impl IvcAuditParams {
         let pp = match terminal {
             TerminalSnark::Spartan => {
                 PublicParams::setup(&template, &*default_ck_hint(), &*default_ck_hint())
-            },
+            }
             TerminalSnark::MicroNova => PublicParams::setup(
                 &template,
                 &*<S1Pp as RelaxedR1CSSNARKTrait<E1>>::ck_floor(),
@@ -243,14 +248,14 @@ impl IvcAuditProver {
                     .prove_step(self.params.public_params(), &circuit)
                     .map_err(|e| AegonError::Ivc(format!("first fold failed: {e}")))?;
                 self.snark = Some(snark);
-            },
+            }
             Some(snark) => {
                 snark
                     .prove_step(self.params.public_params(), &circuit)
                     .map_err(|e| {
                         AegonError::Ivc(format!("folding epoch {} failed: {e}", self.steps + 1))
                     })?;
-            },
+            }
         }
 
         self.current = next.to_vec();
@@ -320,9 +325,7 @@ pub fn proof_size_bytes(proof: &AuditProof) -> usize {
 // compression is about the constant, not the growth.
 
 use nova_snark::{
-    nova::CompressedSNARK,
-    provider::ipa_pc::EvaluationEngine,
-    spartan::snark::RelaxedR1CSSNARK,
+    nova::CompressedSNARK, provider::ipa_pc::EvaluationEngine, spartan::snark::RelaxedR1CSSNARK,
 };
 
 /// Spartan-over-IPA for the primary (Grumpkin) instance.

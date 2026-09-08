@@ -1,3 +1,8 @@
+// Copyright (c) The Aegon Authors.
+//
+// This source code is licensed under the MIT license found in the
+// LICENSE file in the root directory of this source tree.
+
 //! Group-sharded IVC auditing against a **real** `ShardedAegon`
 //! publish.
 //!
@@ -107,7 +112,10 @@ fn main() {
     server.set_vrf_prover(VrfProver::from_seed(&BENCH_VRF_SEED));
 
     let ctx = server.sharded_verifier_context();
-    assert_eq!(ctx.chain_groups, chain_groups, "context carries the partition");
+    assert_eq!(
+        ctx.chain_groups, chain_groups,
+        "context carries the partition"
+    );
     let h = ctx.inner.verifier_param.get_h();
     let genesis = server.epoch_commitment(0).expect("epoch-0 commit retained");
 
@@ -143,7 +151,9 @@ fn main() {
             assert!(ok, "honest transition must pass the classic audit");
         }
     }
-    println!("  ✓ classic per-epoch audit accepts the whole chain, tracking {chain_groups} chains.");
+    println!(
+        "  ✓ classic per-epoch audit accepts the whole chain, tracking {chain_groups} chains."
+    );
 
     // A verifier configured for the *wrong* partition must fail
     // rather than quietly accept: it would absorb a different set of
@@ -178,7 +188,11 @@ fn main() {
         let sigmas = epoch_sigma_witnesses(next).expect("every shard carries a sigma proof");
         let t = Instant::now();
         prover.fold_epoch(&shards, &sigmas).expect("fold epoch");
-        println!("  folded epoch {} across {chain_groups} groups in {:.2?}", i + 1, t.elapsed());
+        println!(
+            "  folded epoch {} across {chain_groups} groups in {:.2?}",
+            i + 1,
+            t.elapsed()
+        );
     }
     assert_eq!(prover.num_steps(), epochs);
 

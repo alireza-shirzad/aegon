@@ -31,7 +31,6 @@ once_cell = "1.18"
 ed25519-dalek = "2.2.0"
 # Testing dependencies
 ark-bn254 = "0.5.0"
-divan = "0.1.17"
 rand = "0.9.1"
 derivative = "2.2.0"
 ndarray = { version = "0.16.*", default-features = false }
@@ -49,6 +48,53 @@ rustdoc-args = ["--html-in-header", "../docs-header.html"]
 # irreproducible across machines and across time.
 #
 # Bump deliberately, and re-run the benchmarks when you do.
+# Lint policy.
+#
+# CI runs `cargo clippy --workspace --all-targets -- -D warnings`, so anything
+# not allowed here fails the build. The allow-list below is a BACKLOG, not a
+# style preference: each entry is a lint that currently fires somewhere in the
+# tree and that we have not yet burned down. Removing an entry and fixing the
+# fallout is always welcome; adding one should be argued for.
+#
+# Counts are as of the initial open-source cleanup.
+[workspace.lints.rust]
+# Dead code inherited from the SEEMless/Merkle backend that Aegon replaced
+# (tree_node, append_only_zks internals) plus a handful of superseded
+# Aegon-side helpers, e.g. db::key_history_openings, whose per-shard-local
+# successor is the one actually wired up. Retained rather than deleted so
+# the divergence from facebook/akd stays reviewable.
+dead_code = "allow"
+
+# NOTE: `missing_docs` is NOT set here. Both crates carry a crate-level
+# `#![warn(missing_docs)]`, and an inner attribute overrides whatever this
+# table says, so setting it here would be a no-op that reads as policy.
+# The ~250 outstanding sites are suppressed at the CI invocation instead
+# (`-A missing_docs`); see .github/workflows/ci.yml.
+
+[workspace.lints.clippy]
+# Deny the whole `clippy::all` group at negative priority so the
+# individual allows below (priority 0) win over it. CI therefore runs a
+# bare `cargo clippy --workspace --all-targets` with no extra flags:
+# passing `-D clippy::all` on the command line would override this table
+# and re-enable the backlog.
+all = { level = "deny", priority = -1 }
+
+doc_lazy_continuation        = "allow"  # ~39: rustdoc list indentation
+doc_overindented_list_items  = "allow"  # ~16: ditto
+unusual_byte_groupings       = "allow"  # ~39: domain-separation tag literals
+type_complexity              = "allow"  # ~12: generic PCS/engine signatures
+bool_assert_comparison       = "allow"  # ~12: assert_eq!(x, true) in tests
+too_many_arguments           = "allow"  #   5: publish/lookup plumbing
+needless_range_loop          = "allow"  #   4: index-parallel tensor walks
+result_large_err             = "allow"  #   1: AegonError carries context
+ptr_arg                      = "allow"  #   1: signature is trait-shaped
+unnecessary_unwrap            = "allow" #   1: guarded by a compound condition
+zero_prefixed_literal        = "allow"  #   2: inherited test vectors
+unnecessary_fallible_conversions = "allow"  # 2: inherited ecvrf tests
+extra_unused_type_parameters = "allow"  #   1: inherited test helper
+useless_vec                  = "allow"  #   1: inherited test helper
+manual_unwrap_or_default     = "allow"  #   1
+
 [patch.crates-io]
 ark-std = { git = "https://github.com/arkworks-rs/std", rev = "1693bc56d2ca6657b623f33a3f0b009d0ffeb892" }
 ark-poly = { git = "https://github.com/arkworks-rs/algebra.git", rev = "598a5fbabc1903c7bab6668ef8812bfdf2158723" }

@@ -1,3 +1,8 @@
+// Copyright (c) The Aegon Authors.
+//
+// This source code is licensed under the MIT license found in the
+// LICENSE file in the root directory of this source tree.
+
 //! Coordinator-side persistent state store.
 //!
 //! Originally just a side-channel for `(label → value)` bytes so the
@@ -83,7 +88,11 @@ pub enum DbOp {
     /// `LTRIM key start stop` — keep only `list[start..=stop]`,
     /// discarding the rest. Negative indices count from the tail.
     /// Paired with `LPush` to bound the value-history list length.
-    LTrim { key: Vec<u8>, start: isize, stop: isize },
+    LTrim {
+        key: Vec<u8>,
+        start: isize,
+        stop: isize,
+    },
 }
 
 // Wire encoding for shipping a `Vec<DbOp>` over the shard's
@@ -113,28 +122,28 @@ impl DbOp {
                     out.extend_from_slice(key);
                     out.extend_from_slice(&(value.len() as u32).to_le_bytes());
                     out.extend_from_slice(value);
-                },
+                }
                 DbOp::SAdd { key, member } => {
                     out.push(1);
                     out.extend_from_slice(&(key.len() as u32).to_le_bytes());
                     out.extend_from_slice(key);
                     out.extend_from_slice(&(member.len() as u32).to_le_bytes());
                     out.extend_from_slice(member);
-                },
+                }
                 DbOp::LPush { key, member } => {
                     out.push(2);
                     out.extend_from_slice(&(key.len() as u32).to_le_bytes());
                     out.extend_from_slice(key);
                     out.extend_from_slice(&(member.len() as u32).to_le_bytes());
                     out.extend_from_slice(member);
-                },
+                }
                 DbOp::LTrim { key, start, stop } => {
                     out.push(3);
                     out.extend_from_slice(&(key.len() as u32).to_le_bytes());
                     out.extend_from_slice(key);
                     out.extend_from_slice(&(*start as i64).to_le_bytes());
                     out.extend_from_slice(&(*stop as i64).to_le_bytes());
-                },
+                }
             }
         }
         out
@@ -161,27 +170,27 @@ impl DbOp {
                     let v_len = read_u32_le(&mut cur, bytes)? as usize;
                     let value = take_slice(&mut cur, v_len, bytes)?.to_vec();
                     DbOp::Set { key, value }
-                },
+                }
                 1 => {
                     let m_len = read_u32_le(&mut cur, bytes)? as usize;
                     let member = take_slice(&mut cur, m_len, bytes)?.to_vec();
                     DbOp::SAdd { key, member }
-                },
+                }
                 2 => {
                     let m_len = read_u32_le(&mut cur, bytes)? as usize;
                     let member = take_slice(&mut cur, m_len, bytes)?.to_vec();
                     DbOp::LPush { key, member }
-                },
+                }
                 3 => {
                     let start = read_i64_le(&mut cur, bytes)? as isize;
                     let stop = read_i64_le(&mut cur, bytes)? as isize;
                     DbOp::LTrim { key, start, stop }
-                },
+                }
                 t => {
                     return Err(AegonError::Database(format!(
                         "DbOp::decode_batch: unknown tag {t} at op {i}"
                     )))
-                },
+                }
             });
         }
         if cur != bytes.len() {
@@ -219,66 +228,6 @@ fn read_i64_le(cur: &mut usize, bytes: &[u8]) -> Result<i64, AegonError> {
     Ok(i64::from_le_bytes([
         s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7],
     ]))
-}
-
-#[cfg(test)]
-mod dbop_wire_tests {
-    use super::DbOp;
-    #[test]
-    fn roundtrip_mixed_batch() {
-        let ops = vec![
-            DbOp::Set { key: b"k1".to_vec(), value: b"v1".to_vec() },
-            DbOp::SAdd { key: b"set:a".to_vec(), member: b"member".to_vec() },
-            DbOp::LPush { key: b"list:b".to_vec(), member: b"entry".to_vec() },
-            DbOp::LTrim { key: b"list:b".to_vec(), start: 0, stop: 7 },
-            // Empty key / value edges.
-            DbOp::Set { key: vec![], value: vec![] },
-            DbOp::Set { key: b"big".to_vec(), value: vec![0xAB; 1024] },
-        ];
-        let bytes = DbOp::encode_batch(&ops);
-        let back = DbOp::decode_batch(&bytes).expect("decode roundtrip");
-        assert_eq!(back.len(), ops.len());
-        for (a, b) in ops.iter().zip(back.iter()) {
-            match (a, b) {
-                (DbOp::Set { key: k1, value: v1 }, DbOp::Set { key: k2, value: v2 }) => {
-                    assert_eq!(k1, k2);
-                    assert_eq!(v1, v2);
-                },
-                (DbOp::SAdd { key: k1, member: m1 }, DbOp::SAdd { key: k2, member: m2 }) => {
-                    assert_eq!(k1, k2);
-                    assert_eq!(m1, m2);
-                },
-                (DbOp::LPush { key: k1, member: m1 }, DbOp::LPush { key: k2, member: m2 }) => {
-                    assert_eq!(k1, k2);
-                    assert_eq!(m1, m2);
-                },
-                (
-                    DbOp::LTrim { key: k1, start: s1, stop: t1 },
-                    DbOp::LTrim { key: k2, start: s2, stop: t2 },
-                ) => {
-                    assert_eq!(k1, k2);
-                    assert_eq!(s1, s2);
-                    assert_eq!(t1, t2);
-                },
-                _ => panic!("variant mismatch"),
-            }
-        }
-    }
-
-    #[test]
-    fn rejects_short_input() {
-        assert!(DbOp::decode_batch(&[]).is_err());
-        // Claims 1 op but no body.
-        let bad = [1u8, 0, 0, 0];
-        assert!(DbOp::decode_batch(&bad).is_err());
-    }
-
-    #[test]
-    fn rejects_unknown_tag() {
-        // 1 op, tag=99
-        let bad = [1u8, 0, 0, 0, 99u8, 0, 0, 0, 0];
-        assert!(DbOp::decode_batch(&bad).is_err());
-    }
 }
 
 // TODO(rocksdb-caching): when we add a `RocksDb` impl of this trait
@@ -376,9 +325,8 @@ impl RedisDb {
     /// an unreachable server should fail at coordinator setup, not on
     /// the first publish.
     pub(crate) fn connect(url: &str) -> Result<Self, AegonError> {
-        let client = redis::Client::open(url).map_err(|e| {
-            AegonError::Database(format!("invalid redis url {url:?}: {e}"))
-        })?;
+        let client = redis::Client::open(url)
+            .map_err(|e| AegonError::Database(format!("invalid redis url {url:?}: {e}")))?;
         let mut conn = client
             .get_connection_with_timeout(Duration::from_secs(5))
             .map_err(|e| AegonError::Database(format!("connect to {url:?}: {e}")))?;
@@ -417,16 +365,16 @@ impl Db for RedisDb {
             match op {
                 DbOp::Set { key, value } => {
                     pipe.set::<&[u8], &[u8]>(key, value).ignore();
-                },
+                }
                 DbOp::SAdd { key, member } => {
                     pipe.sadd::<&[u8], &[u8]>(key, member).ignore();
-                },
+                }
                 DbOp::LPush { key, member } => {
                     pipe.lpush::<&[u8], &[u8]>(key, member).ignore();
-                },
+                }
                 DbOp::LTrim { key, start, stop } => {
                     pipe.ltrim::<&[u8]>(key, *start, *stop).ignore();
-                },
+                }
             }
         }
         pipe.query::<()>(&mut *conn)
@@ -458,8 +406,9 @@ impl Db for RedisDb {
         for k in keys {
             pipe.exists::<&[u8]>(k);
         }
-        pipe.query::<Vec<bool>>(&mut *conn)
-            .map_err(|e| AegonError::Database(format!("pipelined EXISTS ({} keys): {e}", keys.len())))
+        pipe.query::<Vec<bool>>(&mut *conn).map_err(|e| {
+            AegonError::Database(format!("pipelined EXISTS ({} keys): {e}", keys.len()))
+        })
     }
 
     fn smembers(&self, key: &[u8]) -> Result<Vec<Vec<u8>>, AegonError> {
@@ -505,8 +454,9 @@ impl Db for RedisDb {
                 for k in &keys {
                     pipe.del::<&[u8]>(k).ignore();
                 }
-                pipe.query::<()>(&mut *conn)
-                    .map_err(|e| AegonError::Database(format!("DEL batch ({}): {e}", keys.len())))?;
+                pipe.query::<()>(&mut *conn).map_err(|e| {
+                    AegonError::Database(format!("DEL batch ({}): {e}", keys.len()))
+                })?;
             }
             if next == 0 {
                 break;
@@ -627,7 +577,8 @@ impl RocksDb {
             .and_then(|s| s.parse().ok())
             .unwrap_or(16);
         if block_cache_gb > 0 {
-            let cache = rocksdb::Cache::new_lru_cache((block_cache_gb * 1024 * 1024 * 1024) as usize);
+            let cache =
+                rocksdb::Cache::new_lru_cache((block_cache_gb * 1024 * 1024 * 1024) as usize);
             let mut block_opts = rocksdb::BlockBasedOptions::default();
             block_opts.set_block_cache(&cache);
             // 16 KB blocks balance random-read latency against cache
@@ -700,7 +651,7 @@ impl Db for RocksDb {
         // Per-key list buffer (lazy-loaded on first list op).
         let mut list_buffers: std::collections::HashMap<Vec<u8>, Vec<Vec<u8>>> =
             std::collections::HashMap::new();
-        let mut load_list = |key: &[u8]| -> Result<Vec<Vec<u8>>, AegonError> {
+        let load_list = |key: &[u8]| -> Result<Vec<Vec<u8>>, AegonError> {
             let raw = self
                 .inner
                 .get(key)
@@ -714,13 +665,13 @@ impl Db for RocksDb {
             match op {
                 DbOp::Set { key, value } => {
                     wb.put(key, value);
-                },
+                }
                 DbOp::SAdd { key, member } => {
                     // Encoded as one zero-byte-valued key per member;
                     // smembers does a prefix scan to enumerate.
                     let composed = Self::set_member_key(key, member);
-                    wb.put(&composed, &[]);
-                },
+                    wb.put(&composed, []);
+                }
                 DbOp::LPush { key, member } => {
                     if !list_buffers.contains_key(key) {
                         list_buffers.insert(key.clone(), load_list(key)?);
@@ -728,7 +679,7 @@ impl Db for RocksDb {
                     // Redis LPUSH semantics: prepend to head.
                     let buf = list_buffers.get_mut(key).unwrap();
                     buf.insert(0, member.clone());
-                },
+                }
                 DbOp::LTrim { key, start, stop } => {
                     if !list_buffers.contains_key(key) {
                         list_buffers.insert(key.clone(), load_list(key)?);
@@ -738,14 +689,15 @@ impl Db for RocksDb {
                     // Resolve negative indices Redis-style.
                     let lo = normalize_idx(*start, len).max(0) as usize;
                     let hi_inclusive = normalize_idx(*stop, len).max(-1);
-                    let new_buf: Vec<Vec<u8>> = if hi_inclusive < 0 || (lo as isize) > hi_inclusive {
+                    let new_buf: Vec<Vec<u8>> = if hi_inclusive < 0 || (lo as isize) > hi_inclusive
+                    {
                         Vec::new()
                     } else {
                         let hi = (hi_inclusive as usize + 1).min(buf.len());
                         buf[lo..hi].to_vec()
                     };
                     *buf = new_buf;
-                },
+                }
             }
         }
         // Flush each list buffer into the WriteBatch.
@@ -763,9 +715,9 @@ impl Db for RocksDb {
         // explicitly OK with.
         let mut write_opts = rocksdb::WriteOptions::default();
         write_opts.disable_wal(true);
-        self.inner
-            .write_opt(wb, &write_opts)
-            .map_err(|e| AegonError::Database(format!("rocksdb WriteBatch ({} ops): {e}", ops.len())))
+        self.inner.write_opt(wb, &write_opts).map_err(|e| {
+            AegonError::Database(format!("rocksdb WriteBatch ({} ops): {e}", ops.len()))
+        })
     }
 
     fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, AegonError> {
@@ -817,8 +769,8 @@ impl Db for RocksDb {
         let mut out: Vec<Vec<u8>> = Vec::new();
         let iter = self.inner.prefix_iterator(&prefix);
         for kv in iter {
-            let (k, _v) = kv
-                .map_err(|e| AegonError::Database(format!("rocksdb smembers iter: {e}")))?;
+            let (k, _v) =
+                kv.map_err(|e| AegonError::Database(format!("rocksdb smembers iter: {e}")))?;
             if !k.starts_with(&prefix) {
                 // prefix_iterator can over-scan past the prefix when
                 // bloom filters are off — defensive bound check.
@@ -868,8 +820,8 @@ impl Db for RocksDb {
             let iter = self.inner.prefix_iterator(prefix);
             let mut wb = rocksdb::WriteBatch::default();
             for kv in iter {
-                let (k, _v) = kv
-                    .map_err(|e| AegonError::Database(format!("rocksdb prefix-scan: {e}")))?;
+                let (k, _v) =
+                    kv.map_err(|e| AegonError::Database(format!("rocksdb prefix-scan: {e}")))?;
                 if !k.starts_with(prefix) {
                     break;
                 }
@@ -890,7 +842,6 @@ impl Db for RocksDb {
         }
         Ok(())
     }
-
 }
 
 /// Lexicographically next prefix after `prefix`. Returns `None` when
@@ -915,7 +866,11 @@ fn lex_next_prefix(prefix: &[u8]) -> Option<Vec<u8>> {
 fn normalize_idx(idx: isize, len: isize) -> isize {
     if idx < 0 {
         let n = len + idx;
-        if n < 0 { -1 } else { n }
+        if n < 0 {
+            -1
+        } else {
+            n
+        }
     } else {
         // Positive indices clamp to `len - 1` (past-the-end → last
         // valid index, matching Redis behavior).
@@ -959,17 +914,17 @@ fn decode_list(bytes: &[u8]) -> Result<Vec<Vec<u8>>, AegonError> {
     let mut off = 4;
     for _ in 0..count {
         if off + 4 > bytes.len() {
-            return Err(AegonError::Database("list blob truncated (elem len)".into()));
+            return Err(AegonError::Database(
+                "list blob truncated (elem len)".into(),
+            ));
         }
-        let elen = u32::from_le_bytes([
-            bytes[off],
-            bytes[off + 1],
-            bytes[off + 2],
-            bytes[off + 3],
-        ]) as usize;
+        let elen = u32::from_le_bytes([bytes[off], bytes[off + 1], bytes[off + 2], bytes[off + 3]])
+            as usize;
         off += 4;
         if off + elen > bytes.len() {
-            return Err(AegonError::Database("list blob truncated (elem body)".into()));
+            return Err(AegonError::Database(
+                "list blob truncated (elem body)".into(),
+            ));
         }
         out.push(bytes[off..off + elen].to_vec());
         off += elen;
@@ -1056,4 +1011,109 @@ pub(crate) fn key_label_placement(label: &[u8]) -> Vec<u8> {
 /// to the coord-side keyspace.
 pub(crate) fn key_shard_fullness() -> &'static [u8] {
     b"aegon:coord:shard_fullness"
+}
+
+#[cfg(test)]
+mod dbop_wire_tests {
+    use super::DbOp;
+    #[test]
+    fn roundtrip_mixed_batch() {
+        let ops = vec![
+            DbOp::Set {
+                key: b"k1".to_vec(),
+                value: b"v1".to_vec(),
+            },
+            DbOp::SAdd {
+                key: b"set:a".to_vec(),
+                member: b"member".to_vec(),
+            },
+            DbOp::LPush {
+                key: b"list:b".to_vec(),
+                member: b"entry".to_vec(),
+            },
+            DbOp::LTrim {
+                key: b"list:b".to_vec(),
+                start: 0,
+                stop: 7,
+            },
+            // Empty key / value edges.
+            DbOp::Set {
+                key: vec![],
+                value: vec![],
+            },
+            DbOp::Set {
+                key: b"big".to_vec(),
+                value: vec![0xAB; 1024],
+            },
+        ];
+        let bytes = DbOp::encode_batch(&ops);
+        let back = DbOp::decode_batch(&bytes).expect("decode roundtrip");
+        assert_eq!(back.len(), ops.len());
+        for (a, b) in ops.iter().zip(back.iter()) {
+            match (a, b) {
+                (DbOp::Set { key: k1, value: v1 }, DbOp::Set { key: k2, value: v2 }) => {
+                    assert_eq!(k1, k2);
+                    assert_eq!(v1, v2);
+                }
+                (
+                    DbOp::SAdd {
+                        key: k1,
+                        member: m1,
+                    },
+                    DbOp::SAdd {
+                        key: k2,
+                        member: m2,
+                    },
+                ) => {
+                    assert_eq!(k1, k2);
+                    assert_eq!(m1, m2);
+                }
+                (
+                    DbOp::LPush {
+                        key: k1,
+                        member: m1,
+                    },
+                    DbOp::LPush {
+                        key: k2,
+                        member: m2,
+                    },
+                ) => {
+                    assert_eq!(k1, k2);
+                    assert_eq!(m1, m2);
+                }
+                (
+                    DbOp::LTrim {
+                        key: k1,
+                        start: s1,
+                        stop: t1,
+                    },
+                    DbOp::LTrim {
+                        key: k2,
+                        start: s2,
+                        stop: t2,
+                    },
+                ) => {
+                    assert_eq!(k1, k2);
+                    assert_eq!(s1, s2);
+                    assert_eq!(t1, t2);
+                }
+                _ => panic!("variant mismatch"),
+            }
+        }
+    }
+
+    #[test]
+    fn rejects_short_input() {
+        assert!(DbOp::decode_batch(&[]).is_err());
+        // Claims 1 op but no body.
+        let bad = [1u8, 0, 0, 0];
+        assert!(DbOp::decode_batch(&bad).is_err());
+    }
+
+    #[test]
+    fn rejects_unknown_tag() {
+        // 1 op, tag=99
+        let bad = [1u8, 0, 0, 0, 99u8, 0, 0, 0, 0];
+        assert!(DbOp::decode_batch(&bad).is_err());
+    }
 }

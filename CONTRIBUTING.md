@@ -1,55 +1,62 @@
-# Contributing to this library
-We want to make contributing to this project as easy and transparent as
-possible.
+# Contributing
 
-## Pull Requests
-We actively welcome your pull requests.
+This is the reference implementation for an academic paper (see `README.md`
+for the citation). Contributions are welcome, especially bug reports against
+the cryptographic paths.
 
-1. Fork the repo and create your branch from `main`.
-2. If you've added code that should be tested, add tests.
-3. If you've changed APIs, update the documentation.
-4. Ensure the test suite passes.
-5. If you haven't already, complete the Contributor License Agreement ("CLA").
+There is **no CLA**. By contributing you agree that your contributions are
+licensed under the MIT License (`LICENSE`), the same terms as the rest of the
+repository.
 
-### Special note regarding MySQL based tests
-We support MySQL directly within this repository. In order to utilize a MySQL database you may utilize the supplied [```docker-compose.yml```](docker-compose.yml) specification. It will create a basic database (named ```default```) and configure a container with the appropriate ports opened and mapped to the MySQL port. A valid [docker](https://www.docker.com/products/docker-desktop) instance is a dependency for this tool.
+## Before you start
 
-You can instantiate the container with
-```bash
-cd <root of repository>
+Read `SECURITY.md`. This is unaudited research code with a non-ceremonial
+trusted setup; it is not production key transparency, and patches that
+present it as such will not be merged.
 
-docker compose up [-d]
-```
-where the ```-d``` flag indicates to background the process. If you want to run the container interactively, don't add this flag.
+## Pull requests
 
-When finished you can terminate the container you can terminate it with ```CTRL-C``` if you ran it interactively and ```docker compose down``` if you ran it with the ```-d``` flag.
+1. Fork the repo and branch from `main`.
+2. Add tests for new code, and update docs when you change an API.
+3. Make sure the checks CI runs are green locally:
 
-The MySQL connection info for this test container is
-```
-MySQL port opened on local machine: 8001
-User: "root"
-Password: "example"
-Default database: "default"
-```
+   ```bash
+   cargo fmt --all -- --check
+   cargo clippy --workspace --all-targets
+   cargo clippy --workspace --all-targets --features ivc_audit
+   cargo test -p akd
+   cargo test -p akd --features ivc_audit
+   cargo test -p akd_core
+   ```
 
-You can see an example configured connection in the code [here](akd_mysql/src/mysql_db_tests.rs), line 29.
+   Test the two crates in separate invocations — see "Test status" in the
+   README for why. `Prerequisites` there covers `protoc` and `libclang`.
 
-## Contributor License Agreement ("CLA")
-In order to accept your pull request, we need you to submit a CLA. You only need
-to do this once to work on any of Facebook's open source projects.
+4. Do not pass `-D warnings` to clippy. The lint policy lives in
+   `[workspace.lints]` in the root `Cargo.toml`, and command-line flags
+   override it. The allow-list there is a backlog, not a style preference;
+   removing an entry and fixing the fallout is a welcome contribution.
 
-Complete your CLA here: <https://code.facebook.com/cla>
+## Known gaps
+
+Several tests are `#[ignore]`d with their reason in the attribute, and the
+upstream SEEMless/Merkle suites sit behind the off-by-default
+`upstream_tests` feature. The README tables both. Fixes for any of them are
+useful contributions — start with the value-history round-trip against the
+Rocks backend, which is an undiagnosed failure rather than a stale test.
+
+There are roughly 250 `missing_docs` sites on public API. CI reports the
+count without failing on it.
 
 ## Issues
-We use GitHub issues to track public bugs. Please ensure your description is
-clear and has sufficient instructions to be able to reproduce the issue.
 
-Facebook has a [bounty program](https://www.facebook.com/whitehat/) for the safe
-disclosure of security bugs. In those cases, please go through the process
-outlined on that page and do not file a public issue.
+Use GitHub issues. For anything that looks like a vulnerability, see
+`SECURITY.md` — but note that this software is not deployed anywhere, so
+there is no embargo process.
 
-## License
+## Relationship to upstream AKD
 
-By contributing to akd, you agree that your contributions will be
-licensed under both the LICENSE-MIT and LICENSE-APACHE files in the root
-directory of this source tree.
+This repository is a fork of [facebook/akd](https://github.com/facebook/akd)
+with the append-only-tree backend replaced. Bugs that also affect upstream
+should go to Meta through their process rather than here; `NOTICE` describes
+the split.

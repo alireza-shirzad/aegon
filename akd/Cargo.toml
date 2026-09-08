@@ -1,12 +1,13 @@
 [package]
 name = "akd"
 version = "0.12.0-pre.12"
-authors = ["akd contributors"]
-description = "An implementation of an auditable key directory"
-license = "MIT OR Apache-2.0"
+authors = ["The Aegon Authors"]
+description = "Sharded, polynomial-commitment-backed auditable key directory (Aegon engine, AKD-compatible API)"
+license = "MIT"
 edition = "2021"
-keywords = ["key-transparency", "akd"]
-repository = "https://github.com/facebook/akd"
+rust-version = "1.88.0"
+keywords = ["key-transparency", "akd", "aegon"]
+repository = "https://github.com/alireza-shirzad/aegon"
 readme = "../README.md"
 
 [features]
@@ -31,6 +32,12 @@ public_auditing = ["dep:protobuf", "akd_core/protobuf"]
 parallel_vrf = ["akd_core/parallel_vrf"]
 # Enable pre-loading of the nodes when generating history proofs
 preload_history = []
+# The upstream SEEMless/Merkle test suites (`append_only_zks::tests` and
+# `crate::tests`). Aegon replaced the append-only-tree backend behind
+# `Directory`, so these exercise a code path that no longer carries the
+# engine and they do not pass. They are retained, not deleted, so the
+# divergence from facebook/akd stays auditable. Off by default; see README.
+upstream_tests = []
 public_tests = [
     "rand",
     "dep:colored",
@@ -131,7 +138,11 @@ tracing-tree = { version = "0.4", optional = true }
 
 [dev-dependencies]
 criterion = "0.5"
-divan = { git = "https://github.com/alireza-shirzad/divan.git" }
+# Fork adds per-sample JSON output (see akd/benches/publish_sweep.rs).
+# Pinned to an exact revision for the same reason as the arkworks
+# patches in the workspace manifest: unpinned git deps silently move
+# benchmark numbers between clones.
+divan = { git = "https://github.com/alireza-shirzad/divan.git", rev = "54d2574ecfe4f68e6da36f30107edda35d1ed66c" }
 serial_test = "2"
 proptest = "1"
 proptest-derive = "0.4"
@@ -187,3 +198,6 @@ required-features = ["ivc_audit"]
 
 [build-dependencies]
 tonic-build = "0.12"
+
+[lints]
+workspace = true

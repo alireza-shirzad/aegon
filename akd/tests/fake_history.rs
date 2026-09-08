@@ -1,3 +1,8 @@
+// Copyright (c) The Aegon Authors.
+//
+// This source code is licensed under the MIT license found in the
+// LICENSE file in the root directory of this source tree.
+
 //! Fake-history end-to-end test.
 //!
 //! Models a realistic AKD lifecycle: users sign up, look up their own
@@ -109,8 +114,8 @@ async fn audit_one_transition(
         .epoch_commitment(next_epoch)
         .await
         .expect("next commitment retained");
-    let ok = aegon_facade::verify_invariance(ctx, audit_state, prev, &next)
-        .expect("verify_invariance");
+    let ok =
+        aegon_facade::verify_invariance(ctx, audit_state, prev, &next).expect("verify_invariance");
     assert!(
         ok,
         "auditor must accept the honest transition into epoch {next_epoch}"
@@ -127,10 +132,7 @@ async fn user_lookup(
     user: &UserRecord,
     current_epoch: u64,
 ) {
-    let (proof, eh) = directory
-        .lookup(user.label.clone())
-        .await
-        .expect("lookup");
+    let (proof, eh) = directory.lookup(user.label.clone()).await.expect("lookup");
     assert_eq!(
         eh.epoch(),
         current_epoch,
@@ -172,14 +174,8 @@ async fn user_consistency(
         .consistency_proof(&user.label, s0_epoch)
         .await
         .expect("consistency_proof");
-    let result = aegon_facade::verify_consistency(
-        ctx,
-        &s0,
-        current,
-        &user.label,
-        &proof,
-    )
-    .expect("verify_consistency");
+    let result = aegon_facade::verify_consistency(ctx, &s0, current, &user.label, &proof)
+        .expect("verify_consistency");
 
     // Did the user change their value strictly after s0 and at-or-before
     // current.epoch? If so, their slot's rand_value diverged and the
@@ -284,9 +280,9 @@ async fn interleaved_eight_epoch_lifecycle_with_updates() {
     // Fresh lookup must return the new value.
     user_lookup(&directory, &ctx, &truth[0], e4).await; // alice's new value verified
     user_lookup(&directory, &ctx, &truth[5], e4).await; // frank
-    // Alice's own consistency proof across the change is expected to
-    // FAIL (Ok(false)) — and `user_consistency` enforces exactly that
-    // by looking at `last_change_epoch`.
+                                                        // Alice's own consistency proof across the change is expected to
+                                                        // FAIL (Ok(false)) — and `user_consistency` enforces exactly that
+                                                        // by looking at `last_change_epoch`.
     user_consistency(&directory, &ctx, &truth[0], &prev, /*s0=*/ 1).await;
     // Bob did not change his value; his consistency from e1 still holds.
     user_consistency(&directory, &ctx, &truth[1], &prev, /*s0=*/ 1).await;
@@ -297,7 +293,7 @@ async fn interleaved_eight_epoch_lifecycle_with_updates() {
     assert_eq!(e5, 5);
     prev = audit_one_transition(&directory, &ctx, &mut audit_state, &prev, e5).await;
     user_lookup(&directory, &ctx, &truth[6], e5).await; // grace
-    // Alice's consistency from POST-update (e4) onward holds.
+                                                        // Alice's consistency from POST-update (e4) onward holds.
     user_consistency(&directory, &ctx, &truth[0], &prev, /*s0=*/ 4).await;
     // From pre-update epochs it still rejects.
     user_consistency(&directory, &ctx, &truth[0], &prev, /*s0=*/ 1).await;
@@ -325,7 +321,7 @@ async fn interleaved_eight_epoch_lifecycle_with_updates() {
     user_lookup(&directory, &ctx, &truth[2], e6).await; // carol's new value
     user_lookup(&directory, &ctx, &truth[7], e6).await; // heidi
     user_lookup(&directory, &ctx, &truth[9], e6).await; // judy
-    // Carol's consistency from before her change rejects.
+                                                        // Carol's consistency from before her change rejects.
     user_consistency(&directory, &ctx, &truth[2], &prev, /*s0=*/ 1).await;
     user_consistency(&directory, &ctx, &truth[2], &prev, /*s0=*/ 5).await;
     // Alice's long-range consistency from e1 still rejects (her value
@@ -343,7 +339,7 @@ async fn interleaved_eight_epoch_lifecycle_with_updates() {
     user_lookup(&directory, &ctx, &truth[1], e7).await; // bob's new value
     user_lookup(&directory, &ctx, &truth[4], e7).await; // eve (unchanged)
     user_lookup(&directory, &ctx, &truth[8], e7).await; // ivan (unchanged)
-    // Bob's consistency from e1 (pre-change) rejects.
+                                                        // Bob's consistency from e1 (pre-change) rejects.
     user_consistency(&directory, &ctx, &truth[1], &prev, /*s0=*/ 1).await;
     // Dave's stable consistency from e2 still holds.
     user_consistency(&directory, &ctx, &truth[3], &prev, /*s0=*/ 2).await;

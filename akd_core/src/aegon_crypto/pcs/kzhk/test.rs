@@ -1,3 +1,8 @@
+// Copyright (c) The Aegon Authors.
+//
+// This source code is licensed under the MIT license found in the
+// LICENSE file in the root directory of this source tree.
+
 use super::*;
 use crate::aegon_crypto::pcs::kzhk::structs::KZHKConfig;
 use ark_bn254::{Bn254 as E, Fr};
@@ -623,8 +628,7 @@ fn masking_package_open_zk_round_trip() -> Result<(), PCSError> {
     let nv = 8;
     let k = 2;
     let mut rng = test_rng();
-    let poly =
-        DenseOrSparseMLE::Sparse(SparseMultilinearExtension::<Fr>::rand(nv, &mut rng));
+    let poly = DenseOrSparseMLE::Sparse(SparseMultilinearExtension::<Fr>::rand(nv, &mut rng));
     let params = KZHK::<E>::gen_srs_for_testing(KZHKConfig::new(k, true), &mut rng, nv)?;
     let (ck, vk) = KZHK::trim(params, None, Some(nv))?;
     let point: Vec<Fr> = (0..nv).map(|_| Fr::rand(&mut rng)).collect();
@@ -634,8 +638,7 @@ fn masking_package_open_zk_round_trip() -> Result<(), PCSError> {
 
     // Producer side (masking server): builds the package in isolation,
     // without ever seeing the polynomial, commitment, or point.
-    let package =
-        <KZHK<E> as PolynomialCommitmentScheme<E>>::generate_masking_package(&ck, nv)?;
+    let package = <KZHK<E> as PolynomialCommitmentScheme<E>>::generate_masking_package(&ck, nv)?;
 
     // Consumer side (shard): opens the polynomial with the package.
     let mut prover_transcript = IOPTranscript::new(b"test_masking_pkg");
@@ -671,8 +674,7 @@ fn masking_package_remask_non_zk_proof() -> Result<(), PCSError> {
     let nv = 8;
     let k = 2;
     let mut rng = test_rng();
-    let poly =
-        DenseOrSparseMLE::Sparse(SparseMultilinearExtension::<Fr>::rand(nv, &mut rng));
+    let poly = DenseOrSparseMLE::Sparse(SparseMultilinearExtension::<Fr>::rand(nv, &mut rng));
     let params = KZHK::<E>::gen_srs_for_testing(KZHKConfig::new(k, true), &mut rng, nv)?;
     let (ck, vk) = KZHK::trim(params, None, Some(nv))?;
     let point: Vec<Fr> = (0..nv).map(|_| Fr::rand(&mut rng)).collect();
@@ -689,13 +691,11 @@ fn masking_package_remask_non_zk_proof() -> Result<(), PCSError> {
         &point,
         &state,
     )?;
-    let tau_f =
-        <KZHK<E> as PolynomialCommitmentScheme<E>>::get_hiding_scalar(&state);
+    let tau_f = <KZHK<E> as PolynomialCommitmentScheme<E>>::get_hiding_scalar(&state);
 
     // Remask using a fresh package. The verifier accepts the result
     // as a hiding opening of `f` at `point` against `com`.
-    let package =
-        <KZHK<E> as PolynomialCommitmentScheme<E>>::generate_masking_package(&ck, nv)?;
+    let package = <KZHK<E> as PolynomialCommitmentScheme<E>>::generate_masking_package(&ck, nv)?;
     let mut prover_transcript = IOPTranscript::new(b"test_remask_pkg");
     let proof = <KZHK<E> as PolynomialCommitmentScheme<E>>::remask_with_package(
         &ck,
@@ -719,4 +719,3 @@ fn masking_package_remask_non_zk_proof() -> Result<(), PCSError> {
     )?);
     Ok(())
 }
-

@@ -36,6 +36,32 @@ All three proofs verify against a single `ShardedEpochCommitment`
 
 ---
 
+## Prerequisites
+
+Two system libraries are needed before `cargo build` will work; neither is
+pulled in by Cargo.
+
+| Dependency | Why | Install |
+| :--- | :--- | :--- |
+| `protoc` | `akd_core`'s build script compiles the `.proto` specs | `apt install protobuf-compiler` / `brew install protobuf` |
+| `libclang` | `librocksdb-sys` runs `bindgen` | `apt install libclang-dev clang` / `brew install llvm` |
+
+On Linux, installing `libclang-dev` is enough. On macOS, Homebrew's LLVM is
+not on the default search path and the build fails with a `dyld` error naming
+`libclang.dylib`; export both of these:
+
+```bash
+export LIBCLANG_PATH=/opt/homebrew/opt/llvm/lib
+export DYLD_FALLBACK_LIBRARY_PATH=/opt/homebrew/opt/llvm/lib
+```
+
+The Rust toolchain is pinned in `rust-toolchain.toml` and installs itself on
+first `cargo` invocation. `Cargo.lock` is committed deliberately — this
+repository's published results are timing measurements, and a floating
+dependency graph moves them.
+
+---
+
 ## Quick start (single process, in-memory shards)
 
 ```rust
@@ -388,6 +414,52 @@ cargo test --release -p akd --test sharded_aegon -- \
   --ignored bench_production_shard_scale --nocapture
 ```
 
+### Test status
+
+`cargo test -p akd` and `cargo test -p akd_core` are both green, and CI keeps
+them that way. Test the two crates in **separate** invocations: a combined
+`-p akd -p akd_core` unifies features, which switches `akd_core` to `parallel`
+and runs its SRS-heavy unit tests under nested rayon pools, exhausting the
+thread limit inside arkworks' MSM.
+
+Some tests are `#[ignore]`d. Each carries its reason in the attribute; run
+them with `--ignored`. Three groups are known failures rather than slow
+benchmarks:
+
+| Test | Status |
+| :--- | :--- |
+| `sharded_aegon::*_history_round_trip` (3) | **Known failure.** Value-history round-trip returns 0 entries against the Rocks backend where 2 are expected. Not diagnosed. |
+| `grpc_sharded::*` (3) | **Known failure.** The harness starts the gRPC shard without a KV backend, so `FetchValue` fails. Needs a `DbSource` attached in the test setup. |
+| `univariate_polynomial::test_build_l*` (2) | **Known failure.** Vendored HyperPlonk helper with no caller in Aegon; does not affect the KZH-k path. |
+
+The upstream SEEMless/Merkle suites (`append_only_zks::tests` and
+`akd::tests`, 74 tests) are behind the off-by-default `upstream_tests`
+feature. Aegon replaced the append-only-tree backend, so they exercise a path
+that no longer carries the engine and they do not pass. They are retained,
+not deleted, so the divergence from upstream stays reviewable:
+
+```bash
+cargo test -p akd --features upstream_tests   # expected to fail
+```
+
+### Fast-forward (IVC) auditing
+
+Behind the off-by-default `ivc_audit` feature. An auditor that has been
+offline verifies one recursive proof instead of replaying every missed
+epoch, at a cost independent of how many it missed.
+
+```bash
+cargo test -p akd --features ivc_audit
+cargo run --release -p akd --features ivc_audit --bin aegon_ivc_bench -- --help
+cargo run --release -p akd --features ivc_audit --example ivc_audit_grouped_e2e
+```
+
+Enabling it switches the audit path's Fiat-Shamir derivations from SHA-256 to
+Poseidon, because the derivation is recomputed inside the proof circuit.
+Servers and auditors must agree: a mismatch rejects every epoch. The Merkle
+commitment, lookup, consistency, and history paths are unaffected. See
+`SECURITY.md`.
+
 ---
 
 ## Top-level directory organization
@@ -411,7 +483,39 @@ fork has not been independently reviewed.
 
 ---
 
+## Citing
+
+This is the reference implementation for:
+
+> Hossein Hafezi, Alireza Shirzad, Benedikt Bünz, Kevin Lewi, Dillon George,
+> and Joseph Bonneau. *Aegon: Self-Auditable Key Transparency.* Cryptology
+> ePrint Archive, Paper 2026/1681, 2026. <https://eprint.iacr.org/2026/1681>
+
+```bibtex
+@misc{cryptoeprint:2026/1681,
+      author = {Hossein Hafezi and Alireza Shirzad and Benedikt Bünz and Kevin Lewi and Dillon George and Joseph Bonneau},
+      title = {Aegon: Self-Auditable Key Transparency},
+      howpublished = {Cryptology {ePrint} Archive, Paper 2026/1681},
+      year = {2026},
+      url = {https://eprint.iacr.org/2026/1681}
+}
+```
+
+---
+
 ## License
 
-Dual MIT / Apache-2.0, inherited from upstream AKD. See `LICENSE-MIT`
-and `LICENSE-APACHE`.
+MIT. See `LICENSE`.
+
+`NOTICE` records what this repository derives from and what was changed.
+Upstream [facebook/akd](https://github.com/facebook/akd) (Meta Platforms) is
+offered under MIT OR Apache-2.0; this repository exercises the MIT option and
+preserves Meta's copyright notice in every file derived from it, as MIT
+requires. Parts of the multilinear arithmetic, PCS traits, and transcript in
+`akd_core::aegon_crypto` derive from
+[EspressoSystems/hyperplonk](https://github.com/EspressoSystems/hyperplonk),
+also MIT. Source files carry the header of whichever copyright applies.
+
+Security caveats — unaudited cryptography, a non-ceremonial trusted setup,
+and unauthenticated transports — are in `SECURITY.md`. Read it before
+deploying anything.

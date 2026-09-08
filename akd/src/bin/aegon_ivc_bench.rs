@@ -1,3 +1,8 @@
+// Copyright (c) The Aegon Authors.
+//
+// This source code is licensed under the MIT license found in the
+// LICENSE file in the root directory of this source tree.
+
 //! Benchmark the IVC audit path (paper §3, fast-forwarding).
 //!
 //! The claim under test is a *shape* claim, not just a speed one:
@@ -31,27 +36,28 @@ use akd::aegon::ivc::fs_poseidon::{
     domain, poseidon_chain_scalar, poseidon_sigma_challenge, ro_constants, FsParams,
     ShardCommitments,
 };
-use akd::aegon::ivc::prover::{
-    compress, compress_pp, TerminalSnark, compressed_pp_proof_size_bytes, compressed_proof_size_bytes,
-    IvcAuditParams, IvcAuditProver,
-};
 use akd::aegon::ivc::grouped::{
     verify_grouped_folding_proofs, verify_grouped_ivc_audit, GroupPlan, GroupedIvcAuditParams,
     GroupedIvcAuditProver,
 };
+use akd::aegon::ivc::prover::{
+    compress, compress_pp, compressed_pp_proof_size_bytes, compressed_proof_size_bytes,
+    IvcAuditParams, IvcAuditProver, TerminalSnark,
+};
 use akd::aegon::ivc::synthetic::{
-    as_sharded_epoch_commitment, genesis, honest_chain, honest_grouped_chain, rand_point, rng,
-    Pcs,
+    as_sharded_epoch_commitment, genesis, honest_chain, honest_grouped_chain, rand_point, rng, Pcs,
 };
 use akd::aegon::ivc::verifier::verify_compressed_ivc_audit;
-use akd::aegon::{verify_sharded_invariance, ShardedAuditState, ShardedVerifierContext, VerifierContext};
+use akd::aegon::{
+    verify_sharded_invariance, ShardedAuditState, ShardedVerifierContext, VerifierContext,
+};
 use akd_core::aegon_crypto::pcs::kzhk::srs::KZHKUniversalParams;
 use akd_core::aegon_crypto::pcs::StructuredReferenceString;
 use ark_bn254::{Bn254, Fr, G1Affine};
-use ark_ec::{CurveGroup, AffineRepr};
-use ark_std::UniformRand;
+use ark_ec::{AffineRepr, CurveGroup};
 use ark_serialize::CanonicalSerialize;
 use ark_std::rand::SeedableRng;
+use ark_std::UniformRand;
 use clap::Parser;
 use rand_chacha::ChaCha20Rng;
 
@@ -206,13 +212,14 @@ fn main() {
     // audit is independent of dictionary size, so a small SRS gives
     // the same per-epoch verify cost a planetary one would.
     let mut srs_rng = ChaCha20Rng::seed_from_u64(0x5252_5252);
-    let srs = <KZHKUniversalParams<Bn254> as StructuredReferenceString<Bn254>>::gen_srs_for_testing(
-        &mut srs_rng,
-        2,
-        true,
-        args.num_vars,
-    )
-    .expect("srs gen");
+    let srs =
+        <KZHKUniversalParams<Bn254> as StructuredReferenceString<Bn254>>::gen_srs_for_testing(
+            &mut srs_rng,
+            2,
+            true,
+            args.num_vars,
+        )
+        .expect("srs gen");
     let (_pp, vk) =
         <KZHKUniversalParams<Bn254> as StructuredReferenceString<Bn254>>::trim(&srs, args.num_vars)
             .expect("trim");
@@ -259,7 +266,7 @@ fn main() {
             Err(e) => {
                 println!("{n:>7}  skipped: {e}");
                 continue;
-            },
+            }
         };
         let mut r = rng(0xBE_11C4 ^ n as u64);
         // Everything below runs through the grouped types. At
@@ -276,8 +283,7 @@ fn main() {
         let constraints = ivc.constraints_per_step();
 
         // ---- folding: the prover's per-epoch cost ----
-        let mut prover =
-            GroupedIvcAuditProver::new(&ivc, &epochs[0]).expect("prover init");
+        let mut prover = GroupedIvcAuditProver::new(&ivc, &epochs[0]).expect("prover init");
         let mut fold_times = Vec::with_capacity(args.epochs);
         for (next, sigma) in epochs[1..].iter().zip(&sigmas) {
             let t = Instant::now();
@@ -361,7 +367,10 @@ fn main() {
         for _ in 0..5 {
             let t = Instant::now();
             let out = produce_audit_object(
-                FsParams { num_vars: args.num_vars, n_shards: n },
+                FsParams {
+                    num_vars: args.num_vars,
+                    n_shards: n,
+                },
                 h,
                 base,
                 &new_index,
@@ -403,7 +412,10 @@ fn main() {
              \x20 {:>34} {:>14} {:>14} {:>14}\n\
              \x20 {:>34} {:>14} {:>14} {:>14}\n\
              \x20 {:>34} {:>14} {:>14} {:>14}",
-            "scenario", "server/epoch", "client audit", "client bytes",
+            "scenario",
+            "server/epoch",
+            "client audit",
+            "client bytes",
             "-".repeat(78),
             "1. classic (no IVC)",
             format!("{:.2?}", server_classic),
@@ -412,11 +424,17 @@ fn main() {
             "2. IVC, fold only",
             format!("{:.2?}", fold),
             format!("{:.2?}", recursive_verify),
-            format!("{:.1} MB once", (recursive_bytes + tuple_bytes) as f64 / (1024.0 * 1024.0)),
+            format!(
+                "{:.1} MB once",
+                (recursive_bytes + tuple_bytes) as f64 / (1024.0 * 1024.0)
+            ),
             "3. IVC + compression",
             format!("{:.2?}+{:.2?}", fold, compress_time),
             format!("{:.2?}", compressed_verify),
-            format!("{:.1} KB once", (compressed_bytes + tuple_bytes) as f64 / 1024.0),
+            format!(
+                "{:.1} KB once",
+                (compressed_bytes + tuple_bytes) as f64 / 1024.0
+            ),
         );
     }
 
@@ -536,12 +554,22 @@ fn group_sweep(args: &Args, h: G1Affine) {
         .next()
         .expect("--shards must name a shard count");
 
-    println!("group-sharded audit  (shards={n}, epochs={}, num_vars={})\n", args.epochs, args.num_vars);
+    println!(
+        "group-sharded audit  (shards={n}, epochs={}, num_vars={})\n",
+        args.epochs, args.num_vars
+    );
     println!(
         "{:>7} {:>8} {:>12} {:>9} {:>13} {:>13} {:>13} {:>13} {:>11} {:>10}",
-        "groups", "shards/g", "constraints", "setup",
-        "fold/host", "fold/1box", "compr/host", "compr/1box",
-        "pub proof", "verify",
+        "groups",
+        "shards/g",
+        "constraints",
+        "setup",
+        "fold/host",
+        "fold/1box",
+        "compr/host",
+        "compr/1box",
+        "pub proof",
+        "verify",
     );
     println!("{}", "-".repeat(122));
 
@@ -551,7 +579,7 @@ fn group_sweep(args: &Args, h: G1Affine) {
             Err(e) => {
                 println!("{g:>7}  skipped: {e}");
                 continue;
-            },
+            }
         };
         let mut r = rng(0x9C0DE ^ (n as u64) ^ ((g as u64) << 32));
         let (epochs, sigmas) = honest_grouped_chain(plan, args.num_vars, h, args.epochs, &mut r);
@@ -592,8 +620,8 @@ fn group_sweep(args: &Args, h: G1Affine) {
         let (pk, vk) = gp.compression_keys().expect("compression keys");
 
         let t = Instant::now();
-        let solo_compressed = compress(gp.inner(), &pk, solo.proof().expect("proof"))
-            .expect("solo compress");
+        let solo_compressed =
+            compress(gp.inner(), &pk, solo.proof().expect("proof")).expect("solo compress");
         let compress_host = t.elapsed();
         let per_group_bytes = compressed_proof_size_bytes(&solo_compressed);
 
@@ -624,11 +652,10 @@ fn group_sweep(args: &Args, h: G1Affine) {
     println!(
         "\n`fold/host` and `compr/host` are what ONE machine folding ONE group pays, with the box to\n\
          itself -- the wall-clock in a deployment that runs each group on its own host. `/1box` is\n\
-         all {} groups run together here, which is near-flat because Nova already saturates the\n\
+         all G groups run together here, which is near-flat because Nova already saturates the\n\
          cores. `setup` is paid once however many groups there are: all groups fold the same shape.\n\
          `pub proof` is the TOTAL an auditor downloads -- one ~11 KB proof per group -- and `verify`\n\
          checks every group.",
-        "G",
     );
 }
 
@@ -652,17 +679,30 @@ fn snark_compare(args: &Args, h: G1Affine) {
         .filter_map(|s| s.trim().parse().ok())
         .collect();
 
-    println!("terminal SNARK: Spartan vs MicroNova  (num_vars={})\n", args.num_vars);
+    println!(
+        "terminal SNARK: Spartan vs MicroNova  (num_vars={})\n",
+        args.num_vars
+    );
     println!(
         "{:>7} {:>12}   {:>9} {:>9} {:>9} {:>9}   {:>9} {:>9} {:>9} {:>9}",
-        "shards", "constraints",
-        "sp setup", "sp prove", "sp size", "sp VERIFY",
-        "mn setup", "mn prove", "mn size", "mn VERIFY",
+        "shards",
+        "constraints",
+        "sp setup",
+        "sp prove",
+        "sp size",
+        "sp VERIFY",
+        "mn setup",
+        "mn prove",
+        "mn size",
+        "mn VERIFY",
     );
     println!("{}", "-".repeat(112));
 
     for &n in &shard_counts {
-        let p = FsParams { num_vars: args.num_vars, n_shards: n };
+        let p = FsParams {
+            num_vars: args.num_vars,
+            n_shards: n,
+        };
         let mut r = rng(0x5A17A ^ n as u64);
         let (epochs, sigmas) = honest_chain(p, h, args.epochs, &mut r);
 
@@ -795,16 +835,8 @@ fn fs_compare(args: &Args) {
     let bench_chain = |hooks: &AuditFsHooks<Bn254, Pcs>| {
         let t = Instant::now();
         for _ in 0..REPS {
-            std::hint::black_box(hooks.chain_scalar(
-                b"aegon.sharded.fs.r_index",
-                prev,
-                &commits,
-            ));
-            std::hint::black_box(hooks.chain_scalar(
-                b"aegon.sharded.fs.r_value",
-                prev,
-                &commits,
-            ));
+            std::hint::black_box(hooks.chain_scalar(b"aegon.sharded.fs.r_index", prev, &commits));
+            std::hint::black_box(hooks.chain_scalar(b"aegon.sharded.fs.r_value", prev, &commits));
         }
         t.elapsed() / REPS as u32
     };
@@ -827,8 +859,14 @@ fn fs_compare(args: &Args) {
     let sha_total = sha_chain + sha_sigma;
     let pos_total = pos_chain + pos_sigma;
 
-    println!("audit-path Fiat-Shamir: SHA256 vs Poseidon  (shards={n}, num_vars={})\n", args.num_vars);
-    println!("{:>34} {:>13} {:>13} {:>10}", "per epoch", "SHA256", "Poseidon", "ratio");
+    println!(
+        "audit-path Fiat-Shamir: SHA256 vs Poseidon  (shards={n}, num_vars={})\n",
+        args.num_vars
+    );
+    println!(
+        "{:>34} {:>13} {:>13} {:>10}",
+        "per epoch", "SHA256", "Poseidon", "ratio"
+    );
     println!("{}", "-".repeat(74));
     let row = |label: &str, a: Duration, b: Duration| {
         println!(

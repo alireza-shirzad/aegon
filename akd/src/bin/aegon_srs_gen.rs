@@ -1,3 +1,8 @@
+// Copyright (c) The Aegon Authors.
+//
+// This source code is licensed under the MIT license found in the
+// LICENSE file in the root directory of this source tree.
+
 //! `aegon_srs_gen` — one-shot SRS generator. Run **once** on a setup
 //! machine; the resulting file is the input to `--srs-path` on every
 //! shard server and on the coordinator.
@@ -81,7 +86,7 @@ fn main() -> ExitCode {
         Err(e) => {
             eprintln!("error: config invalid: {e}");
             return ExitCode::from(2);
-        },
+        }
     };
 
     eprintln!(
@@ -105,8 +110,17 @@ fn main() -> ExitCode {
     );
     eprintln!();
     eprintln!("Next steps:");
-    eprintln!("  1. Distribute the file: gsutil cp {} gs://your-bucket/", args.out.display());
-    eprintln!("  2. On each shard: aegon_shard_server --srs-path {} ...", args.out.display());
-    eprintln!("  3. On the coordinator: configure ShardedAegonConfig with SrsSource::Path({:?})", args.out);
+    eprintln!(
+        "  1. Distribute the file: gsutil cp {} gs://your-bucket/",
+        args.out.display()
+    );
+    eprintln!(
+        "  2. On each shard: aegon_shard_server --srs-path {} ...",
+        args.out.display()
+    );
+    eprintln!(
+        "  3. On the coordinator: configure ShardedAegonConfig with SrsSource::Path({:?})",
+        args.out
+    );
     ExitCode::SUCCESS
 }

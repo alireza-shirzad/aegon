@@ -1,11 +1,29 @@
 // Copyright (c) Meta Platforms, Inc. and affiliates.
 //
-// This source code is dual-licensed under either the MIT license found in the
-// LICENSE-MIT file in the root directory of this source tree or the Apache
-// License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-// of this source tree. You may select, at your option, one of the above-listed licenses.
+// This source code is licensed under the MIT license found in the
+// LICENSE file in the root directory of this source tree.
 
 //! An implementation of an auditable key directory (AKD), also known as a verifiable registry or authenticated dictionary.
+//!
+//! <div class="warning">
+//!
+//! **This is the Aegon fork.** The append-only-tree (SEEMless/Merkle) backend
+//! described in the tour below has been replaced by the Aegon engine
+//! ([`mod@aegon`]), built on KZH-k polynomial commitments and sharded across
+//! N hosts. Publish, lookup, and batch lookup work through the familiar
+//! [`Directory`](directory::Directory) API, but the verification and audit
+//! entry points tied to the Merkle version model —
+//! [`client::lookup_verify`], [`Directory::key_history`](directory::Directory::key_history),
+//! [`auditor::audit_verify`], and `poll_for_azks_changes` — are **not
+//! implemented** on this backend: they cannot carry Aegon's verifier context
+//! through their signatures.
+//!
+//! Use [`mod@aegon_facade`] instead — `verify_lookup`, `verify_consistency`,
+//! and `verify_invariance`. The examples in the tour below that call the
+//! legacy entry points are marked `ignore` for that reason; they are retained
+//! because they still document the upstream API shape.
+//!
+//! </div>
 //!
 //! # Overview
 //! An auditable key directory (AKD) provides an interface to a data structure that stores key-value
@@ -169,7 +187,7 @@
 //!
 //! To verify a valid proof, we call [`client::lookup_verify`], with respect to the root hash and
 //! the server's public key.
-//! ```
+//! ```ignore
 //! # use akd::append_only_zks::AzksParallelismConfig;
 //! # use akd::storage::StorageManager;
 //! # use akd::storage::memory::AsyncInMemoryDatabase;
@@ -230,7 +248,7 @@
 //! The [HistoryParams] field can be used to limit the history that we issue proofs for, but in this
 //! example we default to a complete history. For more information on the parameters, see the
 //! [History Parameters](#history-parameters) section.
-//! ```
+//! ```ignore
 //! # use akd::append_only_zks::AzksParallelismConfig;
 //! # use akd::storage::StorageManager;
 //! # use akd::storage::memory::AsyncInMemoryDatabase;
@@ -285,7 +303,7 @@
 //! but does not care about the value associated with it. The default behavior is to
 //! not accept tombstoned values, but [`HistoryVerificationParams::AllowMissingValues`] can
 //! be specified to enable this behavior.
-//! ```
+//! ```ignore
 //! # use akd::storage::StorageManager;
 //! # use akd::storage::memory::AsyncInMemoryDatabase;
 //! # use akd::ecvrf::HardCodedAkdVRF;
@@ -356,7 +374,7 @@
 //! ## Append-Only Proofs
 //! In addition to the client API calls, the AKD also provides proofs to auditors that its commitments evolved correctly.
 //! Below we illustrate how the server responds to an audit query between two epochs.
-//! ```
+//! ```ignore
 //! # use akd::storage::StorageManager;
 //! # use akd::storage::memory::AsyncInMemoryDatabase;
 //! # use akd::ecvrf::HardCodedAkdVRF;
@@ -402,7 +420,7 @@
 //! # });
 //! ```
 //! The auditor then verifies the above [`AppendOnlyProof`] using [`auditor::audit_verify`].
-//! ```
+//! ```ignore
 //! # use akd::append_only_zks::AzksParallelismConfig;
 //! # use akd::storage::StorageManager;
 //! # use akd::storage::memory::AsyncInMemoryDatabase;
@@ -575,7 +593,7 @@ pub use helper_structs::EpochHash;
 // ========== Constants and type aliases ========== //
 #[cfg(any(test, feature = "public_tests"))]
 pub mod test_utils;
-#[cfg(test)]
+#[cfg(all(test, feature = "upstream_tests"))]
 mod tests;
 
 /// The length of a leaf node's label (in bits)

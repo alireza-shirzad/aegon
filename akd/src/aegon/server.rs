@@ -1,3 +1,8 @@
+// Copyright (c) The Aegon Authors.
+//
+// This source code is licensed under the MIT license found in the
+// LICENSE file in the root directory of this source tree.
+
 //! Server-side Aegon dictionary.
 //!
 //! Maintains four polynomials per epoch:
@@ -22,15 +27,15 @@
 use std::collections::{BTreeMap, HashMap};
 use std::marker::PhantomData;
 
+use akd_core::aegon_crypto::pcs::PCSGlobalParam;
+use akd_core::aegon_crypto::poly::{DenseOrSparseMLE, DenseOrSparseMLERef};
+use akd_core::aegon_crypto::transcript::IOPTranscript;
 use ark_ec::pairing::Pairing;
 use ark_ff::{One, UniformRand, Zero};
 use ark_poly::SparseMultilinearExtension;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::rand::Rng;
 use rayon::prelude::*;
-use akd_core::aegon_crypto::pcs::PCSGlobalParam;
-use akd_core::aegon_crypto::poly::{DenseOrSparseMLE, DenseOrSparseMLERef};
-use akd_core::aegon_crypto::transcript::IOPTranscript;
 
 use super::config::{AegonConfig, VerifierContext};
 use super::db::{key_shard_state, DbSource, RedisDb};
@@ -40,9 +45,8 @@ use super::hash::{bool_index_to_point, bool_index_to_usize, HashSuite, Sha256Has
 use super::instrument::log_rss_ctx;
 use super::sharded::ShardWrite;
 use super::types::{
-    AegonPcs, EpochCommitment, HistoryOpeningEntry, Label, LookupProof, RandPair,
+    AegonPcs, EpochCommitment, HistoryOpeningEntry, Label, LookupProof, RandPair, Value,
     ValueChangeEntry,
-    Value,
 };
 
 /// Snapshot of the polynomials needed for serving consistency proofs at
@@ -582,19 +586,18 @@ where
         // use this as-is so they exercise the same architecture as the
         // cluster path (value-side openings dequeue a pre-built package
         // rather than generating it inline on the critical path).
-        let masking_client: Option<
-            std::sync::Arc<dyn super::masking::MaskingSource<E, P>>,
-        > = if config.private {
-            let pool = super::masking::MaskingPool::<E, P>::new(
-                std::sync::Arc::clone(&prover_param),
-                log_capacity,
-                /* queue_size */ 16,
-                /* producer_count */ 2,
-            );
-            Some(std::sync::Arc::new(pool))
-        } else {
-            None
-        };
+        let masking_client: Option<std::sync::Arc<dyn super::masking::MaskingSource<E, P>>> =
+            if config.private {
+                let pool = super::masking::MaskingPool::<E, P>::new(
+                    std::sync::Arc::clone(&prover_param),
+                    log_capacity,
+                    /* queue_size */ 16,
+                    /* producer_count */ 2,
+                );
+                Some(std::sync::Arc::new(pool))
+            } else {
+                None
+            };
 
         // Stash a deep copy of the post-init state so `clear_dictionary`
         // can restore "as if just created" later without re-running the
@@ -610,7 +613,10 @@ where
             rand_index_state: rand_index_state.clone(),
             rand_value_commitment: rand_value_commitment.clone(),
             rand_value_state: rand_value_state.clone(),
-            epoch_zero_snapshot: epoch_history.get(&0).expect("epoch 0 just inserted").clone(),
+            epoch_zero_snapshot: epoch_history
+                .get(&0)
+                .expect("epoch 0 just inserted")
+                .clone(),
         };
 
         Ok(Self {
@@ -707,12 +713,13 @@ where
         P::Commitment: Clone,
         P::State: Clone,
     {
-        let extract = |poly: &SparseMultilinearExtension<E::ScalarField>| -> Vec<(u64, E::ScalarField)> {
-            poly.evaluations
-                .iter()
-                .map(|(idx, v)| (*idx as u64, *v))
-                .collect()
-        };
+        let extract =
+            |poly: &SparseMultilinearExtension<E::ScalarField>| -> Vec<(u64, E::ScalarField)> {
+                poly.evaluations
+                    .iter()
+                    .map(|(idx, v)| (*idx as u64, *v))
+                    .collect()
+            };
         AegonCheckpoint {
             epoch: self.epoch,
             index_poly_evals: extract(&self.index_poly),
@@ -769,8 +776,10 @@ where
         let dims = P::block_dims(&prover_param, log_capacity);
         let to_sparse =
             |evals: Vec<(u64, E::ScalarField)>| -> SparseMultilinearExtension<E::ScalarField> {
-                let pairs: Vec<(usize, E::ScalarField)> =
-                    evals.into_iter().map(|(idx, v)| (idx as usize, v)).collect();
+                let pairs: Vec<(usize, E::ScalarField)> = evals
+                    .into_iter()
+                    .map(|(idx, v)| (idx as usize, v))
+                    .collect();
                 SparseMultilinearExtension::from_evaluations(log_capacity, &pairs)
             };
         let index_poly = to_sparse(ckpt.index_poly_evals);
@@ -782,11 +791,8 @@ where
         // epochs' snapshots are unrecoverable from the checkpoint
         // alone; the shard will return InvalidEpoch for those.
         let mut epoch_history = BTreeMap::new();
-        let (rest_value_tau, rest_rand_value_tau) = extract_value_taus::<E, P>(
-            &prover_param,
-            &ckpt.value_state,
-            &ckpt.rand_value_state,
-        );
+        let (rest_value_tau, rest_rand_value_tau) =
+            extract_value_taus::<E, P>(&prover_param, &ckpt.value_state, &ckpt.rand_value_state);
         epoch_history.insert(
             ckpt.epoch,
             EpochSnapshot {
@@ -819,19 +825,18 @@ where
         // Same default-pool wiring as `init_with_arc` — restored
         // Aegon instances exercise the masking-server architecture
         // identically to fresh ones.
-        let masking_client: Option<
-            std::sync::Arc<dyn super::masking::MaskingSource<E, P>>,
-        > = if config.private {
-            let pool = super::masking::MaskingPool::<E, P>::new(
-                std::sync::Arc::clone(&prover_param),
-                log_capacity,
-                /* queue_size */ 16,
-                /* producer_count */ 2,
-            );
-            Some(std::sync::Arc::new(pool))
-        } else {
-            None
-        };
+        let masking_client: Option<std::sync::Arc<dyn super::masking::MaskingSource<E, P>>> =
+            if config.private {
+                let pool = super::masking::MaskingPool::<E, P>::new(
+                    std::sync::Arc::clone(&prover_param),
+                    log_capacity,
+                    /* queue_size */ 16,
+                    /* producer_count */ 2,
+                );
+                Some(std::sync::Arc::new(pool))
+            } else {
+                None
+            };
 
         // Rebuild a baseline from fresh zero polys so `clear_dictionary`
         // remains callable on a restored shard. The taus baked into the
@@ -840,8 +845,7 @@ where
         // valid-but-not-bit-identical "empty" state. That's the right
         // semantics: the bench harness only cares about "fresh empty",
         // not about replaying the original tau distribution.
-        let baseline_zero_poly =
-            || SparseMultilinearExtension::from_evaluations(log_capacity, &[]);
+        let baseline_zero_poly = || SparseMultilinearExtension::from_evaluations(log_capacity, &[]);
         let baseline_index_poly = baseline_zero_poly();
         let baseline_value_poly = baseline_zero_poly();
         let baseline_rand_index_poly = baseline_zero_poly();
@@ -1103,8 +1107,7 @@ where
                 "clear_dictionary called with a pending publish".into(),
             ));
         }
-        let zero_poly =
-            || SparseMultilinearExtension::from_evaluations(self.log_capacity, &[]);
+        let zero_poly = || SparseMultilinearExtension::from_evaluations(self.log_capacity, &[]);
         self.epoch = 0;
         self.index_poly = zero_poly();
         self.value_poly = zero_poly();
@@ -1259,12 +1262,8 @@ where
         // each chunk is silently discarded. Sharded callers go
         // through `ShardedAegon::publish_two_layer`, which lets each
         // shard's gRPC handler stream chunks to its local DB.
-        let commit = self.publish_phase_2_and_persist(
-            new_r_index,
-            new_r_value,
-            0,
-            |_chunk| Ok(()),
-        )?;
+        let commit =
+            self.publish_phase_2_and_persist(new_r_index, new_r_value, 0, |_chunk| Ok(()))?;
         Ok(commit)
     }
 
@@ -1305,7 +1304,7 @@ where
                     self.label_table
                         .insert(label.clone(), (slot_bits.clone(), ctr0));
                     (slot_bits, Some(H::h_f(label)))
-                },
+                }
             };
             let usize_idx = bool_index_to_usize(&slot_bits, &self.dims);
             claimed.insert(usize_idx);
@@ -1472,7 +1471,10 @@ where
         );
         let (delta_index_com, delta_index_state) = idx_res?;
         let (delta_value_com, delta_value_state) = val_res?;
-        log_rss_ctx("phase1.post_delta_commits", &format!("epoch={}", _rss_epoch));
+        log_rss_ctx(
+            "phase1.post_delta_commits",
+            &format!("epoch={}", _rss_epoch),
+        );
         if super::instrument::publish_profile_enabled() {
             eprintln!(
                 "[pub-profile] phase1.delta_commits_parallel: {:.3} ms (delta_index_nnz={} delta_value_nnz={})",
@@ -1596,8 +1598,7 @@ where
         // shard can cache them next to the H_slot proofs it computes
         // locally. A mismatched length is a programming error in the
         // caller's marshalling code.
-        if !vrf_proofs_shard_per_label.is_empty()
-            && vrf_proofs_shard_per_label.len() != batch.len()
+        if !vrf_proofs_shard_per_label.is_empty() && vrf_proofs_shard_per_label.len() != batch.len()
         {
             return Err(AegonError::Config(format!(
                 "publish_batch: vrf_proofs_shard_per_label len ({}) must match batch len ({})",
@@ -1709,14 +1710,14 @@ where
                 Some(p) => {
                     placements.push(p);
                     placed_count += 1;
-                },
+                }
                 None => {
                     // Probe loop is unbounded in `for ctr in 0u64..`,
                     // so reaching here means the capacity pre-check
                     // missed a corner. Treat as fullness defensively.
                     full = true;
                     break;
-                },
+                }
             }
         }
 
@@ -1932,25 +1933,23 @@ where
         // counterparts after the in-place rand mutation below. Also
         // parallelized — each call is an independent read of
         // `self.rand_value_*`.
-        let voup_pre_rand_value: std::collections::HashMap<
-            Vec<bool>,
-            (E::ScalarField, P::Proof),
-        > = value_change_slots
-            .par_iter()
-            .filter(|slot_bits| !placement_idx.contains_key(*slot_bits))
-            .map(|slot_bits| -> Result<_, AegonError> {
-                let p = open_at_point_non_zk::<E, P>(
-                    pp,
-                    &self.rand_value_poly,
-                    &self.rand_value_commitment,
-                    &self.rand_value_state,
-                    slot_bits,
-                    dims,
-                    b"aegon.rand_value.open",
-                )?;
-                Ok((slot_bits.clone(), p))
-            })
-            .collect::<Result<std::collections::HashMap<_, _>, _>>()?;
+        let voup_pre_rand_value: std::collections::HashMap<Vec<bool>, (E::ScalarField, P::Proof)> =
+            value_change_slots
+                .par_iter()
+                .filter(|slot_bits| !placement_idx.contains_key(*slot_bits))
+                .map(|slot_bits| -> Result<_, AegonError> {
+                    let p = open_at_point_non_zk::<E, P>(
+                        pp,
+                        &self.rand_value_poly,
+                        &self.rand_value_commitment,
+                        &self.rand_value_state,
+                        slot_bits,
+                        dims,
+                        b"aegon.rand_value.open",
+                    )?;
+                    Ok((slot_bits.clone(), p))
+                })
+                .collect::<Result<std::collections::HashMap<_, _>, _>>()?;
         #[cfg(feature = "tracing_instrument")]
         drop(_pre_openings_span);
         if super::instrument::publish_profile_enabled() {
@@ -2005,10 +2004,10 @@ where
         let prev_rand_value_com_for_audit = self.rand_value_commitment.clone();
 
         let _rand_combine_t = std::time::Instant::now();
-        let new_rand_index_com = self.rand_index_commitment.clone()
-            + delta_index_com.clone() * new_r_index;
-        let new_rand_value_com = self.rand_value_commitment.clone()
-            + delta_value_com.clone() * new_r_value;
+        let new_rand_index_com =
+            self.rand_index_commitment.clone() + delta_index_com.clone() * new_r_index;
+        let new_rand_value_com =
+            self.rand_value_commitment.clone() + delta_value_com.clone() * new_r_value;
         self.rand_index_commitment = new_rand_index_com.clone();
         self.rand_value_commitment = new_rand_value_com.clone();
         let _rand_com_combine_ms = _rand_combine_t.elapsed().as_secs_f64() * 1000.0;
@@ -2058,8 +2057,9 @@ where
             // back `delta_tau = tau_new - tau_old` as a field
             // element — the rest of the audit path is pure field
             // arithmetic and stays generic.
-            let delta_tau = P::rerandomise_hiding_scalar(&mut self.rand_value_state, &mut audit_rng)
-                .expect("zk SRS has a hiding state");
+            let delta_tau =
+                P::rerandomise_hiding_scalar(&mut self.rand_value_state, &mut audit_rng)
+                    .expect("zk SRS has a hiding state");
             let bump = P::scaled_mask_generator_pp(pp, &self.rand_value_commitment, delta_tau)
                 .expect("zk SRS exposes h");
             self.rand_value_commitment = self.rand_value_commitment.clone() + bump;
@@ -2321,12 +2321,7 @@ where
         let _finalize_span = tracing::debug_span!("Aegon::Phase2::FinalizeEpoch").entered();
         self.r_index = new_r_index;
         self.r_value = new_r_value;
-        let _epoch_instr_old = self.epoch;
         self.epoch += 1;
-        eprintln!(
-            "[EPOCH-INSTR shard={}] phase_2 advanced {} -> {} (tid={:?})",
-            shard_id, _epoch_instr_old, self.epoch, std::thread::current().id()
-        );
 
         // When `retain_epoch_polys` is false (bench mode), keep only the
         // four commitments per epoch and drop the rand polys + states.
@@ -2335,17 +2330,21 @@ where
         // by `open_rand_*_at_slot_in_epoch`, which the bench doesn't
         // call. Frees ~50 MB/epoch — turns an OOM at ~280 epochs into a
         // run that scales linearly through 90% fill.
-        let (snap_rand_index_poly, snap_rand_index_state, snap_rand_value_poly, snap_rand_value_state) =
-            if self.retain_epoch_polys {
-                (
-                    Some(self.rand_index_poly.clone()),
-                    Some(self.rand_index_state.clone()),
-                    Some(self.rand_value_poly.clone()),
-                    Some(self.rand_value_state.clone()),
-                )
-            } else {
-                (None, None, None, None)
-            };
+        let (
+            snap_rand_index_poly,
+            snap_rand_index_state,
+            snap_rand_value_poly,
+            snap_rand_value_state,
+        ) = if self.retain_epoch_polys {
+            (
+                Some(self.rand_index_poly.clone()),
+                Some(self.rand_index_state.clone()),
+                Some(self.rand_value_poly.clone()),
+                Some(self.rand_value_state.clone()),
+            )
+        } else {
+            (None, None, None, None)
+        };
         // Always snapshot the new epoch's value-side `tau_f` scalars.
         // Even with `retain_epoch_polys=false` (bench mode) we keep
         // these so lookup_history's masking layer can find the right
@@ -2503,10 +2502,7 @@ where
                         vc.slot_bits
                     ))
                 })?;
-                let value_bytes = label_to_value
-                    .get(label.as_slice())
-                    .copied()
-                    .unwrap_or(&[]);
+                let value_bytes = label_to_value.get(label.as_slice()).copied().unwrap_or(&[]);
                 let entry = StoredValueHistoryEntry::<E, P> {
                     epoch: pending_epoch,
                     shard_id,
@@ -3129,13 +3125,7 @@ where
         .get(&usize_idx)
         .copied()
         .unwrap_or_else(<E::ScalarField as Zero>::zero);
-    let (proof, _) = P::open_non_zk(
-        pp,
-        com,
-        DenseOrSparseMLERef::Sparse(poly),
-        &point,
-        state,
-    )?;
+    let (proof, _) = P::open_non_zk(pp, com, DenseOrSparseMLERef::Sparse(poly), &point, state)?;
     Ok((evaluation, proof))
 }
 
@@ -3271,8 +3261,7 @@ fn update_rand<F: ark_ff::Field>(
 ) {
     // Indices where prev or next is non-zero — the only places ∆ is
     // non-zero.
-    let mut indices: std::collections::BTreeSet<usize> =
-        prev.evaluations.keys().copied().collect();
+    let mut indices: std::collections::BTreeSet<usize> = prev.evaluations.keys().copied().collect();
     indices.extend(next.evaluations.keys().copied());
 
     for idx in indices {
@@ -3440,12 +3429,12 @@ where
     let Some(db) = db else { return Ok(None) };
     match db.get(&key_shard_state(shard_id))? {
         Some(bytes) => {
-            let ckpt = AegonCheckpoint::<E, P>::deserialize_compressed(&bytes[..])
-                .map_err(|e| {
+            let ckpt =
+                AegonCheckpoint::<E, P>::deserialize_compressed(&bytes[..]).map_err(|e| {
                     AegonError::Database(format!("deserialize shard {shard_id} checkpoint: {e}"))
                 })?;
             Ok(Some(ckpt))
-        },
+        }
         None => Ok(None),
     }
 }

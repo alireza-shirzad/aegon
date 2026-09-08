@@ -1,3 +1,8 @@
+// Copyright (c) The Aegon Authors.
+//
+// This source code is licensed under the MIT license found in the
+// LICENSE file in the root directory of this source tree.
+
 //! Distributed SRS gen verifies against the in-process reference SRS.
 //!
 //! The load-bearing correctness check for the distributed path: if
@@ -10,8 +15,8 @@
 use std::collections::BTreeMap;
 
 use akd::aegon::distributed_srs::{
-    assemble_h_tensor, build_universal_params, cache_file_path, compute_h_t_slab, compute_v_mat,
-    matrix_to_tensors, read_cache, slab_range, write_cache, HtGeometry, SlabMatrix, Trapdoors,
+    build_universal_params, cache_file_path, compute_h_t_slab, compute_v_mat, matrix_to_tensors,
+    read_cache, slab_range, write_cache, HtGeometry, SlabMatrix, Trapdoors,
 };
 use akd_core::aegon_crypto::pcs::kzhk::srs::KZHKUniversalParams as RefParams;
 use akd_core::aegon_crypto::StructuredReferenceString;

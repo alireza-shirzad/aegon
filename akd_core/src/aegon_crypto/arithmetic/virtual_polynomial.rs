@@ -12,7 +12,7 @@ use super::{
     multilinear_polynomial::{random_mle_list, random_zero_mle_list},
 };
 use ark_ff::PrimeField;
-use ark_poly::{DenseMultilinearExtension, MultilinearExtension, Polynomial};
+use ark_poly::{DenseMultilinearExtension, Polynomial};
 use ark_serialize::CanonicalSerialize;
 use ark_std::{
     cfg_iter_mut,
@@ -200,7 +200,7 @@ impl<F: PrimeField> VirtualPolynomial<F> {
                     .insert(mle_ptr, self.flattened_ml_extensions.len());
                 self.flattened_ml_extensions.push(mle);
                 self.flattened_ml_extensions.len() - 1
-            },
+            }
         };
 
         for (prod_coef, indices) in self.products.iter_mut() {

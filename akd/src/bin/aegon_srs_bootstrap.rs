@@ -1,3 +1,8 @@
+// Copyright (c) The Aegon Authors.
+//
+// This source code is licensed under the MIT license found in the
+// LICENSE file in the root directory of this source tree.
+
 //! `aegon_srs_bootstrap` — one-shot bootstrap actor for the distributed
 //! SRS generation flow.
 //!
@@ -113,7 +118,7 @@ async fn main() -> ExitCode {
         Err(e) => {
             eprintln!("[bootstrap] error encoding trapdoors: {e}");
             return ExitCode::from(1);
-        },
+        }
     };
     eprintln!(
         "[bootstrap] trapdoors ready ({} bytes uncompressed)",
@@ -161,15 +166,15 @@ async fn main() -> ExitCode {
                 } else {
                     eprintln!("[bootstrap] shard {shard_id} ({endpoint}): bootstrapping");
                 }
-            },
+            }
             Ok(Err(e)) => {
                 eprintln!("[bootstrap] push failed: {e}");
                 return ExitCode::from(1);
-            },
+            }
             Err(e) => {
                 eprintln!("[bootstrap] push task join error: {e}");
                 return ExitCode::from(1);
-            },
+            }
         }
     }
     eprintln!(
@@ -207,7 +212,7 @@ async fn main() -> ExitCode {
                     Ok(r) => {
                         let inner = r.into_inner();
                         Ok((shard_id, endpoint, inner.ready, inner.status))
-                    },
+                    }
                     Err(s) => Err((shard_id, endpoint, format!("WaitForReady: {s}"))),
                 }
             }));
@@ -223,17 +228,17 @@ async fn main() -> ExitCode {
                     } else {
                         status_summary.push(format!("s{shard_id}:{status}"));
                     }
-                },
+                }
                 Ok(Err((shard_id, endpoint, e))) => {
                     eprintln!("[bootstrap] shard {shard_id} ({endpoint}) poll error: {e}");
                     // Don't bail immediately on transient errors — log and
                     // re-poll. The cluster might still be coming up.
                     status_summary.push(format!("s{shard_id}:poll-err"));
-                },
+                }
                 Err(e) => {
                     eprintln!("[bootstrap] poll task join: {e}");
                     return ExitCode::from(1);
-                },
+                }
             }
         }
 
@@ -313,10 +318,7 @@ async fn gather_and_write_metrics(
     }
     let mut per_shard: Vec<(usize, GetMetricsResponse)> = Vec::with_capacity(n_shards);
     for t in tasks {
-        let (i, resp) = t
-            .await
-            .map_err(|e| format!("metrics join: {e}"))?
-            .map_err(|e| e)?;
+        let (i, resp) = t.await.map_err(|e| format!("metrics join: {e}"))??;
         per_shard.push((i, resp));
     }
     per_shard.sort_by_key(|(i, _)| *i);
@@ -368,10 +370,12 @@ async fn gather_and_write_metrics(
         let phases_csv = r
             .phases
             .iter()
-            .map(|p| format!(
-                "      {{\"phase\": \"{}\", \"monotonic_secs\": {:.6}}}",
-                p.phase, p.monotonic_secs
-            ))
+            .map(|p| {
+                format!(
+                    "      {{\"phase\": \"{}\", \"monotonic_secs\": {:.6}}}",
+                    p.phase, p.monotonic_secs
+                )
+            })
             .collect::<Vec<_>>()
             .join(",\n");
         shards_json.push(format!(
@@ -442,8 +446,7 @@ async fn gather_and_write_metrics(
         shards = shards_json.join(",\n"),
     );
 
-    std::fs::write(out_path, &json)
-        .map_err(|e| format!("write '{}': {e}", out_path.display()))?;
+    std::fs::write(out_path, &json).map_err(|e| format!("write '{}': {e}", out_path.display()))?;
     eprintln!(
         "[bootstrap] metrics: total_inbound={:.2} GiB total_outbound={:.2} GiB max_ready={:.2}s \
          max_compute={:.2}s max_communication={:.2}s",

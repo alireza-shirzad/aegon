@@ -1,10 +1,15 @@
+// Copyright (c) The Aegon Authors.
+//
+// This source code is licensed under the MIT license found in the
+// LICENSE file in the root directory of this source tree.
+
 use std::marker::PhantomData;
 
+use akd_core::aegon_crypto::pcs::PolynomialCommitmentScheme;
+use akd_core::aegon_crypto::poly::DenseOrSparseMLE;
 use ark_ec::pairing::Pairing;
 use ark_ff::Zero;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
-use akd_core::aegon_crypto::pcs::PolynomialCommitmentScheme;
-use akd_core::aegon_crypto::poly::DenseOrSparseMLE;
 
 use super::sigma::BlindingEqProof;
 

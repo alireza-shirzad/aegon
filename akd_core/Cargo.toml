@@ -1,12 +1,13 @@
 [package]
 name = "akd_core"
 version = "0.12.0-pre.12"
-authors = ["akd contributors"]
-description = "Core utilities for the akd crate"
-license = "MIT OR Apache-2.0"
+authors = ["The Aegon Authors"]
+description = "Core cryptographic primitives for the Aegon auditable key directory"
+license = "MIT"
 edition = "2021"
-keywords = ["key-transparency", "akd"]
-repository = "https://github.com/facebook/akd"
+rust-version = "1.88.0"
+keywords = ["key-transparency", "akd", "aegon"]
+repository = "https://github.com/alireza-shirzad/aegon"
 readme = "../README.md"
 # Uncomment for automated building of the protobuf Rust sources. Necessary if the .proto specs change
 build = "src/build.rs"
@@ -40,8 +41,21 @@ bench = ["parallel_vrf", "experimental", "vrf", "tokio/rt-multi-thread"]
 public_tests = ["dep:paste"]
 protobuf = ["dep:protobuf"]
 
+# The workspace pins the arkworks crates with `default-features = false`, so
+# nothing turns their `std` on unless a feature asks. `aegon_crypto` reads and
+# writes SRS files through `std::io`, which needs `ark-*/std` for the
+# `Read`/`Write` blanket impls. Previously this was masked because
+# `aegon_crypto` was (incorrectly) gated behind `protobuf`.
+std = [
+    "ark-std/std",
+    "ark-ff/std",
+    "ark-ec/std",
+    "ark-poly/std",
+    "ark-serialize/std",
+]
+
 # Default features mix
-default = ["vrf", "experimental"]
+default = ["vrf", "experimental", "std"]
 
 [dependencies]
 ## Required dependencies ##
@@ -96,3 +110,6 @@ akd_core = { path = ".", features = ["public_tests"] }
 name = "parallel_vrfs"
 harness = false
 required-features = ["bench"]
+
+[lints]
+workspace = true

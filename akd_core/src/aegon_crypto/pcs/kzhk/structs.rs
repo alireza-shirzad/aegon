@@ -1,11 +1,16 @@
+// Copyright (c) The Aegon Authors.
+//
+// This source code is licensed under the MIT license found in the
+// LICENSE file in the root directory of this source tree.
+
 use ark_ec::{pairing::Pairing, AffineRepr, CurveGroup};
 
 use crate::aegon_crypto::poly::DenseOrSparseMLE;
+use ark_ff::One;
 use ark_serialize::{
     self, CanonicalDeserialize, CanonicalSerialize, Compress, Read, SerializationError, Valid,
     Validate, Write,
 };
-use ark_ff::One;
 use ark_std::{cfg_into_iter, cfg_iter, cfg_iter_mut, ops::Sub, Zero};
 use derivative::Derivative;
 use ndarray::{ArrayD, IxDyn};
@@ -215,7 +220,7 @@ impl<E: Pairing> Valid for AuxRow<E> {
         match self {
             AuxRow::Dense(v) => v.check(),
             AuxRow::Sparse { entries, .. } => {
-                for (_, p) in entries {
+                for p in entries.values() {
                     p.check()?;
                 }
                 Ok(())
@@ -233,8 +238,7 @@ impl<E: Pairing> CanonicalDeserialize for AuxRow<E> {
         let tag = u8::deserialize_with_mode(&mut reader, compress, validate)?;
         match tag {
             0 => {
-                let v =
-                    Vec::<E::G1Affine>::deserialize_with_mode(&mut reader, compress, validate)?;
+                let v = Vec::<E::G1Affine>::deserialize_with_mode(&mut reader, compress, validate)?;
                 Ok(AuxRow::Dense(v))
             }
             1 => {
@@ -274,7 +278,7 @@ impl<E: Pairing> AuxRow<E> {
             AuxRow::Dense(v) => v[i],
             AuxRow::Sparse { entries, .. } => {
                 entries.get(&i).copied().unwrap_or_else(E::G1Affine::zero)
-            },
+            }
         }
     }
 
@@ -291,7 +295,7 @@ impl<E: Pairing> AuxRow<E> {
                     out[k - range.start] = v;
                 }
                 out
-            },
+            }
         }
     }
 
@@ -309,7 +313,7 @@ impl<E: Pairing> AuxRow<E> {
                     v[k] = val;
                 }
                 v
-            },
+            }
         }
     }
 
@@ -323,8 +327,10 @@ impl<E: Pairing> AuxRow<E> {
         let lhs = self.into_dense();
         let rhs = rhs.into_dense();
         assert_eq!(lhs.len(), rhs.len(), "AuxRow: length mismatch in combine");
-        let out: Vec<E::G1Affine> =
-            cfg_iter!(lhs).zip(cfg_iter!(rhs)).map(|(&a, &b)| op(a, b)).collect();
+        let out: Vec<E::G1Affine> = cfg_iter!(lhs)
+            .zip(cfg_iter!(rhs))
+            .map(|(&a, &b)| op(a, b))
+            .collect();
         AuxRow::Dense(out)
     }
 
@@ -365,12 +371,19 @@ impl<E: Pairing> AuxRow<E> {
                     if p.is_zero() {
                         None
                     } else {
-                        let d: E::G1 = if is_one { p.into_group() } else { p.mul(scalar) };
+                        let d: E::G1 = if is_one {
+                            p.into_group()
+                        } else {
+                            p.mul(scalar)
+                        };
                         Some((i, d))
                     }
                 })
                 .collect(),
-            AuxRow::Sparse { entries: other_entries, .. } => {
+            AuxRow::Sparse {
+                entries: other_entries,
+                ..
+            } => {
                 // BTreeMap has no par_iter; materialize support into a Vec
                 // once so the scalar muls can fan out across cores.
                 let materialized: Vec<(usize, E::G1Affine)> =
@@ -380,30 +393,27 @@ impl<E: Pairing> AuxRow<E> {
                         if p.is_zero() {
                             None
                         } else {
-                            let d: E::G1 =
-                                if is_one { p.into_group() } else { p.mul(scalar) };
+                            let d: E::G1 = if is_one {
+                                p.into_group()
+                            } else {
+                                p.mul(scalar)
+                            };
                             Some((i, d))
                         }
                     })
                     .collect()
-            },
+            }
         };
 
         // Step 2 (sequential, cheap): add `self[i]` into each delta. Each
         // mixed add is ~5 µs; for ~10k cells this is well under the
         // step-1 wall time even single-threaded.
         let projs: Vec<(usize, E::G1)> = match self {
-            AuxRow::Dense(v) => deltas
-                .into_iter()
-                .map(|(i, d)| (i, v[i] + d))
-                .collect(),
+            AuxRow::Dense(v) => deltas.into_iter().map(|(i, d)| (i, v[i] + d)).collect(),
             AuxRow::Sparse { entries, .. } => deltas
                 .into_iter()
                 .map(|(i, d)| {
-                    let cur = entries
-                        .get(&i)
-                        .copied()
-                        .unwrap_or_else(E::G1Affine::zero);
+                    let cur = entries.get(&i).copied().unwrap_or_else(E::G1Affine::zero);
                     (i, cur + d)
                 })
                 .collect(),
@@ -422,7 +432,7 @@ impl<E: Pairing> AuxRow<E> {
                 for ((i, _), &a) in projs.iter().zip(affines.iter()) {
                     v[*i] = a;
                 }
-            },
+            }
             AuxRow::Sparse { entries, .. } => {
                 for ((i, _), &a) in projs.iter().zip(affines.iter()) {
                     if a.is_zero() {
@@ -431,7 +441,7 @@ impl<E: Pairing> AuxRow<E> {
                         entries.insert(*i, a);
                     }
                 }
-            },
+            }
         }
     }
 }
@@ -473,7 +483,11 @@ impl<E: Pairing> KZHKState<E> {
         d_bool: Option<Vec<AuxRow<E>>>,
         sparsity: Option<usize>,
     ) -> Self {
-        Self { tau, d_bool, sparsity }
+        Self {
+            tau,
+            d_bool,
+            sparsity,
+        }
     }
 
     /// Borrow the Boolean auxiliary table `d_bool`.
@@ -542,13 +556,13 @@ impl<E: Pairing> KZHKState<E> {
         // tau (zk variant): tau_self += scalar · tau_other.
         match (self.tau.as_mut(), other.tau) {
             (Some(t), Some(o)) => *t += scalar * o,
-            (None, None) => {},
-            (Some(_), None) => {},
+            (None, None) => {}
+            (Some(_), None) => {}
             (None, Some(_)) => {
                 panic!(
                     "KZHKState::iadd_scaled: tau presence mismatch — self is non-zk but other carries blinding"
                 );
-            },
+            }
         }
         // d_bool: combine each level's AuxRow with the sparse-walk FMA.
         // Levels are sequential here because the inner `AuxRow::iadd_scaled`
@@ -567,8 +581,8 @@ impl<E: Pairing> KZHKState<E> {
                 for (a, b) in self_rows.iter_mut().zip(other_rows.iter()) {
                     a.iadd_scaled(scalar, b);
                 }
-            },
-            (None, None) => {},
+            }
+            (None, None) => {}
             _ => panic!("KZHKState::iadd_scaled: d_bool presence mismatch"),
         }
         // sparsity is a soft hint; preserve self's value (the post-FMA
@@ -606,7 +620,7 @@ impl<E: Pairing> Add for KZHKState<E> {
         );
         let out_d_bool: Vec<AuxRow<E>> = lhs_rows
             .into_iter()
-            .zip(rhs_rows.into_iter())
+            .zip(rhs_rows)
             .map(|(ra, rb)| ra.pairwise(rb, |x, y| (x + y).into_affine()))
             .collect();
         KZHKState {
@@ -636,7 +650,7 @@ impl<E: Pairing> Sub for KZHKState<E> {
         );
         let out_d_bool: Vec<AuxRow<E>> = lhs_rows
             .into_iter()
-            .zip(rhs_rows.into_iter())
+            .zip(rhs_rows)
             .map(|(ra, rb)| ra.pairwise(rb, |x, y| (x - y).into_affine()))
             .collect();
         KZHKState {
@@ -743,9 +757,7 @@ impl<E: Pairing> Default for KZHKOpeningProof<E> {
 /// Batch-normalize a `Vec<Vec<G1>>` into `Vec<Vec<G1Affine>>` with one
 /// Montgomery batch inversion across every entry, instead of one
 /// inversion per entry. Preserves row shape.
-fn batch_normalize_rows<E: Pairing>(
-    proj_rows: Vec<Vec<E::G1>>,
-) -> Vec<Vec<E::G1Affine>> {
+fn batch_normalize_rows<E: Pairing>(proj_rows: Vec<Vec<E::G1>>) -> Vec<Vec<E::G1Affine>> {
     let row_lens: Vec<usize> = proj_rows.iter().map(|r| r.len()).collect();
     let total: usize = row_lens.iter().sum();
     if total == 0 {
@@ -791,7 +803,7 @@ impl<E: Pairing> core::ops::Mul<E::ScalarField> for KZHKOpeningProof<E> {
     }
 }
 
-impl<'a, E: Pairing> core::ops::Mul<E::ScalarField> for &'a KZHKOpeningProof<E> {
+impl<E: Pairing> core::ops::Mul<E::ScalarField> for &KZHKOpeningProof<E> {
     type Output = KZHKOpeningProof<E>;
 
     fn mul(self, rhs: E::ScalarField) -> Self::Output {
@@ -855,10 +867,7 @@ impl<E: Pairing> Add for KZHKOpeningProof<E> {
         let proj_rows: Vec<Vec<E::G1>> = cfg_into_iter!(zipped)
             .map(|(ra, rb)| {
                 assert_eq!(ra.len(), rb.len(), "column count mismatch in a row");
-                ra.into_iter()
-                    .zip(rb.into_iter())
-                    .map(|(x, y)| x + y)
-                    .collect()
+                ra.into_iter().zip(rb).map(|(x, y)| x + y).collect()
             })
             .collect();
         let out_d = batch_normalize_rows::<E>(proj_rows);
@@ -885,18 +894,18 @@ impl<E: Pairing> Add for KZHKOpeningProof<E> {
         let f_out = match (&self.f, &rhs.f) {
             (DenseOrSparseMLE::Dense(ref a), DenseOrSparseMLE::Dense(ref b)) => {
                 DenseOrSparseMLE::Dense(a + b)
-            },
+            }
             (DenseOrSparseMLE::Sparse(ref a), DenseOrSparseMLE::Sparse(ref b)) => {
                 DenseOrSparseMLE::Sparse(a + b)
-            },
+            }
             (DenseOrSparseMLE::Dense(ref a), DenseOrSparseMLE::Sparse(ref _b)) => {
                 let densed_b = rhs.f.to_dense();
                 DenseOrSparseMLE::Dense(a + &densed_b)
-            },
+            }
             (DenseOrSparseMLE::Sparse(ref _a), DenseOrSparseMLE::Dense(ref b)) => {
                 let densed_a = self.f.to_dense();
                 DenseOrSparseMLE::Dense(&densed_a + b)
-            },
+            }
         };
 
         KZHKOpeningProof {
@@ -930,7 +939,7 @@ impl<E: Pairing> Sub for KZHKOpeningProof<E> {
             .map(|(ra, rb)| {
                 assert_eq!(ra.len(), rb.len(), "column count mismatch in a row");
                 ra.into_iter()
-                    .zip(rb.into_iter())
+                    .zip(rb)
                     .map(|(x, y)| {
                         let yp: E::G1 = y.into();
                         let xp: E::G1 = x.into();
@@ -1144,12 +1153,12 @@ where
             cfg_iter_mut!(dense.evaluations).for_each(|x| {
                 *x *= c;
             });
-        },
+        }
         DenseOrSparseMLE::Sparse(sparse) => {
             cfg_iter_mut!(sparse.evaluations).for_each(|(_, x)| {
                 *x *= c;
             });
-        },
+        }
     }
 }
 
@@ -1214,6 +1223,12 @@ impl<E: Pairing> KZHKMaskingPackage<E> {
         r_state: KZHKState<E>,
         rho: E::ScalarField,
     ) -> Self {
-        Self { num_vars, r_poly, r_hide, r_state, rho }
+        Self {
+            num_vars,
+            r_poly,
+            r_hide,
+            r_state,
+            rho,
+        }
     }
 }

@@ -1,3 +1,8 @@
+// Copyright (c) The Aegon Authors.
+//
+// This source code is licensed under the MIT license found in the
+// LICENSE file in the root directory of this source tree.
+
 //! How a deployment's shards are partitioned into independent
 //! Fiat-Shamir chains.
 //!
@@ -58,7 +63,7 @@ impl GroupPlan {
                 "group plan needs at least one shard and one group".into(),
             ));
         }
-        if n_shards % groups != 0 {
+        if !n_shards.is_multiple_of(groups) {
             return Err(AegonError::Config(format!(
                 "group count {groups} must divide the shard count {n_shards} exactly"
             )));
@@ -113,4 +118,3 @@ impl GroupPlan {
         Ok((0..self.groups).map(|g| &items[self.range(g)]).collect())
     }
 }
-

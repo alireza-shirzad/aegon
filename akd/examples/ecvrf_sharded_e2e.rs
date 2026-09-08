@@ -1,3 +1,8 @@
+// Copyright (c) The Aegon Authors.
+//
+// This source code is licensed under the MIT license found in the
+// LICENSE file in the root directory of this source tree.
+
 //! End-to-end Aegon flow with ECVRF wired in.
 //!
 //! Spins up an in-process ShardedAegon with `EcVrfHash`, attaches a
@@ -56,10 +61,21 @@ fn run_ecvrf_path() {
     println!("  set VrfProver — server-side prove path active.");
 
     let updates: Vec<(Vec<u8>, Vec<u8>)> = (0..6)
-        .map(|i| (format!("alice-{i}").into_bytes(), format!("pk-{i}").into_bytes()))
+        .map(|i| {
+            (
+                format!("alice-{i}").into_bytes(),
+                format!("pk-{i}").into_bytes(),
+            )
+        })
         .collect();
-    let commit = server.publish_two_layer(&updates).expect("publish_two_layer");
-    println!("  published {} labels @ epoch {}.", updates.len(), commit.epoch);
+    let commit = server
+        .publish_two_layer(&updates)
+        .expect("publish_two_layer");
+    println!(
+        "  published {} labels @ epoch {}.",
+        updates.len(),
+        commit.epoch
+    );
 
     let ctx = server.sharded_verifier_context();
     assert!(
@@ -90,7 +106,10 @@ fn run_ecvrf_path() {
             );
         }
         let recovered = verify_lookup_label_two_layer::<Bn254, Pcs, EcVrfHash>(
-            &ctx, &commit, label, &label_proof,
+            &ctx,
+            &commit,
+            label,
+            &label_proof,
         )
         .expect("verify_lookup_label_two_layer accepts honest VRF proofs");
         assert_eq!(recovered, slot, "recovered slot must match server's slot");
@@ -106,7 +125,10 @@ fn run_ecvrf_path() {
         assert!(ok, "value verify must accept the published value");
         verified += 1;
     }
-    println!("  verified {verified}/{} label+value openings (ECVRF).", updates.len());
+    println!(
+        "  verified {verified}/{} label+value openings (ECVRF).",
+        updates.len()
+    );
 
     // ---- Negative test: a verifier with the wrong public key
     // rejects honest proofs from the legitimate server. The
@@ -124,10 +146,13 @@ fn run_ecvrf_path() {
     let mut wrong_ctx = ctx.clone();
     wrong_ctx.vrf_verifier = Some(VrfVerifier::new(wrong_prover.public_key().clone()));
     let res = verify_lookup_label_two_layer::<Bn254, Pcs, EcVrfHash>(
-        &wrong_ctx, &commit, label, &honest_proof,
+        &wrong_ctx,
+        &commit,
+        label,
+        &honest_proof,
     );
     assert!(
-        matches!(res, Err(_)),
+        res.is_err(),
         "honest proofs MUST be rejected under a different verifier key, got {:?}",
         res
     );
@@ -142,9 +167,16 @@ fn run_sha256_path() {
         ShardedAegon::<Bn254, Pcs, Sha256Hash>::setup(&mut rng, &cfg).expect("setup");
 
     let updates: Vec<(Vec<u8>, Vec<u8>)> = (0..6)
-        .map(|i| (format!("bob-{i}").into_bytes(), format!("pk-{i}").into_bytes()))
+        .map(|i| {
+            (
+                format!("bob-{i}").into_bytes(),
+                format!("pk-{i}").into_bytes(),
+            )
+        })
         .collect();
-    let commit = server.publish_two_layer(&updates).expect("publish_two_layer");
+    let commit = server
+        .publish_two_layer(&updates)
+        .expect("publish_two_layer");
 
     let ctx = server.sharded_verifier_context();
     assert!(
@@ -171,7 +203,10 @@ fn run_sha256_path() {
             );
         }
         let recovered = verify_lookup_label_two_layer::<Bn254, Pcs, Sha256Hash>(
-            &ctx, &commit, label, &label_proof,
+            &ctx,
+            &commit,
+            label,
+            &label_proof,
         )
         .expect("verify_lookup_label_two_layer");
         let value_proof = server.lookup_value(&slot).expect("lookup_value");
@@ -185,7 +220,11 @@ fn run_sha256_path() {
         .expect("verify_lookup_value");
         assert!(ok);
     }
-    println!("  verified {}/{} label+value openings (SHA-256).", updates.len(), updates.len());
+    println!(
+        "  verified {}/{} label+value openings (SHA-256).",
+        updates.len(),
+        updates.len()
+    );
 }
 
 fn main() {

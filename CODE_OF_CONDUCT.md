@@ -55,7 +55,11 @@ a project may be further defined and clarified by project maintainers.
 ## Enforcement
 
 Instances of abusive, harassing, or otherwise unacceptable behavior may be
-reported by contacting the project team at <opensource-conduct@fb.com>. All
+reported to the maintainers by opening an issue, or privately via GitHub to
+the repository owner. (This document was inherited from upstream AKD, whose
+enforcement address was Meta's; that address does not reach the maintainers
+of this fork. Replace this paragraph with a direct contact if you prefer.)
+All
 complaints will be reviewed and investigated and will result in a response that
 is deemed necessary and appropriate to the circumstances. The project team is
 obligated to maintain confidentiality with regard to the reporter of an incident.

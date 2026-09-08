@@ -1,9 +1,7 @@
 // Copyright (c) Meta Platforms, Inc. and affiliates.
 //
-// This source code is dual-licensed under either the MIT license found in the
-// LICENSE-MIT file in the root directory of this source tree or the Apache
-// License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-// of this source tree. You may select, at your option, one of the above-listed licenses.
+// This source code is licensed under the MIT license found in the
+// LICENSE file in the root directory of this source tree.
 
 //! Contains the tests for error conditions and invariants that should be upheld
 //! by the API.
@@ -364,10 +362,20 @@ async fn test_malicious_key_history<TC: Configuration>() -> Result<(), AkdError>
     // distinct labels in both epochs makes every per-shard
     // value_commitment distinct.
     let epoch1_batch: Vec<(AkdLabel, AkdValue)> = (0..16)
-        .map(|i| (AkdLabel::from(format!("u{i}").as_str()), AkdValue::from(format!("v{i}-1").as_str())))
+        .map(|i| {
+            (
+                AkdLabel::from(format!("u{i}").as_str()),
+                AkdValue::from(format!("v{i}-1").as_str()),
+            )
+        })
         .collect();
     let epoch2_batch: Vec<(AkdLabel, AkdValue)> = (0..16)
-        .map(|i| (AkdLabel::from(format!("u{i}").as_str()), AkdValue::from(format!("v{i}-2").as_str())))
+        .map(|i| {
+            (
+                AkdLabel::from(format!("u{i}").as_str()),
+                AkdValue::from(format!("v{i}-2").as_str()),
+            )
+        })
         .collect();
     akd.publish(epoch1_batch).await?;
     akd.publish(epoch2_batch).await?;
@@ -412,9 +420,18 @@ async fn test_malicious_key_history<TC: Configuration>() -> Result<(), AkdError>
     // `AuditState::default()` directly at epoch 1 would use the wrong
     // r_value and even the honest transition would reject.
     {
-        let epoch0 = akd.epoch_commitment(0).await.expect("epoch 0 commitment retained");
-        let epoch1 = akd.epoch_commitment(1).await.expect("epoch 1 commitment retained");
-        let honest_epoch2 = akd.epoch_commitment(2).await.expect("epoch 2 commitment retained");
+        let epoch0 = akd
+            .epoch_commitment(0)
+            .await
+            .expect("epoch 0 commitment retained");
+        let epoch1 = akd
+            .epoch_commitment(1)
+            .await
+            .expect("epoch 1 commitment retained");
+        let honest_epoch2 = akd
+            .epoch_commitment(2)
+            .await
+            .expect("epoch 2 commitment retained");
 
         // Walk 0 -> 1 honestly to advance the audit state. Sanity-check
         // that the honest 1 -> 2 transition is accepted from that state.

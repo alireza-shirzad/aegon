@@ -1,3 +1,8 @@
+// Copyright (c) The Aegon Authors.
+//
+// This source code is licensed under the MIT license found in the
+// LICENSE file in the root directory of this source tree.
+
 //! Auditor side: verify one recursive proof instead of one proof per
 //! epoch.
 //!
@@ -34,9 +39,7 @@ use nova_snark::traits::Engine;
 use super::bridge::CircuitField;
 use super::circuit::ARITY;
 use super::fs_poseidon::{poseidon_state_digest, ShardCommitments};
-use super::prover::{
-    AuditProof, CompressedAuditProof, CompressedVerifierKey, IvcAuditParams, E1,
-};
+use super::prover::{AuditProof, CompressedAuditProof, CompressedVerifierKey, IvcAuditParams, E1};
 use crate::aegon::error::AegonError;
 
 /// The initial folded state for a chain anchored at `genesis`:

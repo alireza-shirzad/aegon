@@ -1,3 +1,8 @@
+// Copyright (c) The Aegon Authors.
+//
+// This source code is licensed under the MIT license found in the
+// LICENSE file in the root directory of this source tree.
+
 //! Masking-server transport for ZK opening packages.
 //!
 //! The shard server's hiding (value-side) openings require an
@@ -31,15 +36,17 @@ use std::time::Duration;
 
 use ark_ec::pairing::Pairing;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
-use tokio::runtime::Runtime;
 use tokio::sync::mpsc;
-use tonic::transport::{Channel, Server};
+use tonic::transport::Server;
 use tonic::{Request, Response, Status};
 
 use super::error::AegonError;
 use super::types::AegonPcs;
 
 // Generated tonic code for `aegon.masking.v1`.
+// Generated code carries no rustdoc; the crate-level `warn(missing_docs)`
+// cannot be satisfied for types we do not author.
+#[allow(missing_docs)]
 pub mod proto {
     tonic::include_proto!("aegon.masking.v1");
 }
@@ -133,12 +140,12 @@ where
                             eprintln!("masking producer {worker}: PCS error {e:?}");
                             tokio::time::sleep(Duration::from_millis(250)).await;
                             continue;
-                        },
+                        }
                         Err(e) => {
                             eprintln!("masking producer {worker}: join error {e}");
                             tokio::time::sleep(Duration::from_millis(250)).await;
                             continue;
-                        },
+                        }
                     };
                     // Back-pressure: this `send` waits when the queue is
                     // full, so producers idle naturally if consumers
@@ -162,10 +169,7 @@ where
     /// only — TLS would just add latency on a path that already
     /// trusts its callers (the shards) by virtue of running inside
     /// the same VPC.
-    pub async fn serve(
-        self,
-        addr: std::net::SocketAddr,
-    ) -> Result<(), tonic::transport::Error> {
+    pub async fn serve(self, addr: std::net::SocketAddr) -> Result<(), tonic::transport::Error> {
         let svc = MaskingServiceServer::new(self)
             .max_decoding_message_size(MAX_MSG_BYTES)
             .max_encoding_message_size(MAX_MSG_BYTES);
@@ -287,21 +291,17 @@ where
                         let _ = ready_tx
                             .send(Err(AegonError::Config(format!("build masking rt: {e}"))));
                         return;
-                    },
+                    }
                 };
                 // Connect synchronously, once. After this, we never
                 // call block_on again — incoming requests are dispatched
                 // via rt.spawn(...) so this worker thread is free to
                 // park on the std::mpsc::Receiver between requests.
                 let client = match rt.block_on(async {
-                    let ep = tonic::transport::Endpoint::from_shared(
-                        endpoint_for_worker.clone(),
-                    )
-                    .map_err(|e| AegonError::Config(format!("masking endpoint: {e}")))?;
+                    let ep = tonic::transport::Endpoint::from_shared(endpoint_for_worker.clone())
+                        .map_err(|e| AegonError::Config(format!("masking endpoint: {e}")))?;
                     let ch = ep.connect().await.map_err(|e| {
-                        AegonError::Config(format!(
-                            "masking connect '{endpoint_for_worker}': {e}"
-                        ))
+                        AegonError::Config(format!("masking connect '{endpoint_for_worker}': {e}"))
                     })?;
                     Ok::<_, AegonError>(
                         MaskingServiceClient::new(ch)
@@ -313,7 +313,7 @@ where
                     Err(e) => {
                         let _ = ready_tx.send(Err(e));
                         return;
-                    },
+                    }
                 };
 
                 if ready_tx.send(Ok(())).is_err() {
@@ -346,13 +346,13 @@ where
             .map_err(|e| AegonError::Config(format!("spawn masking worker: {e}")))?;
 
         match ready_rx.recv() {
-            Ok(Ok(())) => {},
+            Ok(Ok(())) => {}
             Ok(Err(e)) => return Err(e),
             Err(_) => {
                 return Err(AegonError::Config(
                     "masking worker died during connect".into(),
                 ))
-            },
+            }
         }
 
         Ok(Self {
@@ -594,15 +594,17 @@ where
             let h = std::thread::Builder::new()
                 .name(format!("aegon-masking-pool-{worker}"))
                 .spawn(move || loop {
-                    let pkg = match <P as akd_core::aegon_crypto::pcs::PolynomialCommitmentScheme<E>>::
-                        generate_masking_package(pp.as_ref(), num_vars)
-                    {
+                    let pkg = match <P as akd_core::aegon_crypto::pcs::PolynomialCommitmentScheme<
+                        E,
+                    >>::generate_masking_package(
+                        pp.as_ref(), num_vars
+                    ) {
                         Ok(p) => p,
                         Err(e) => {
                             eprintln!("masking pool producer {worker}: PCS error {e:?}");
                             std::thread::sleep(Duration::from_millis(250));
                             continue;
-                        },
+                        }
                     };
                     if tx.send(pkg).is_err() {
                         return; // receiver dropped → pool shutting down

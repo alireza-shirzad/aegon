@@ -1,3 +1,8 @@
+// Copyright (c) The Aegon Authors.
+//
+// This source code is licensed under the MIT license found in the
+// LICENSE file in the root directory of this source tree.
+
 //! `aegon_coordinator_bench` — cluster-level publish-batch benchmark.
 //!
 //! Runs on the coordinator machine after every shard server is up
@@ -186,7 +191,7 @@ fn main() -> ExitCode {
         Err(e) => {
             eprintln!("error: config invalid: {e}");
             return ExitCode::from(2);
-        },
+        }
     };
 
     eprintln!(
@@ -203,7 +208,7 @@ fn main() -> ExitCode {
         Err(e) => {
             eprintln!("error: setup failed: {e}");
             return ExitCode::from(1);
-        },
+        }
     };
     server.set_vrf_prover(VrfProver::from_env());
     let setup_ms = t_setup.elapsed().as_secs_f64() * 1000.0;
@@ -229,19 +234,17 @@ fn main() -> ExitCode {
             // so a sweep never collides on the open-addressing trail.
             let updates: Vec<(Vec<u8>, Vec<u8>)> = (0..batch_size as u64)
                 .map(|i| {
-                    let idx = (batch_size as u64) * 10_000_000
-                        + (sample_idx as u64) * 100_000
-                        + i;
+                    let idx = (batch_size as u64) * 10_000_000 + (sample_idx as u64) * 100_000 + i;
                     (phone_label(idx), rsa_value(idx))
                 })
                 .collect();
             let t = Instant::now();
             match server.publish_two_layer(&updates) {
-                Ok(_commit) => {},
+                Ok(_commit) => {}
                 Err(e) => {
                     eprintln!("error: publish_two_layer failed (batch={batch_size}, sample={sample_idx}): {e}");
                     return ExitCode::from(1);
-                },
+                }
             }
             let ms = t.elapsed().as_secs_f64() * 1000.0;
             samples_ms.push(ms);
@@ -295,7 +298,7 @@ fn main() -> ExitCode {
         Err(e) => {
             eprintln!("error: cannot create output {:?}: {e}", args.output);
             return ExitCode::from(1);
-        },
+        }
     };
     if let Err(e) = f.write_all(json.as_bytes()) {
         eprintln!("error: cannot write output: {e}");

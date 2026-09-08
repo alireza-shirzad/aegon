@@ -1,3 +1,8 @@
+// Copyright (c) The Aegon Authors.
+//
+// This source code is licensed under the MIT license found in the
+// LICENSE file in the root directory of this source tree.
+
 //! Installs a `tracing-tree` subscriber for the Aegon bins.
 //!
 //! Compiled only with the `tracing_instrument` feature. The bins call
@@ -28,9 +33,7 @@ use tracing_subscriber::EnvFilter;
 /// were toggled in just the right combination.
 pub fn init_tree_subscriber() {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-        EnvFilter::new(
-            "akd=debug,akd_core::aegon=debug,akd_core::aegon_crypto::pcs::kzhk=info",
-        )
+        EnvFilter::new("akd=debug,akd_core::aegon=debug,akd_core::aegon_crypto::pcs::kzhk=info")
     });
     let fmt_layer = tracing_subscriber::fmt::layer()
         .with_target(true)

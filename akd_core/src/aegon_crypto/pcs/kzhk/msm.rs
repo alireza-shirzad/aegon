@@ -1,3 +1,8 @@
+// Copyright (c) The Aegon Authors.
+//
+// This source code is licensed under the MIT license found in the
+// LICENSE file in the root directory of this source tree.
+
 //! MSM wrapper that picks a strategy based on the input size and hardware.
 //!
 //! Workflow:
@@ -244,7 +249,7 @@ pub mod calibrate {
                 Some(last) => {
                     last.1 = *n;
                     thread_table.push((*n, *n + 1, *t));
-                },
+                }
                 None => thread_table.push((*n, *n + 1, *t)),
             }
         }

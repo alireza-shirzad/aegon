@@ -1,3 +1,8 @@
+// Copyright (c) The Aegon Authors.
+//
+// This source code is licensed under the MIT license found in the
+// LICENSE file in the root directory of this source tree.
+
 //! `aegon_publish_bench` — publish-time + commitment-size benchmark.
 //!
 //! Sweeps `(fill_percent × batch_size)` for one regime and writes a
@@ -45,7 +50,6 @@ use akd::aegon::{
     optimal_kzh_k, AegonError, DbSource, EcVrfHash, ShardTransport, ShardedAegon,
     ShardedAegonConfig, SrsSource, VrfProver,
 };
-use akd_core::aegon_crypto::pcs::kzhk::structs::KZHKConfig;
 use akd_core::aegon_crypto::pcs::kzhk::KZHK;
 use ark_bn254::Bn254;
 use ark_serialize::CanonicalSerialize;
@@ -244,7 +248,9 @@ fn main() -> ExitCode {
         return ExitCode::from(2);
     }
 
-    let k = args.kzh_k.unwrap_or_else(|| optimal_kzh_k(args.shard_log_capacity));
+    let k = args
+        .kzh_k
+        .unwrap_or_else(|| optimal_kzh_k(args.shard_log_capacity));
     let log_n_shards = {
         let n = args.n_shards;
         if !n.is_power_of_two() {
@@ -270,7 +276,7 @@ fn main() -> ExitCode {
         Err(e) => {
             eprintln!("[publish-bench] setup error: {e}");
             return ExitCode::from(1);
-        },
+        }
     };
     server.set_vrf_prover(VrfProver::from_env());
 
@@ -324,14 +330,14 @@ fn main() -> ExitCode {
                     })
                     .collect();
                 match server.publish_two_layer(&updates) {
-                    Ok(_) => {},
+                    Ok(_) => {}
                     Err(e) => {
                         eprintln!("[publish-bench] warmup publish error: {e}");
                         return ExitCode::from(1);
-                    },
+                    }
                 }
                 current_count += chunk;
-                if current_count % (args.warmup_batch_size * 10) == 0
+                if current_count.is_multiple_of(args.warmup_batch_size * 10)
                     || current_count >= target_count
                 {
                     let elapsed = warmup_t0.elapsed().as_secs_f64();
@@ -385,7 +391,7 @@ fn main() -> ExitCode {
                             "[publish-bench] publish failed (fill={fill_pct}, batch={batch_size}, sample={sample_idx}): {e}"
                         );
                         return ExitCode::from(1);
-                    },
+                    }
                 };
                 let ms = t.elapsed().as_secs_f64() * 1000.0;
                 samples_ms.push(ms);
@@ -462,7 +468,7 @@ fn main() -> ExitCode {
         Err(e) => {
             eprintln!("[publish-bench] write '{}': {e}", args.out.display());
             return ExitCode::from(1);
-        },
+        }
     }
     ExitCode::SUCCESS
 }
@@ -501,12 +507,7 @@ fn build_server(args: &Args, k: usize, log_n_shards: usize) -> Result<Sharded, A
 
 /// Hand-rolled JSON. Hand-roll for the same reason every other Aegon
 /// bench does — no serde_json in the mandatory deps.
-fn render_json(
-    args: &Args,
-    k: usize,
-    log_n_shards: usize,
-    stages: &[StageRecord],
-) -> String {
+fn render_json(args: &Args, k: usize, log_n_shards: usize, stages: &[StageRecord]) -> String {
     let endpoints_json = args
         .endpoints
         .iter()

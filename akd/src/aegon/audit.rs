@@ -1,3 +1,8 @@
+// Copyright (c) The Aegon Authors.
+//
+// This source code is licensed under the MIT license found in the
+// LICENSE file in the root directory of this source tree.
+
 //! Auditor's per-epoch invariance check (paper Fig. 4
 //! `Auditor.VerifyInvariance`), commitment-homomorphism path.
 //!
@@ -30,9 +35,9 @@ use std::ops::{Add, Mul, Sub};
 
 use ark_ec::pairing::Pairing;
 
+use super::audit_fs::AuditFsHooks;
 use super::config::VerifierContext;
 use super::error::AegonError;
-use super::audit_fs::AuditFsHooks;
 use super::fs::derive_chain_scalar;
 use super::sigma::{verify as verify_blinding_eq, BlindingEqProof};
 use super::types::{AegonPcs, AuditState, EpochCommitment};
@@ -102,9 +107,7 @@ where
     // joint-leakage attack the privacy proof (App. D) rules out.
     // Enforce it here so the index chain (always non-hiding) stays
     // decoupled from this check.
-    if PCSGlobalParam::is_zk(&ctx.verifier_param)
-        && next.audit_value_blinding_proof.is_none()
-    {
+    if PCSGlobalParam::is_zk(&ctx.verifier_param) && next.audit_value_blinding_proof.is_none() {
         return Ok(false);
     }
     let value_ok = verify_chain::<E, P>(
@@ -188,7 +191,7 @@ where
                 proof,
                 audit_fs,
             )
-        },
+        }
         None => {
             // Bare equality is correct whenever neither side carries
             // a `tau·h` term. Index chain hits this branch always;
@@ -198,6 +201,6 @@ where
             let delta_poly: P::Commitment = next_poly_com.clone() - prev_poly_com.clone();
             let expected: P::Commitment = prev_rand_com.clone() + delta_poly * r_n;
             &expected == next_rand_com
-        },
+        }
     }
 }

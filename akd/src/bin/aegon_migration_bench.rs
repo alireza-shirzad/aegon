@@ -1,3 +1,8 @@
+// Copyright (c) The Aegon Authors.
+//
+// This source code is licensed under the MIT license found in the
+// LICENSE file in the root directory of this source tree.
+
 //! `aegon_migration_bench` — measure end-to-end migration time from
 //! an empty Aegon dictionary up to a target fill, parameterised by a
 //! sweep of `--chunk-sizes` K values.
@@ -205,9 +210,7 @@ fn render_output_path(template: &Path, k: u64) -> Result<PathBuf, String> {
         .to_str()
         .ok_or_else(|| format!("--out-template is not valid UTF-8: {template:?}"))?;
     if !s.contains("{K}") {
-        return Err(format!(
-            "--out-template must contain '{{K}}', got: {s:?}"
-        ));
+        return Err(format!("--out-template must contain '{{K}}', got: {s:?}"));
     }
     Ok(PathBuf::from(s.replace("{K}", &k.to_string())))
 }
@@ -241,8 +244,7 @@ fn run_one_climb(
     let climb_t0 = Instant::now();
     let mut current_count: u64 = 0;
     let mut next_milestone_idx: usize = 0;
-    let mut milestone_records: Vec<MilestoneRecord> =
-        Vec::with_capacity(milestone_targets.len());
+    let mut milestone_records: Vec<MilestoneRecord> = Vec::with_capacity(milestone_targets.len());
 
     while current_count < target_count {
         let chunk = std::cmp::min(chunk_size, target_count - current_count);
@@ -253,9 +255,7 @@ fn run_one_climb(
             })
             .collect();
         server.publish_two_layer(&updates).map_err(|e| {
-            format!(
-                "publish_two_layer error at current_count={current_count} chunk={chunk}: {e}"
-            )
+            format!("publish_two_layer error at current_count={current_count} chunk={chunk}: {e}")
         })?;
         current_count += chunk;
 
@@ -329,9 +329,17 @@ fn run_one_climb(
     };
     std::fs::write(&tmp_path, json.as_bytes())
         .map_err(|e| format!("write '{}': {e}", tmp_path.display()))?;
-    std::fs::rename(&tmp_path, out_path)
-        .map_err(|e| format!("rename '{}' -> '{}': {e}", tmp_path.display(), out_path.display()))?;
-    eprintln!("[migration-bench K={chunk_size}] wrote {}", out_path.display());
+    std::fs::rename(&tmp_path, out_path).map_err(|e| {
+        format!(
+            "rename '{}' -> '{}': {e}",
+            tmp_path.display(),
+            out_path.display()
+        )
+    })?;
+    eprintln!(
+        "[migration-bench K={chunk_size}] wrote {}",
+        out_path.display()
+    );
 
     Ok(ClimbResult {
         chunk_size,
@@ -351,7 +359,7 @@ fn main() -> ExitCode {
         eprintln!("error: --chunk-sizes must list at least one value");
         return ExitCode::from(2);
     }
-    if args.chunk_sizes.iter().any(|k| *k == 0) {
+    if args.chunk_sizes.contains(&0) {
         eprintln!("error: every value in --chunk-sizes must be > 0");
         return ExitCode::from(2);
     }
@@ -388,7 +396,9 @@ fn main() -> ExitCode {
         );
         return ExitCode::from(2);
     }
-    let k = args.kzh_k.unwrap_or_else(|| optimal_kzh_k(args.shard_log_capacity));
+    let k = args
+        .kzh_k
+        .unwrap_or_else(|| optimal_kzh_k(args.shard_log_capacity));
 
     // Validate the template before doing any work — fast-fail.
     for &chunk_size in &args.chunk_sizes {
@@ -477,7 +487,7 @@ fn main() -> ExitCode {
         Err(e) => {
             eprintln!("[migration-bench] setup error: {e}");
             return ExitCode::from(1);
-        },
+        }
     };
     server.set_vrf_prover(VrfProver::from_env());
     let setup_secs = setup_t0.elapsed().as_secs_f64();
@@ -506,21 +516,18 @@ fn main() -> ExitCode {
             Err(e) => {
                 eprintln!("[migration-bench] {e}");
                 return ExitCode::from(1);
-            },
+            }
         };
         // single-batch mode: each K publishes exactly chunk_size
         // users (one publish) to the cleared empty dictionary. The
         // "milestone" we emit is a single 100% marker, so the JSON
         // shape is unchanged but the climb is one batch.
-        let (target_count, milestone_targets): (u64, Vec<(u32, u64)>) = if args.single_batch_per_k
-        {
+        let (target_count, milestone_targets): (u64, Vec<(u32, u64)>) = if args.single_batch_per_k {
             (chunk_size, vec![(100, chunk_size)])
         } else {
             (climb_target_count, climb_milestone_targets.clone())
         };
-        eprintln!(
-            "[migration-bench K={chunk_size}] starting climb to target_count={target_count}"
-        );
+        eprintln!("[migration-bench K={chunk_size}] starting climb to target_count={target_count}");
         let result = match run_one_climb(
             &mut server,
             &args,
@@ -540,7 +547,7 @@ fn main() -> ExitCode {
             Err(e) => {
                 eprintln!("[migration-bench K={chunk_size}] {e}");
                 return ExitCode::from(1);
-            },
+            }
         };
         results.push(result);
     }

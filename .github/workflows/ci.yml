@@ -1,0 +1,110 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: fmt + clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler libclang-dev clang
+      # The toolchain (and rustfmt/clippy components) comes from
+      # rust-toolchain.toml, so it is pinned identically to the benchmark hosts.
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: rustfmt
+        run: cargo fmt --all -- --check
+      # No `-D` flags here on purpose: the lint policy lives in the workspace
+      # manifest's [workspace.lints], and command-line flags would override it.
+      - name: clippy (default features)
+        run: cargo clippy --workspace --all-targets
+      - name: clippy (ivc_audit)
+        run: cargo clippy --workspace --all-targets --features ivc_audit
+
+  build:
+    name: build (${{ matrix.features }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - features: default
+            flags: ""
+          - features: ivc_audit
+            flags: "--features ivc_audit"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler libclang-dev clang
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build workspace
+        run: cargo build -p akd -p akd_core --all-targets ${{ matrix.flags }}
+
+  test:
+    name: test (${{ matrix.features }})
+    runs-on: ubuntu-latest
+    # The IVC suite folds and compresses real Nova proofs; it is slow.
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - features: default
+            flags: ""
+          - features: ivc_audit
+            flags: "--features ivc_audit"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler libclang-dev clang
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Known-failing tests are marked `#[ignore]` with the reason inline; see
+      # "Test status" in the README. These steps must stay green.
+      #
+      # The two crates are tested in separate invocations on purpose. A
+      # combined `-p akd -p akd_core` unifies features, which switches
+      # `akd_core` to `parallel` (that is how `akd` depends on it) and runs
+      # akd_core's own SRS-heavy unit tests under nested rayon pools. That
+      # currently exhausts the thread limit inside arkworks' MSM. Testing
+      # them separately exercises exactly the same code with the feature
+      # sets each crate actually declares.
+      - name: Test akd
+        run: cargo test -p akd ${{ matrix.flags }}
+      - name: Test akd_core
+        run: cargo test -p akd_core
+
+  # Non-blocking: reports the documentation backlog without failing the build.
+  docs:
+    name: rustdoc coverage (advisory)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler libclang-dev clang
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Count missing docs
+        run: |
+          cargo build -p akd --lib --features ivc_audit 2>&1 \
+            | grep -c "missing documentation" \
+            | xargs -I{} echo "missing_docs sites: {}"

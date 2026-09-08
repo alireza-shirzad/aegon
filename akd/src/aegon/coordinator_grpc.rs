@@ -1,3 +1,8 @@
+// Copyright (c) The Aegon Authors.
+//
+// This source code is licensed under the MIT license found in the
+// LICENSE file in the root directory of this source tree.
+
 //! User-facing gRPC service for the coordinator.
 //!
 //! Mirrors the split lookup design on the Rust side:
@@ -39,6 +44,9 @@ use super::types::{AegonPcs, EpochCommitment, Label, ShardedAuditState, Value};
 // Generated tonic code for the coordinator service. Lives in its own
 // proto package (`aegon.coordinator.v1`) so it can evolve
 // independently from the shard wire.
+// Generated code carries no rustdoc; the crate-level `warn(missing_docs)`
+// cannot be satisfied for types we do not author.
+#[allow(missing_docs)]
 pub mod proto {
     tonic::include_proto!("aegon.coordinator.v1");
 }
@@ -169,15 +177,9 @@ where
     }
 
     /// Bind and serve plaintext HTTP/2.
-    pub async fn serve(
-        self,
-        addr: std::net::SocketAddr,
-    ) -> Result<(), tonic::transport::Error> {
+    pub async fn serve(self, addr: std::net::SocketAddr) -> Result<(), tonic::transport::Error> {
         let service = Self::wrap_service(self);
-        Self::tuned_builder()
-            .add_service(service)
-            .serve(addr)
-            .await
+        Self::tuned_builder().add_service(service).serve(addr).await
     }
 
     /// Bind and serve with TLS. The client connects via
@@ -505,9 +507,9 @@ where
             let mut warmup_state = ShardedAuditState::<<E as Pairing>::ScalarField>::with_groups(
                 verifier_ctx.chain_groups,
             );
-            let mut prev_commit = state.epoch_commitment(0).ok_or_else(|| {
-                Status::internal("audit_chain: epoch 0 commitment missing")
-            })?;
+            let mut prev_commit = state
+                .epoch_commitment(0)
+                .ok_or_else(|| Status::internal("audit_chain: epoch 0 commitment missing"))?;
             for i in 0..prev_epoch {
                 let next_warmup = state.epoch_commitment(i + 1).ok_or_else(|| {
                     Status::internal(format!(
@@ -521,9 +523,7 @@ where
                     &prev_commit,
                     &next_warmup,
                 )
-                .map_err(|e| {
-                    Status::internal(format!("audit_chain warmup verify: {e}"))
-                })?;
+                .map_err(|e| Status::internal(format!("audit_chain warmup verify: {e}")))?;
                 if !ok {
                     return Err(Status::internal(format!(
                         "audit_chain warmup: verify_sharded_invariance returned false at \
@@ -686,8 +686,8 @@ where
 
     /// Connect with full config (TLS, timeouts).
     pub fn connect_with(cfg: CoordinatorClientConfig<E, P>) -> Result<Self, AegonError> {
-        let runtime = Runtime::new()
-            .map_err(|e| AegonError::Config(format!("tokio runtime: {e}")))?;
+        let runtime =
+            Runtime::new().map_err(|e| AegonError::Config(format!("tokio runtime: {e}")))?;
         // Patch 10: HTTP/2 flow-control windows. See
         // `CoordinatorServer::tuned_builder` for the rationale —
         // the 64 KB tonic defaults capped sustained throughput at
@@ -819,9 +819,8 @@ where
         let inner = resp.into_inner();
         let server_slot: LabelSlot = decode(&inner.slot)?;
         let proof: ShardedLabelProofTwoLayer<E, P> = decode(&inner.proof)?;
-        let verified_slot = verify_lookup_label_two_layer::<E, P, H>(
-            &self.verifier_ctx, commit, label, &proof,
-        )?;
+        let verified_slot =
+            verify_lookup_label_two_layer::<E, P, H>(&self.verifier_ctx, commit, label, &proof)?;
         // The server's claimed slot must match what falls out of the
         // verified chain — otherwise the server is hinting at a slot
         // its own proof doesn't actually prove.
@@ -863,12 +862,18 @@ where
         // If the server returned value bytes inline, verify them here;
         // otherwise hand the proof back and let the caller verify once
         // they have the value via their out-of-band channel.
-        if !inner.value.is_empty() {
-            if !verify_lookup_value::<E, P, H>(&self.verifier_ctx, commit, slot, &inner.value, &proof)? {
-                return Err(AegonError::Verification(
-                    "value proof did not verify against current commitment",
-                ));
-            }
+        if !inner.value.is_empty()
+            && !verify_lookup_value::<E, P, H>(
+                &self.verifier_ctx,
+                commit,
+                slot,
+                &inner.value,
+                &proof,
+            )?
+        {
+            return Err(AegonError::Verification(
+                "value proof did not verify against current commitment",
+            ));
         }
         Ok((inner.value, proof))
     }
@@ -960,13 +965,8 @@ where
         value: &Value,
     ) -> Result<(LabelSlot, ShardedValueProof<E, P>), AegonError> {
         let (slot, _server_value, value_proof) = self.lookup_value_chain(commit, label)?;
-        if !verify_lookup_value::<E, P, H>(
-            &self.verifier_ctx,
-            commit,
-            &slot,
-            value,
-            &value_proof,
-        )? {
+        if !verify_lookup_value::<E, P, H>(&self.verifier_ctx, commit, &slot, value, &value_proof)?
+        {
             return Err(AegonError::Verification(
                 "lookup_value_chain_with_bytes: value proof did not verify against caller bytes",
             ));
@@ -1004,8 +1004,13 @@ where
     pub fn lookup_history(
         &self,
         label: &Label,
-    ) -> Result<(ShardedValueHistory<E, P>, super::sharded::VerifiedLookupHistory), AegonError>
-    {
+    ) -> Result<
+        (
+            ShardedValueHistory<E, P>,
+            super::sharded::VerifiedLookupHistory,
+        ),
+        AegonError,
+    > {
         let req = LookupHistoryRequest {
             label: label.clone(),
         };
@@ -1040,8 +1045,13 @@ where
     pub fn lookup_label_history(
         &self,
         label: &Label,
-    ) -> Result<(ShardedLabelHistory<E, P>, super::sharded::VerifiedLookupLabelHistory), AegonError>
-    {
+    ) -> Result<
+        (
+            ShardedLabelHistory<E, P>,
+            super::sharded::VerifiedLookupLabelHistory,
+        ),
+        AegonError,
+    > {
         let req = LookupLabelHistoryRequest {
             label: label.clone(),
         };

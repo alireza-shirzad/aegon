@@ -1,3 +1,8 @@
+// Copyright (c) The Aegon Authors.
+//
+// This source code is licensed under the MIT license found in the
+// LICENSE file in the root directory of this source tree.
+
 //! Localhost gRPC integration test for the full ECVRF wiring.
 //!
 //! Spins up a `CoordinatorServer` on an ephemeral port with
@@ -67,12 +72,21 @@ async fn main() {
     .expect("setup join");
 
     state.set_vrf_prover(VrfProver::from_seed(&BENCH_VRF_SEED));
-    let verifier_ctx_template: ShardedVerifierContext<Bn254, Pcs> = state.sharded_verifier_context();
-    must("server-side ctx carries vrf_verifier", verifier_ctx_template.vrf_verifier.is_some());
+    let verifier_ctx_template: ShardedVerifierContext<Bn254, Pcs> =
+        state.sharded_verifier_context();
+    must(
+        "server-side ctx carries vrf_verifier",
+        verifier_ctx_template.vrf_verifier.is_some(),
+    );
 
     // Publish a small batch.
     let updates: Vec<(Vec<u8>, Vec<u8>)> = (0..6)
-        .map(|i| (format!("alice-{i}").into_bytes(), format!("pk-{i}").into_bytes()))
+        .map(|i| {
+            (
+                format!("alice-{i}").into_bytes(),
+                format!("pk-{i}").into_bytes(),
+            )
+        })
         .collect();
     let updates_for_publish = updates.clone();
     let commit_epoch = {
@@ -81,7 +95,10 @@ async fn main() {
             .expect("publish_two_layer");
         commit.epoch
     };
-    println!("  published {} labels @ epoch {commit_epoch}.", updates.len());
+    println!(
+        "  published {} labels @ epoch {commit_epoch}.",
+        updates.len()
+    );
 
     // ---- 2. Wrap in CoordinatorServer and bind on an ephemeral port. ----
     let shared = Arc::new(AsyncRwLock::new(state));
@@ -130,11 +147,16 @@ async fn main() {
     let client_arc = Arc::new(client);
     let client_for_commit = Arc::clone(&client_arc);
     let commit = tokio::task::spawn_blocking(move || {
-        client_for_commit.current_commitment().expect("current_commitment")
+        client_for_commit
+            .current_commitment()
+            .expect("current_commitment")
     })
     .await
     .expect("commit join");
-    println!("  fetched current commitment over gRPC (epoch {}).", commit.epoch);
+    println!(
+        "  fetched current commitment over gRPC (epoch {}).",
+        commit.epoch
+    );
 
     // ---- 5. Lookup each label + verify across the wire. ----
     let mut ok_count = 0;
@@ -169,15 +191,14 @@ async fn main() {
     let commit_c = commit.clone();
     let client_c = Arc::clone(&client_arc);
     let err = tokio::task::spawn_blocking(move || {
-        let slot = client_c.lookup_label(&commit_c, &probe_label).expect("lookup_label");
+        let slot = client_c
+            .lookup_label(&commit_c, &probe_label)
+            .expect("lookup_label");
         client_c.lookup_value_with_bytes(&commit_c, &slot, &bad_value)
     })
     .await
     .expect("join");
-    must(
-        "wrong-value verify rejected",
-        matches!(err, Err(_)),
-    );
+    must("wrong-value verify rejected", err.is_err());
 
     println!("\nAll checks passed. ECVRF is fully wired through the gRPC layer.");
 

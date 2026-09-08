@@ -1,3 +1,8 @@
+// Copyright (c) The Aegon Authors.
+//
+// This source code is licensed under the MIT license found in the
+// LICENSE file in the root directory of this source tree.
+
 //! Coordinate bridge between the arkworks BN254 the rest of Aegon is
 //! built on and the halo2curves BN254 that `nova-snark` speaks.
 //!
