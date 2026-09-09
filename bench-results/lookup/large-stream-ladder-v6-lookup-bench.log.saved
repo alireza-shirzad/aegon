@@ -1,0 +1,91 @@
+warn: --coord-endpoint is set; --publish-batch-sizes is ignored in this mode (publish_bench needs in-process state)
+bench: mode=remote-coord (skipping in-process ShardedAegon setup; driving everything through coord at http://10.138.0.68:50100)
+bench: client connecting to http://10.138.0.68:50100 ...
+--- preload level 1/10: target=42949672 (current=0) ---
+  published 1048576 labels (0..1048576) in 570571.5 ms
+  published 1048576 labels (1048576..2097152) in 579315.6 ms
+  published 1048576 labels (2097152..3145728) in 584370.0 ms
+  published 1048576 labels (3145728..4194304) in 584917.5 ms
+  published 1048576 labels (4194304..5242880) in 586141.7 ms
+  published 1048576 labels (6291456..7340032) in 589084.7 ms
+  published 1048576 labels (7340032..8388608) in 587081.9 ms
+  published 1048576 labels (8388608..9437184) in 587744.9 ms
+  published 1048576 labels (10485760..11534336) in 588016.1 ms
+  published 1048576 labels (12582912..13631488) in 587120.3 ms
+  published 1048576 labels (13631488..14680064) in 589319.0 ms
+  published 1048576 labels (14680064..15728640) in 589155.6 ms
+  published 1048576 labels (16777216..17825792) in 589870.9 ms
+  published 1048576 labels (17825792..18874368) in 588943.9 ms
+  published 1048576 labels (18874368..19922944) in 586859.1 ms
+  published 1048576 labels (19922944..20971520) in 590305.2 ms
+  published 1048576 labels (22020096..23068672) in 587974.0 ms
+  published 1048576 labels (25165824..26214400) in 586237.1 ms
+  published 1048576 labels (26214400..27262976) in 588557.4 ms
+  published 1048576 labels (28311552..29360128) in 591380.0 ms
+  published 1048576 labels (30408704..31457280) in 589382.9 ms
+  published 1048576 labels (31457280..32505856) in 590402.2 ms
+  published 1048576 labels (32505856..33554432) in 588985.8 ms
+  published 1048576 labels (34603008..35651584) in 590217.7 ms
+  published 1048576 labels (35651584..36700160) in 589271.6 ms
+  published 1048576 labels (37748736..38797312) in 586213.1 ms
+  published 1048576 labels (38797312..39845888) in 590533.6 ms
+  published 1048576 labels (40894464..41943040) in 589203.3 ms
+  published 1006632 labels (41943040..42949672) in 566457.8 ms
+  level=42949672: bench RSS = 371 MB (380020 KB)
+  sample 0: server[lbl/val/vh/lh]=28.43/5.70/0.77/1.29ms client[lbl/val/vh/lh]=29.25/6.16/1.56/1.65ms totals[lbl/val/vh/lh]=5173/5356/29/9958B (vh_entries=0)
+  sample 9: server[lbl/val/vh/lh]=24.92/4.99/11.26/1.36ms client[lbl/val/vh/lh]=25.87/5.43/12.40/1.84ms totals[lbl/val/vh/lh]=5173/5356/19950/9958B (vh_entries=1)
+  sample 19: server[lbl/val/vh/lh]=23.93/3.83/10.33/1.20ms client[lbl/val/vh/lh]=24.89/4.21/11.24/1.68ms totals[lbl/val/vh/lh]=5173/5356/19950/9958B (vh_entries=1)
+  sample 29: server[lbl/val/vh/lh]=2.41/3.94/9.74/1.91ms client[lbl/val/vh/lh]=2.79/4.31/10.24/2.34ms totals[lbl/val/vh/lh]=5173/5356/19950/9958B (vh_entries=1)
+  sample 39: server[lbl/val/vh/lh]=22.92/4.76/10.22/1.75ms client[lbl/val/vh/lh]=23.39/5.15/10.70/2.64ms totals[lbl/val/vh/lh]=5173/5356/19950/9958B (vh_entries=1)
+  sample 49: server[lbl/val/vh/lh]=2.21/3.69/10.73/1.52ms client[lbl/val/vh/lh]=3.01/4.01/11.61/2.38ms totals[lbl/val/vh/lh]=5173/5356/19950/9958B (vh_entries=1)
+  sample 59: server[lbl/val/vh/lh]=2.37/3.84/9.36/1.34ms client[lbl/val/vh/lh]=3.15/4.19/10.20/1.69ms totals[lbl/val/vh/lh]=5173/5356/19950/9958B (vh_entries=1)
+  sample 69: server[lbl/val/vh/lh]=2.27/4.57/21.68/1.88ms client[lbl/val/vh/lh]=2.63/4.97/22.64/2.32ms totals[lbl/val/vh/lh]=5173/5356/19950/9958B (vh_entries=1)
+  sample 79: server[lbl/val/vh/lh]=2.05/4.45/9.47/1.43ms client[lbl/val/vh/lh]=2.43/4.79/10.46/1.85ms totals[lbl/val/vh/lh]=5173/5356/19950/9958B (vh_entries=1)
+  sample 89: server[lbl/val/vh/lh]=27.17/4.76/10.06/1.86ms client[lbl/val/vh/lh]=27.74/5.22/11.19/2.77ms totals[lbl/val/vh/lh]=5173/5356/19950/9958B (vh_entries=1)
+  sample 99: server[lbl/val/vh/lh]=2.27/5.04/10.41/1.66ms client[lbl/val/vh/lh]=3.04/5.39/11.41/2.09ms totals[lbl/val/vh/lh]=5173/5356/19950/9958B (vh_entries=1)
+  audit sample 0: epoch 40->41 verify=64.969ms fetch=0.025ms proof_bytes=51376
+  audit sample 4: epoch 40->41 verify=65.024ms fetch=0.044ms proof_bytes=51376
+  audit sample 9: epoch 40->41 verify=64.920ms fetch=0.026ms proof_bytes=51376
+  audit sample 14: epoch 40->41 verify=64.941ms fetch=0.024ms proof_bytes=51376
+  audit sample 19: epoch 40->41 verify=64.985ms fetch=0.057ms proof_bytes=51376
+  audit sample 24: epoch 40->41 verify=65.056ms fetch=0.052ms proof_bytes=51376
+  audit sample 29: epoch 40->41 verify=64.979ms fetch=0.029ms proof_bytes=51376
+  audit sample 34: epoch 40->41 verify=64.924ms fetch=0.025ms proof_bytes=51376
+  audit sample 39: epoch 40->41 verify=65.002ms fetch=0.048ms proof_bytes=51376
+  audit sample 44: epoch 40->41 verify=65.138ms fetch=0.100ms proof_bytes=51376
+  audit sample 49: epoch 40->41 verify=64.913ms fetch=0.034ms proof_bytes=51376
+  audit sample 54: epoch 40->41 verify=64.956ms fetch=0.052ms proof_bytes=51376
+  audit sample 59: epoch 40->41 verify=64.941ms fetch=0.024ms proof_bytes=51376
+  audit sample 64: epoch 40->41 verify=65.040ms fetch=0.044ms proof_bytes=51376
+  audit sample 69: epoch 40->41 verify=65.026ms fetch=0.026ms proof_bytes=51376
+  audit sample 74: epoch 40->41 verify=65.059ms fetch=0.026ms proof_bytes=51376
+  audit sample 79: epoch 40->41 verify=65.188ms fetch=0.105ms proof_bytes=51376
+  audit sample 84: epoch 40->41 verify=64.937ms fetch=0.031ms proof_bytes=51376
+  audit sample 89: epoch 40->41 verify=64.975ms fetch=0.030ms proof_bytes=51376
+  audit sample 94: epoch 40->41 verify=64.987ms fetch=0.028ms proof_bytes=51376
+  audit sample 99: epoch 40->41 verify=64.990ms fetch=0.026ms proof_bytes=51376
+[lookup-bench] CHECKPOINT: persisted level 1/10 lookup+audit (/tmp/aegon-lookup-bench.json)
+  throughput_sweep: kind=value concurrency=1 window=20s warmup=3s rpc_timeout=10s
+    qps=134  n=2686  attempts=2940  errs=0 (0.0%)  p50=6.5ms  p90=7.6ms  p99=8.9ms
+  throughput_sweep: kind=value concurrency=4 window=20s warmup=3s rpc_timeout=10s
+    qps=599  n=11980  attempts=13724  errs=0 (0.0%)  p50=5.8ms  p90=7.2ms  p99=9.6ms
+  throughput_sweep: kind=value concurrency=16 window=20s warmup=3s rpc_timeout=10s
+    qps=947  n=18950  attempts=25889  errs=0 (0.0%)  p50=6.1ms  p90=50.7ms  p99=94.1ms
+  throughput_sweep: kind=value concurrency=64 window=20s warmup=3s rpc_timeout=10s
+    qps=950  n=18994  attempts=21991  errs=0 (0.0%)  p50=43.6ms  p90=169.0ms  p99=248.8ms
+  throughput_sweep: kind=value concurrency=256 window=20s warmup=3s rpc_timeout=10s
+    qps=949  n=18987  attempts=22282  errs=0 (0.0%)  p50=258.7ms  p90=524.4ms  p99=849.5ms
+  throughput_sweep: kind=value concurrency=512 window=20s warmup=3s rpc_timeout=10s
+    qps=937  n=18745  attempts=22276  errs=0 (0.0%)  p50=522.3ms  p90=1022.7ms  p99=1624.0ms
+  throughput_sweep: kind=value concurrency=1024 window=20s warmup=3s rpc_timeout=10s
+    qps=947  n=18941  attempts=23088  errs=0 (0.0%)  p50=1076.7ms  p90=1528.2ms  p99=1921.3ms
+  publish_bench: batch=4096 samples=3
+  publish_bench: batch=8192 samples=3
+  publish_bench: batch=16384 samples=3
+  publish_bench: batch=32768 samples=3
+  publish_bench: batch=65536 samples=3
+  publish_bench: batch=65536 samples=3
+  publish_bench: batch=131072 samples=3
+[lookup-bench] flushed /tmp/aegon-lookup-bench.json (1 level(s) so far)
+--- preload level 2/10: target=85899345 (current=42949672) ---
+  published 1048576 labels (42949672..43998248) in 588687.5 ms

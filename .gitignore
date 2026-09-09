@@ -1,0 +1,42 @@
+.DS_Store
+.vs
+
+debug/
+coverage/
+
+.vscode/**
+!.vscode/launch.json
+!.vscode/settings.json
+
+
+**/*/.DS_Store
+# Cargo.lock IS tracked. This repository's published results are timing
+# measurements of field and curve arithmetic; an untracked lockfile lets
+# dependency resolution drift between clones and silently moves them.
+# (Workspace members do not have their own lockfiles.)
+**/*.rs.bk
+
+**/target
+
+**/*.log
+**/*.profraw
+
+.idea/**
+*.iml
+
+/artifacts/
+# Generated SRS artifacts — derived from setup_seed + kzh_k, regeneratable,
+# and far too large for git (multi-GB binary files).
+bench-results/srs/
+
+# Divan-fork JSON output: every `cargo bench` run drops one of these in
+# the crate root, named after the bench binary. Regeneratable, noisy.
+akd/*.json
+akd_core/*.json
+
+# Logs from crashed/killed cluster runs. The JSON result files in
+# bench-results/ are the actual data and stay tracked; these are multi-MB
+# console dumps from runs that did not finish, and they embed the operator's
+# home directory paths.
+bench-results/*.log.v*-killed
+bench-results/*.log.v*-up-failed

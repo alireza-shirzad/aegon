@@ -1,0 +1,163 @@
+{
+  "params": {
+    "mode": "local",
+    "n_shards": 1,
+    "log_n_shards": 0,
+    "shard_log_capacity": 22,
+    "true_log_capacity": 20,
+    "kzh_k": 7,
+    "private": false,
+    "samples_per_level": 20,
+    "publish_batch_size": 1024,
+    "publish_batch_sizes": [2, 4, 8, 16, 32, 64],
+    "publish_samples_per_batch": 3,
+    "audit_samples": 5,
+    "initial_prefill_count": 0,
+    "prefill_seed": 1,
+    "endpoints": [],
+    "preload_counts": [0],
+    "fill_percents": [0]
+  },
+  "setup_ms": 713.9526,
+  "initial_prefill_ms": 0.0000,
+  "levels": [
+    {
+      "preload_count": 0,
+      "current_count_after_topup": 0,
+      "preload_publish_ms_total": 0.0000,
+      "rss_kb": 299132,
+      "lookup": {
+        "sample_count": 0,
+        "samples": [
+
+        ]
+      },
+      "publish_bench": {
+        "batches": [
+          {
+            "batch_size": 2,
+            "samples_ms": [5.9392, 5.9832, 6.3856],
+            "fastest_ms": 5.9392,
+            "slowest_ms": 6.3856,
+            "median_ms": 5.9832,
+            "mean_ms": 6.1027,
+            "index_commitment_bytes": 72,
+            "value_commitment_bytes": 72,
+            "rand_index_commitment_bytes": 72,
+            "rand_value_commitment_bytes": 72,
+            "total_commit_bytes": 344
+          },
+          {
+            "batch_size": 4,
+            "samples_ms": [9.8881, 10.0953, 10.0657],
+            "fastest_ms": 9.8881,
+            "slowest_ms": 10.0953,
+            "median_ms": 10.0657,
+            "mean_ms": 10.0163,
+            "index_commitment_bytes": 72,
+            "value_commitment_bytes": 72,
+            "rand_index_commitment_bytes": 72,
+            "rand_value_commitment_bytes": 72,
+            "total_commit_bytes": 344
+          },
+          {
+            "batch_size": 8,
+            "samples_ms": [12.1579, 11.8368, 11.1519],
+            "fastest_ms": 11.1519,
+            "slowest_ms": 12.1579,
+            "median_ms": 11.8368,
+            "mean_ms": 11.7155,
+            "index_commitment_bytes": 72,
+            "value_commitment_bytes": 72,
+            "rand_index_commitment_bytes": 72,
+            "rand_value_commitment_bytes": 72,
+            "total_commit_bytes": 344
+          },
+          {
+            "batch_size": 16,
+            "samples_ms": [11.0997, 11.6143, 11.5666],
+            "fastest_ms": 11.0997,
+            "slowest_ms": 11.6143,
+            "median_ms": 11.5666,
+            "mean_ms": 11.4269,
+            "index_commitment_bytes": 72,
+            "value_commitment_bytes": 72,
+            "rand_index_commitment_bytes": 72,
+            "rand_value_commitment_bytes": 72,
+            "total_commit_bytes": 344
+          },
+          {
+            "batch_size": 32,
+            "samples_ms": [16.6992, 16.9571, 17.2525],
+            "fastest_ms": 16.6992,
+            "slowest_ms": 17.2525,
+            "median_ms": 16.9571,
+            "mean_ms": 16.9696,
+            "index_commitment_bytes": 72,
+            "value_commitment_bytes": 72,
+            "rand_index_commitment_bytes": 72,
+            "rand_value_commitment_bytes": 72,
+            "total_commit_bytes": 344
+          },
+          {
+            "batch_size": 64,
+            "samples_ms": [30.7196, 30.4821, 30.6016],
+            "fastest_ms": 30.4821,
+            "slowest_ms": 30.7196,
+            "median_ms": 30.6016,
+            "mean_ms": 30.6011,
+            "index_commitment_bytes": 72,
+            "value_commitment_bytes": 72,
+            "rand_index_commitment_bytes": 72,
+            "rand_value_commitment_bytes": 72,
+            "total_commit_bytes": 344
+          }
+        ]
+      },
+      "audit": {
+        "samples": [
+          {
+            "sample_idx": 0,
+            "prev_epoch": 0,
+            "next_epoch": 1,
+            "server_fetch_ns": 390,
+            "audit_invariance_ns": 246796,
+            "audit_proof_bytes": 344
+          },
+          {
+            "sample_idx": 1,
+            "prev_epoch": 1,
+            "next_epoch": 2,
+            "server_fetch_ns": 599,
+            "audit_invariance_ns": 253292,
+            "audit_proof_bytes": 344
+          },
+          {
+            "sample_idx": 2,
+            "prev_epoch": 2,
+            "next_epoch": 3,
+            "server_fetch_ns": 271,
+            "audit_invariance_ns": 268282,
+            "audit_proof_bytes": 344
+          },
+          {
+            "sample_idx": 3,
+            "prev_epoch": 3,
+            "next_epoch": 4,
+            "server_fetch_ns": 280,
+            "audit_invariance_ns": 253818,
+            "audit_proof_bytes": 344
+          },
+          {
+            "sample_idx": 4,
+            "prev_epoch": 4,
+            "next_epoch": 5,
+            "server_fetch_ns": 340,
+            "audit_invariance_ns": 258417,
+            "audit_proof_bytes": 344
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -1,0 +1,20 @@
+[2026-06-25T21:18:32+0000] PUBLISH_WARMUP_BATCH_SIZE not set; using migration-best K=524288 from /home/alrshir/aegon/bench-results/migration/medium_best_k.txt
+[2026-06-25T21:18:32+0000] host: instance-20260503-131121
+[2026-06-25T21:18:32+0000] PROJECT=jbonneau-mwalfish-9a0c  N_SHARDS=2  SHARD_LOG_CAPACITY=27  KZH_K=9
+[2026-06-25T21:18:32+0000] PUBLISH_BATCH_SIZES=64,128,256,512,1024,2048
+[2026-06-25T21:18:32+0000] results dir: /home/alrshir/aegon/bench-results
+[2026-06-25T21:18:32+0000] ==== medium-up START ====
+[2026-06-25T21:21:34+0000] ==== medium-up OK in 182s ====
+[2026-06-25T21:21:34+0000] ==== medium-deploy START ====
+[2026-06-25T21:24:01+0000] ==== medium-deploy OK in 147s ====
+[2026-06-25T21:24:01+0000] ==== medium-setup-bench START ====
+[2026-06-25T21:27:03+0000] ==== medium-setup-bench OK in 182s ====
+[2026-06-25T21:27:03+0000] ==== medium-start-masking START ====
+[2026-06-25T21:33:24+0000] ==== medium-start-masking OK in 381s ====
+[2026-06-25T21:33:24+0000] ==== medium-start-shards START ====
+[2026-06-25T21:38:38+0000] ==== medium-start-shards OK in 314s ====
+[2026-06-25T21:38:38+0000] ==== medium-start-coord START ====
+[2026-06-25T21:40:53+0000] ==== medium-start-coord OK in 135s ====
+[2026-06-25T21:40:53+0000] starting watchdog loop (per-shard probe every 60s) -> /home/alrshir/aegon/bench-results/medium-watchdog.log
+[2026-06-25T21:40:53+0000] watchdog PID=1125094
+[2026-06-25T21:40:53+0000] ==== medium-lookup-bench START ====

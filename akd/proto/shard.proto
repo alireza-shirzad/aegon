@@ -1,0 +1,437 @@
+syntax = "proto3";
+
+package aegon.shard.v1;
+
+// One shard's gRPC surface. Mirrors the in-process methods on
+// `Aegon<E, P, H>` that the `ShardedAegon` coordinator calls during
+// publish/lookup/consistency_proof. All payloads are
+// arkworks-canonical-serialized bytes; the proto schema is
+// transport, not type — see `aegon::shard_grpc::wire` on the Rust
+// side for the encodings.
+service ShardService {
+  // Phase 1 of a sharded publish: apply pre-decided (slot, h_label,
+  // h_value) writes, recommit data polynomials, stash pending state.
+  // Returns the new (index_commitment, value_commitment) bytes.
+  rpc PublishPhase1AtSlots(PublishPhase1Request)
+      returns (PublishPhase1Response);
+
+  // Phase 2 + persist (collapsed): apply the shared FS scalars from
+  // the coordinator, recommit rand polynomials, build the per-shard
+  // history/value-change openings, write the dictionary-content
+  // DbOps to this shard's local RocksDB, and return the new
+  // EpochCommitment in a single RPC. Replaces the legacy 3-step
+  // (PublishPhase2 → coord builds cross-shard merkle → FinalizePublishPersist)
+  // flow: cross-shard merkle anchors now live on the coord (in its
+  // in-memory ShardedEpochCommitment cache + the durable
+  // `coord:epoch_commit:{epoch}` keyspace), so the shard never needs
+  // them — empty merkle paths are written into StoredValueHistoryEntry
+  // / StoredLabelPlacement on the shard side, and the coord stitches
+  // them in at lookup time via `merkle_path(shard_id)`.
+  rpc PublishPhase2AndPersist(PublishPhase2AndPersistRequest)
+      returns (PublishPhase2AndPersistResponse);
+
+  // Open-addressing helper: is the given slot already occupied in
+  // the current index polynomial?
+  rpc IsIndexSlotOccupied(SlotRequest) returns (SlotOccupiedResponse);
+
+  // PCS openings: open one of the four polynomials at a slot.
+  // The "in_epoch" variants take an epoch number to access the
+  // server-retained snapshot at that past epoch (for consistency
+  // proofs).
+  rpc OpenIndexAtSlot(SlotRequest) returns (OpenResponse);
+  rpc OpenValueAtSlot(SlotRequest) returns (OpenResponse);
+  rpc OpenRandIndexAtSlotInEpoch(SlotEpochRequest) returns (OpenResponse);
+  rpc OpenRandValueAtSlotInEpoch(SlotEpochRequest) returns (OpenResponse);
+  // Opens the live (current-epoch) rand_value polynomial at a slot.
+  // Used by `lookup_history`'s freshness attestation: the returned
+  // evaluation lets the verifier check that no publish has touched
+  // this slot since the most recent history entry's epoch.
+  rpc OpenRandValueAtSlotCurrent(SlotRequest) returns (OpenResponse);
+  // Label-side mirror: opens the live rand_index polynomial at a
+  // slot. Used by `lookup_label_history`'s freshness attestation.
+  rpc OpenRandIndexAtSlotCurrent(SlotRequest) returns (OpenResponse);
+
+  // Re-mask a publish-time non-ZK value-history entry into a hiding
+  // (ZK) one. The coordinator calls this during `lookup_history` for
+  // each stored entry it reads from the DB — publish stores plain
+  // proofs (the masking server is not on the publish hot path), and
+  // the masking-server protocol is applied at user-facing time on
+  // the shard that owns the slot.
+  rpc RemaskValueHistoryEntry(RemaskValueHistoryEntryRequest)
+      returns (RemaskValueHistoryEntryResponse);
+
+  // Initial commitment — used by the coordinator at setup time to
+  // build the epoch-0 Merkle root.
+  rpc CurrentCommitment(Empty) returns (CommitmentResponse);
+
+  // Verifier parameters + log_capacity. Used by the coordinator at
+  // setup time so it doesn't have to regenerate the (very expensive)
+  // SRS just to derive its small verifier-side projection. The
+  // returned `verifier_param` is ~tens of KB regardless of dictionary
+  // size; the SRS that produced it is multi-GB.
+  rpc GetVerifierContext(Empty) returns (GetVerifierContextResponse);
+
+  // Reset this shard back to a fresh epoch-0 state (wiping any
+  // accumulated polynomials / publishes) and pre-populate it with
+  // `count` random `(slot, h_label, h_value)` entries seeded by
+  // `seed`. Replaces the historical "kill the shard process and
+  // restart with a different --prefill-count" cycle the cluster
+  // benches used to do between fill_percent stages.
+  rpc ReconfigurePrefill(ReconfigurePrefillRequest)
+      returns (ReconfigurePrefillResponse);
+
+  // Wipe this shard back to its post-setup empty state without
+  // touching the SRS, the gRPC transport, or any backing DB files.
+  // Restores from the stashed `setup_baseline` so commitments are
+  // bit-identical to the post-`init` state. Used between K's in
+  // the migration bench's K-sweep to amortize SRS generation across
+  // every K. Fails if a publish is in flight.
+  rpc ClearDictionary(Empty) returns (Empty);
+
+  // Two-layer routing's publish entry: the coord has already routed
+  // `(label, value)` tuples to this shard via the first-layer
+  // `H_shard`. The shard runs its own second-layer `H_slot` open-
+  // addressing to pick slots, applies the phase-1 crypto pipeline,
+  // and reports back (commits, placed_count, optional fullness
+  // proof). When `fullness_proof` is non-empty (or even just
+  // present with empty bytes — the placeholder), the coord
+  // re-routes `batch[placed_count..]` past this shard via
+  // `H_shard(ctr+1, label)`.
+  rpc PublishBatch(PublishBatchRequest) returns (PublishBatchResponse);
+
+  // Two-layer routing's lookup entry: walk this shard's intra-shard
+  // `H_slot(slot_ctr, label)` probe trail and report the slot that
+  // stores `label` plus the `slot_ctr` it took to reach. `found =
+  // false` signals "label not in this shard" (the open-addressing
+  // walk hit an empty slot before finding the target hash). Mirrors
+  // `Aegon::find_label_slot`. The shard's index polynomial is the
+  // sole source of truth — no DB roundtrip.
+  rpc FindLabelSlot(FindLabelSlotRequest) returns (FindLabelSlotResponse);
+
+  // Combined trail RPC. Collapses (FindLabelSlot + N×OpenIndexAtSlot)
+  // into a single round-trip. The shard walks `H_slot` exactly as
+  // FindLabelSlot does, and along the way emits an index-polynomial
+  // opening at every probed slot. Used by `ShardedAegon::lookup_label_two_layer`
+  // and the two-layer audit/consistency paths so the coord pays one
+  // network RTT for the intra-shard probe trail instead of one per
+  // probe.
+  rpc FetchLabelProofTrail(FetchLabelProofTrailRequest)
+      returns (FetchLabelProofTrailResponse);
+
+  // -------- Per-shard durable state (DB-anchored, post-refactor) --------
+  // Each shard now owns the durable storage for the labels that route
+  // to it. The coord ships pre-formed DbOps via ApplyPersistenceOps at
+  // the end of every publish, and reads back via the four Fetch* RPCs
+  // at lookup time. Coord retains only `coord:state` (epoch + FS
+  // scalars) and `coord:epoch_commit:{epoch}` (the global root) in its
+  // own DB — no per-label dictionary content.
+
+  // Apply a pre-formed list of DbOps to this shard's local DB
+  // atomically. Used by the coord at publish persist time to push the
+  // labels routed to this shard (value, value_history, label_placement,
+  // and the per-epoch history_openings bundle).
+  rpc ApplyPersistenceOps(ApplyPersistenceOpsRequest)
+      returns (ApplyPersistenceOpsResponse);
+
+  // Read the raw value bytes for `label` from this shard's DB. Coord
+  // calls this on the destination shard during `lookup_two_layer`.
+  rpc FetchValue(FetchValueRequest) returns (FetchValueResponse);
+
+  // Read the value-history sliding window for `label` from this
+  // shard's DB. Returns the list in LPush order (newest first), which
+  // matches the on-coord LPush/LTrim semantics from before the move.
+  rpc FetchValueHistory(FetchValueHistoryRequest)
+      returns (FetchValueHistoryResponse);
+
+  // Combined value-history RPC. Collapses
+  //   FetchValueHistory + N×RemaskValueHistoryEntry + OpenRandValueAtSlotCurrent
+  // into a single round-trip. The owning shard reads its sliding
+  // window, decodes + remasks each entry, and (for entries[0]) opens
+  // the live `rand_value_poly` at the slot for the freshness
+  // attestation — all under one read lock. Used by
+  // `ShardedAegon::lookup_history`; saves 1 + HISTORY_WINDOW + 1
+  // round-trips per call (≈7 RTTs on the GCP cluster).
+  rpc FetchFullValueHistory(FetchFullValueHistoryRequest)
+      returns (FetchFullValueHistoryResponse);
+
+  // Read the `StoredLabelPlacement<E,P>` blob for `label` from this
+  // shard's DB.
+  rpc FetchLabelPlacement(FetchLabelPlacementRequest)
+      returns (FetchLabelPlacementResponse);
+
+  // Combined label-history RPC. Collapses
+  //   FetchLabelPlacement + OpenRandIndexAtSlotCurrent
+  // into a single round-trip. The owning shard reads its placement
+  // record and opens the live `rand_index_poly` at the slot in the
+  // same call. Used by `ShardedAegon::lookup_label_history`.
+  rpc FetchFullLabelHistory(FetchFullLabelHistoryRequest)
+      returns (FetchFullLabelHistoryResponse);
+
+  // Read this shard's `HistoryOpenings<E,P>` bundle for the given
+  // epoch from its DB. Key on the shard is `openings:{epoch}` (no
+  // shard_id suffix, since each shard's keyspace is already local).
+  rpc FetchHistoryOpenings(FetchHistoryOpeningsRequest)
+      returns (FetchHistoryOpeningsResponse);
+
+}
+
+message ReconfigurePrefillRequest {
+  // Number of (slot, h_label, h_value) random entries to insert
+  // after the state reset. Zero means "just reset; don't prefill".
+  uint64 count = 1;
+  // RNG seed used to derive the slots and field elements. The
+  // cluster driver picks `prefill_seed_base + shard_id` so each
+  // shard ends up with a deterministic, disjoint random fill.
+  uint64 seed = 2;
+}
+
+message ReconfigurePrefillResponse {}
+
+message RemaskValueHistoryEntryRequest {
+  // Canonical-serialized StoredValueHistoryEntry<E, P> (uncompressed).
+  bytes entry_uncompressed = 1;
+}
+
+message RemaskValueHistoryEntryResponse {
+  // Canonical-serialized StoredValueHistoryEntry<E, P> with the three
+  // value-side proofs replaced by hiding openings produced via the
+  // masking-server protocol. Evaluations, commitments, merkle paths,
+  // and the tau snapshots are passed through unchanged.
+  bytes entry_uncompressed = 1;
+}
+
+message PublishPhase1Request {
+  // Canonical-serialized Vec<ShardWrite<F>>. Field order on the wire
+  // is { slot_bits, h_label, h_value }, where h_label is the
+  // CanonicalSerialize encoding of Option<F> (one-byte tag + F bytes
+  // when Some, single-byte 0 when None).
+  bytes batch_bytes = 1;
+}
+
+message PublishPhase1Response {
+  bytes index_commitment = 1;
+  bytes value_commitment = 2;
+}
+
+message PublishBatchRequest {
+  // Canonical-serialized `Vec<(Label, Value)>` (uncompressed, just
+  // length-prefixed pairs of raw byte slices). Field order on the
+  // wire: u32_le n, then n × (u32_le label_len || label bytes ||
+  // u32_le value_len || value bytes).
+  bytes batch_bytes = 1;
+  // Canonical-serialized `Vec<Vec<Vec<u8>>>` — one outer entry per
+  // label (parallel to `batch_bytes`), containing the H_shard VRF
+  // proof bytes for ctr 0..=final_shard_ctr along the inter-shard
+  // routing chain. Empty when no VRF prover is configured cluster-
+  // wide (lookups will then recompute proofs the legacy way).
+  // The destination shard stores these alongside its locally-
+  // computed H_slot proofs and serves both via
+  // FetchLabelProofTrail at lookup time.
+  bytes vrf_proofs_shard_bytes = 2;
+}
+
+message PublishBatchResponse {
+  // Post-phase-1 index polynomial commitment (canonical-serialized).
+  bytes index_commitment = 1;
+  // Post-phase-1 value polynomial commitment.
+  bytes value_commitment = 2;
+  // How many labels from the input batch this shard accepted. The
+  // coord re-routes `batch[placed_count..]` past this shard if the
+  // shard reported fullness, or treats placed_count == batch.len()
+  // as a clean success.
+  uint64 placed_count = 3;
+  // Canonical-serialized `Vec<ShardPlacement>` recording, for each
+  // accepted label, the final (slot_bits, slot_ctr) reached by the
+  // shard's `H_slot` walk. Length matches `placed_count`. Used by
+  // the coord to drive lookup routing and (when needed) to bind
+  // the placement into the audit proof.
+  bytes placements_bytes = 4;
+  // Empty when the shard placed every input. Present (possibly
+  // with zero-length proof bytes — the placeholder) when the shard
+  // ran out of addressable slots mid-batch.
+  bool is_full = 5;
+  // Per-shard fullness proof, opaque to the coord. Placeholder
+  // (empty bytes) at this revision; real soundness proof drops in
+  // here later without an RPC change.
+  bytes fullness_proof = 6;
+}
+
+message FindLabelSlotRequest {
+  // Raw label bytes (uncompressed). The shard runs `H_slot(slot_ctr,
+  // label)` internally — no need to send a pre-derived ctr.
+  bytes label = 1;
+}
+
+message FindLabelSlotResponse {
+  // True when the shard found `label` in its index_poly. When false,
+  // `slot_bits` and `slot_ctr` are unset and the coord should treat
+  // this as "label not in this shard" (an empty slot was reached
+  // before the target hash).
+  bool found = 1;
+  // Canonical-serialized `Vec<bool>` of slot bits (low bit first).
+  // Empty when `found == false`.
+  bytes slot_bits = 2;
+  // The `H_slot` counter at the final probe — `slot_ctr0` in the
+  // intra-shard trail. Unset (zero) when `found == false`.
+  uint64 slot_ctr = 3;
+}
+
+message FetchLabelProofTrailRequest {
+  bytes label = 1;
+}
+
+message FetchLabelProofTrailResponse {
+  // True when the shard found `label`. When false, `trail_uncompressed`
+  // is empty and the coord should map this to UnknownLabel.
+  bool found = 1;
+  // Bincode encoding of `LabelProofTrail<E, P>` (see
+  // `aegon::shard_grpc::wire`). Same opaque-blob pattern as
+  // `RemaskValueHistoryEntry` — keeps proof types out of the proto
+  // schema.
+  bytes trail_uncompressed = 2;
+}
+
+message PublishPhase2AndPersistRequest {
+  // Canonical-serialized scalar field elements — the cross-shard FS
+  // chain scalars derived by the coord from all shards' phase-1
+  // commits.
+  bytes r_index = 1;
+  bytes r_value = 2;
+  // Shard id (used by the shard to stamp `StoredValueHistoryEntry.shard_id`
+  // / `StoredLabelPlacement.shard_id`; the shard process itself
+  // doesn't track its own id, the coord does).
+  uint32 shard_id = 3;
+}
+
+message PublishPhase2AndPersistResponse {
+  // Canonical-serialized EpochCommitment<E, P> for the new epoch.
+  // The coord collects these across shards to build the cross-shard
+  // merkle root and finalize `coord:epoch_commit:{epoch}`.
+  bytes epoch_commitment = 1;
+}
+
+message SlotRequest {
+  // Canonical-serialized Vec<bool>.
+  bytes slot_bits = 1;
+}
+
+message SlotEpochRequest {
+  bytes slot_bits = 1;
+  uint64 epoch = 2;
+}
+
+message SlotOccupiedResponse {
+  bool occupied = 1;
+}
+
+message OpenResponse {
+  bytes evaluation = 1; // canonical-serialized F
+  bytes proof = 2;      // canonical-serialized P::Proof
+}
+
+message CommitmentResponse {
+  bytes epoch_commitment = 1;
+}
+
+message GetVerifierContextResponse {
+  // Canonical-serialized P::VerifierParam (uncompressed). The
+  // coordinator reconstructs VerifierContext locally by pairing
+  // this with `log_capacity` below.
+  bytes verifier_param = 1;
+  uint64 log_capacity = 2;
+}
+
+message Empty {}
+
+// -------- Per-shard durable state messages --------
+
+message ApplyPersistenceOpsRequest {
+  // Canonical-serialized `Vec<DbOp>`. Encoding mirrors the in-process
+  // `aegon::db::DbOp` enum: { Set { key, value }, SAdd { key, member },
+  // LPush { key, member }, LTrim { key, start, stop } }. Coord builds
+  // the list locally and ships it; shard decodes and runs
+  // `db.write_atomic(&ops)`.
+  bytes ops_bytes = 1;
+}
+
+message ApplyPersistenceOpsResponse {}
+
+message FetchValueRequest {
+  // Raw label bytes.
+  bytes label = 1;
+}
+
+message FetchValueResponse {
+  // Empty when the label is not in this shard's DB (the coord treats
+  // that case as a routing/lookup error per the original `db.get`
+  // semantics).
+  bool found = 1;
+  bytes value = 2;
+}
+
+message FetchValueHistoryRequest {
+  bytes label = 1;
+}
+
+message FetchValueHistoryResponse {
+  // List head-first (newest entry at index 0), matching the on-disk
+  // order from the LPush + LTrim Redis semantics.
+  repeated bytes entries = 1;
+}
+
+message FetchFullValueHistoryRequest {
+  bytes label = 1;
+}
+
+message FetchFullValueHistoryResponse {
+  // True when the shard had any value-history entries for this label.
+  // When false, `history_uncompressed` is empty and the coord returns
+  // an empty `ShardedValueHistory` (matching pre-existing semantics).
+  bool found = 1;
+  // Canonical-serialized `FullValueHistory<E, P>` blob. Each contained
+  // `StoredValueHistoryEntry` has been remasked (live ZK openings)
+  // but carries EMPTY `prev_merkle_path` / `post_merkle_path`; the
+  // coord stitches the paths in from its in-memory `epoch_commits`
+  // cache before serving the bundle to the user.
+  bytes history_uncompressed = 2;
+}
+
+message FetchLabelPlacementRequest {
+  bytes label = 1;
+}
+
+message FetchLabelPlacementResponse {
+  bool found = 1;
+  // Canonical-serialized `StoredLabelPlacement<E,P>` (uncompressed,
+  // same format as the prior coord-side write).
+  bytes placement_bytes = 2;
+}
+
+message FetchFullLabelHistoryRequest {
+  bytes label = 1;
+}
+
+message FetchFullLabelHistoryResponse {
+  // True when the shard has a placement record for this label. When
+  // false, `full_uncompressed` is empty and the coord returns
+  // (placement = None, freshness = None) — matching the existing
+  // `lookup_label_history` semantics for unknown labels.
+  bool found = 1;
+  // Canonical-serialized `FullLabelHistory<E, P>` blob. The contained
+  // `StoredLabelPlacement` carries an EMPTY `placement_merkle_path`;
+  // the coord stitches it in from its in-memory `epoch_commits`
+  // cache before serving the bundle to the user.
+  bytes full_uncompressed = 2;
+}
+
+message FetchHistoryOpeningsRequest {
+  uint64 epoch = 1;
+}
+
+message FetchHistoryOpeningsResponse {
+  bool found = 1;
+  // Canonical-serialized `HistoryOpenings<E,P>` (compressed, same
+  // format as the prior coord-side write).
+  bytes openings_bytes = 2;
+}
+

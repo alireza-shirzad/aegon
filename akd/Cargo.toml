@@ -1,0 +1,203 @@
+[package]
+name = "akd"
+version = "0.12.0-pre.12"
+authors = ["The Aegon Authors"]
+description = "Sharded, polynomial-commitment-backed auditable key directory (Aegon engine, AKD-compatible API)"
+license = "MIT"
+edition = "2021"
+rust-version = "1.88.0"
+keywords = ["key-transparency", "akd", "aegon"]
+repository = "https://github.com/alireza-shirzad/aegon"
+readme = "../README.md"
+
+[features]
+# Supported configurations
+whatsapp_v1 = ["akd_core/whatsapp_v1"]
+experimental = ["akd_core/experimental"]
+
+# Default features mix (experimental + audit-proof protobuf mgmt support)
+default = [
+    "public_auditing",
+    "parallel_vrf",
+    "preload_history",
+    "greedy_lookup_preload",
+    "experimental",
+]
+
+bench = ["experimental", "public_tests", "tokio/rt-multi-thread"]
+# Greedy loading of lookup proof nodes
+greedy_lookup_preload = []
+public_auditing = ["dep:protobuf", "akd_core/protobuf"]
+# Parallelize VRF calculations during publish
+parallel_vrf = ["akd_core/parallel_vrf"]
+# Enable pre-loading of the nodes when generating history proofs
+preload_history = []
+# The upstream SEEMless/Merkle test suites (`append_only_zks::tests` and
+# `crate::tests`). Aegon replaced the append-only-tree backend behind
+# `Directory`, so these exercise a code path that no longer carries the
+# engine and they do not pass. They are retained, not deleted, so the
+# divergence from facebook/akd stays auditable. Off by default; see README.
+upstream_tests = []
+public_tests = [
+    "rand",
+    "dep:colored",
+    "dep:once_cell",
+    "serde_serialization",
+    "akd_core/public_tests",
+    "akd_core/rand",
+    "dep:paste",
+]
+rand = ["dep:rand"]
+# Collect runtime metrics on db access calls + timing
+runtime_metrics = []
+serde_serialization = ["dep:serde", "akd_core/serde_serialization"]
+# TESTING ONLY: Artifically slow the in-memory database (for benchmarking)
+slow_internal_db = []
+# Tracing instrumentation
+tracing = ["dep:tracing"]
+# Tracing-based instrumentation. Pulls in `tracing-subscriber` and
+# `tracing-tree` so the bins can install a console-rendering tree
+# subscriber at startup — gives you a nested view of phase-level spans
+# (Aegon::PublishPhase1, KZH::FMAState, ShardedAegon::*) without any
+# separate flame-graph tooling.
+tracing_instrument = ["tracing/attributes", "dep:tracing-subscriber", "dep:tracing-tree"]
+# Use mimalloc as the global allocator for binaries that opt in via the
+# `bin/<name>.rs` `#[cfg(feature = "mimalloc_alloc")]` block. Off by
+# default so debug-tool binaries and unit tests stay on glibc.
+mimalloc_alloc = []
+# IVC (Nova) auditing: fold the per-epoch invariance check into a
+# recursive proof so an auditor verifies ONE proof instead of one per
+# epoch (paper §3, "fast-forwarding via recursive proofs"). Off by
+# default — pulls in the halo2curves/ff stack that nova-snark uses,
+# which is entirely independent of the arkworks stack the rest of the
+# crate is built on.
+ivc_audit = ["dep:nova-snark", "dep:ff", "dep:serde", "dep:bincode"]
+
+[dependencies]
+## Required dependencies ##
+akd_core = { version = "0.12.0-pre.12", path = "../akd_core", default-features = false, features = [
+    "vrf",
+    "parallel",
+] }
+ark-bn254 = { workspace = true }
+ark-ec = { workspace = true }
+ark-ff = { workspace = true }
+ark-poly = { workspace = true }
+ark-serialize = { workspace = true }
+ark-std = { workspace = true }
+ndarray = { workspace = true }
+rand_chacha = { workspace = true }
+async-recursion = "1"
+async-trait = "0.1"
+dashmap = "5"
+futures = "0.3"
+hex = "0.4"
+clap = { version = "4", features = ["derive"] }
+log = { version = "0.4", features = ["kv_unstable"] }
+# Drop-in alternative allocator. glibc retains freed memory for reuse and
+# rarely returns it to the OS, which makes the shard's RSS grow well past
+# its actual working set during heavy publish-time alloc/free churn.
+# mimalloc returns freed pages aggressively. Used only via opt-in
+# `#[global_allocator]` in the individual binaries that need it (see
+# `bin/aegon_shard_server.rs`, `bin/aegon_rss_probe.rs`).
+mimalloc = { version = "0.1", default-features = false }
+prost = "0.13"
+rayon = { workspace = true }
+redis = { version = "0.27", default-features = false }
+# RocksDB engine for the second `Db` impl. Single-process, disk-backed
+# LSM store; selected via `DbSource::Rocks(PathBuf)`. Stays alongside
+# the Redis impl rather than replacing it so cluster benches can keep
+# using shared-Redis until cross-process state moves to gRPC fallback
+# everywhere.
+rocksdb = { version = "0.24", default-features = false, features = ["lz4"] }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+tokio = { version = "1", features = ["sync", "time", "rt", "rt-multi-thread", "net", "macros"] }
+tonic = { version = "0.12", features = ["tls", "tls-roots"] }
+
+## Optional dependencies ##
+colored = { version = "2", optional = true }
+# Nova folding scheme for the `ivc_audit` path. Brings its own
+# bellpepper-derived `frontend` module and re-exports the
+# halo2curves bn256/grumpkin field types, so no direct dependency on
+# either is needed here. `ff` is required for the `PrimeField`
+# trait methods used by the ark<->halo2 coordinate bridge.
+nova-snark = { version = "0.75", default-features = false, optional = true }
+ff = { version = "0.13", optional = true }
+# Wire-size measurement for the recursive proof; matches the encoding
+# nova-snark itself uses.
+bincode = { version = "2", features = ["serde"], optional = true }
+once_cell = { version = "1", optional = true }
+paste = { version = "1", optional = true }
+protobuf = { version = "3", optional = true }
+rand = { version = "0.8", optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+tracing = { version = "0.1.40", optional = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
+tracing-tree = { version = "0.4", optional = true }
+
+[dev-dependencies]
+criterion = "0.5"
+# Fork adds per-sample JSON output (see akd/benches/publish_sweep.rs).
+# Pinned to an exact revision for the same reason as the arkworks
+# patches in the workspace manifest: unpinned git deps silently move
+# benchmark numbers between clones.
+divan = { git = "https://github.com/alireza-shirzad/divan.git", rev = "54d2574ecfe4f68e6da36f30107edda35d1ed66c" }
+serial_test = "2"
+proptest = "1"
+proptest-derive = "0.4"
+colored = "2"
+once_cell = "1"
+ctor = "0.2"
+tokio-test = "0.4"
+tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
+tokio-stream = { version = "0.1", features = ["net"] }
+mockall = "0.11"
+futures = "0.3"
+itertools = "0.11"
+
+# To enable the public_tests feature in tests
+akd = { path = ".", features = [
+    "public_tests",
+    "whatsapp_v1",
+    "experimental",
+], default-features = false }
+
+[[bench]]
+name = "azks"
+harness = false
+required-features = ["bench"]
+
+[[bench]]
+name = "directory"
+harness = false
+required-features = ["bench"]
+
+[[bench]]
+name = "publish_sweep"
+harness = false
+
+[[bench]]
+name = "ecvrf_microbench"
+harness = false
+
+[[example]]
+name = "ivc_audit_e2e"
+required-features = ["ivc_audit"]
+
+[[example]]
+name = "ivc_audit_grouped_e2e"
+required-features = ["ivc_audit"]
+
+# Gated so a plain `cargo check --workspace` does not try to build the
+# IVC bench without the Nova stack. Other binaries stay auto-discovered.
+[[bin]]
+name = "aegon_ivc_bench"
+path = "src/bin/aegon_ivc_bench.rs"
+required-features = ["ivc_audit"]
+
+[build-dependencies]
+tonic-build = "0.12"
+
+[lints]
+workspace = true

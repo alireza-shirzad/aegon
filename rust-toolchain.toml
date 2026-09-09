@@ -1,0 +1,10 @@
+# Pinned so that CI, the benchmark hosts, and a fresh clone all agree.
+# The floor is set by nova-snark 0.75 (rust-version = 1.88.0); we pin a
+# specific stable rather than a floor because this repository's published
+# results are timing measurements, and codegen changes between compiler
+# releases move them.
+#
+# Bump deliberately, and re-run the benchmarks when you do.
+[toolchain]
+channel = "1.92.0"
+components = ["rustfmt", "clippy"]

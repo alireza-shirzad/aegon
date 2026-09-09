@@ -1,0 +1,57 @@
+[2026-05-19T12:45:55+0000] host: instance-20260503-131121
+[2026-05-19T12:45:55+0000] PROJECT=jbonneau-mwalfish-9a0c
+[2026-05-19T12:45:55+0000] results dir: /home/alrshir/aegon/bench-results
+[2026-05-19T12:45:55+0000] ==== cluster-up START ====
+[2026-05-19T13:18:47+0000] ==== cluster-up OK in 1972s ====
+[2026-05-19T13:18:47+0000] ==== cluster-deploy START ====
+[2026-05-19T13:19:07+0000] ==== cluster-deploy FAILED rc=255 after 20s ====
+[2026-05-19T13:31:00+0000] host: instance-20260503-131121
+[2026-05-19T13:31:01+0000] PROJECT=jbonneau-mwalfish-9a0c
+[2026-05-19T13:31:01+0000] results dir: /home/alrshir/aegon/bench-results
+[2026-05-19T13:31:01+0000] ==== cluster-deploy START ====
+[2026-05-19T13:32:41+0000] ==== cluster-deploy FAILED rc=2 after 100s ====
+[2026-05-19T13:33:23+0000] host: instance-20260503-131121
+[2026-05-19T13:33:23+0000] PROJECT=jbonneau-mwalfish-9a0c
+[2026-05-19T13:33:23+0000] results dir: /home/alrshir/aegon/bench-results
+[2026-05-19T13:33:23+0000] ==== cluster-deploy START ====
+[2026-05-19T14:45:15+0000] ==== cluster-deploy OK in 4312s ====
+[2026-05-19T14:45:15+0000] ==== cluster-bootstrap START ====
+[2026-05-19T14:47:46+0000] ==== cluster-bootstrap FAILED rc=1 after 151s ====
+[2026-05-19T14:55:51+0000] host: instance-20260503-131121
+[2026-05-19T14:55:51+0000] PROJECT=jbonneau-mwalfish-9a0c
+[2026-05-19T14:55:51+0000] results dir: /home/alrshir/aegon/bench-results
+[2026-05-19T14:55:51+0000] ==== cluster-bootstrap START ====
+[2026-05-19T15:28:19+0000] ==== cluster-bootstrap FAILED rc=1 after 1948s ====
+[2026-05-19T15:46:35+0000] host: instance-20260503-131121
+[2026-05-19T15:46:35+0000] PROJECT=jbonneau-mwalfish-9a0c
+[2026-05-19T15:46:35+0000] results dir: /home/alrshir/aegon/bench-results
+[2026-05-19T15:46:35+0000] ==== cluster-bootstrap START ====
+[2026-05-19T17:15:17+0000] ==== cluster-bootstrap FAILED rc=1 after 5322s ====
+[2026-05-19T17:20:32+0000] host: instance-20260503-131121
+[2026-05-19T17:20:32+0000] PROJECT=jbonneau-mwalfish-9a0c
+[2026-05-19T17:20:32+0000] results dir: /home/alrshir/aegon/bench-results
+[2026-05-19T17:20:32+0000] ==== cluster-bootstrap START ====
+[2026-05-19T18:03:03+0000] host: instance-20260503-131121
+[2026-05-19T18:03:03+0000] PROJECT=jbonneau-mwalfish-9a0c
+[2026-05-19T18:03:03+0000] results dir: /home/alrshir/aegon/bench-results
+[2026-05-19T18:03:03+0000] ==== cluster-setup-bench START ====
+[2026-05-19T18:07:52+0000] ==== cluster-setup-bench FAILED rc=101 after 289s ====
+[2026-05-19T18:08:52+0000] host: instance-20260503-131121
+[2026-05-19T18:08:52+0000] PROJECT=jbonneau-mwalfish-9a0c
+[2026-05-19T18:08:52+0000] results dir: /home/alrshir/aegon/bench-results
+[2026-05-19T18:08:52+0000] ==== cluster-setup-bench START ====
+[2026-05-19T18:34:01+0000] ==== cluster-setup-bench FAILED rc=123 after 1509s ====
+[2026-05-19T18:40:54+0000] host: instance-20260503-131121
+[2026-05-19T18:40:54+0000] PROJECT=jbonneau-mwalfish-9a0c
+[2026-05-19T18:40:54+0000] results dir: /home/alrshir/aegon/bench-results
+[2026-05-19T18:40:54+0000] ==== cluster-setup-bench START ====
+[2026-05-19T19:00:04+0000] ==== cluster-setup-bench FAILED rc=255 after 1150s ====
+[2026-05-19T19:01:27+0000] host: instance-20260503-131121
+[2026-05-19T19:01:27+0000] PROJECT=jbonneau-mwalfish-9a0c
+[2026-05-19T19:01:27+0000] results dir: /home/alrshir/aegon/bench-results
+[2026-05-19T19:01:27+0000] ==== cluster-setup-bench START ====
+[2026-05-19T19:19:24+0000] ==== cluster-setup-bench FAILED rc=1 after 1077s ====
+[2026-05-19T19:21:52+0000] host: instance-20260503-131121
+[2026-05-19T19:21:52+0000] PROJECT=jbonneau-mwalfish-9a0c
+[2026-05-19T19:21:52+0000] results dir: /home/alrshir/aegon/bench-results
+[2026-05-19T19:21:52+0000] ==== cluster-setup-bench START ====

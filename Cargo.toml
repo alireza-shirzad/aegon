@@ -1,0 +1,101 @@
+[workspace]
+
+members = ["akd", "akd_core", "examples", "xtask"]
+resolver = "2"
+
+
+
+
+[workspace.dependencies]
+
+# Arkworks dependencies
+ark-serialize = { version = "0.5.0", default-features = false, features = [
+    "derive",
+] }
+ark-std = { version = "0.5.0", default-features = false }
+ark-ff = { version = "0.5.0", default-features = false }
+ark-ec = { version = "0.5.0", default-features = false }
+ark-poly = { version = "0.5.0", default-features = false }
+# Other dependencies
+rayon = { version = "1.5.2", default-features = false }
+thiserror = "2.0.12"
+sha2 = "0.10"
+fake = { version = "4.3.0", default-features = false }
+num-bigint = { version = "0.4.4", default-features = false }
+num-traits = { version = "0.2.14", default-features = false }
+displaydoc = { version = "0.2.3", default-features = false }
+rand_chacha = { version = "0.3.0", default-features = false }
+criterion = "0.5.1"
+anyhow = "1.0.97"
+once_cell = "1.18"
+ed25519-dalek = "2.2.0"
+# Testing dependencies
+ark-bn254 = "0.5.0"
+rand = "0.9.1"
+derivative = "2.2.0"
+ndarray = { version = "0.16.*", default-features = false }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "fmt", "std"] }
+
+[workspace.metadata.docs.rs]
+rustdoc-args = ["--html-in-header", "../docs-header.html"]
+
+# Pinned to exact revisions. These patches previously tracked git HEAD,
+# so a fresh clone resolved to whatever had landed upstream that day --
+# `Cargo.lock` is gitignored, so nothing else held the resolution still.
+# For a workspace whose published results are timing measurements of
+# field and curve arithmetic, that silently makes benchmarks
+# irreproducible across machines and across time.
+#
+# Bump deliberately, and re-run the benchmarks when you do.
+# Lint policy.
+#
+# CI runs `cargo clippy --workspace --all-targets -- -D warnings`, so anything
+# not allowed here fails the build. The allow-list below is a BACKLOG, not a
+# style preference: each entry is a lint that currently fires somewhere in the
+# tree and that we have not yet burned down. Removing an entry and fixing the
+# fallout is always welcome; adding one should be argued for.
+#
+# Counts are as of the initial open-source cleanup.
+[workspace.lints.rust]
+# `dead_code` is deliberately NOT allowed workspace-wide. The inherited
+# SEEMless/Merkle modules carry their own file-level `#![allow(dead_code)]`
+# with a reason, and the handful of superseded Aegon-side helpers carry
+# item-level ones. Anything new that goes unused shows up as a warning
+# rather than disappearing under a blanket allow.
+
+# `missing_docs` is enforced by the crate-level `#![deny(missing_docs)]` in
+# each crate's lib.rs, not from here: an inner attribute overrides this
+# table, so setting it here would be a no-op that reads as policy.
+
+[workspace.lints.clippy]
+# Deny the whole `clippy::all` group at negative priority so the
+# individual allows below (priority 0) win over it. CI therefore runs a
+# bare `cargo clippy --workspace --all-targets` with no extra flags:
+# passing `-D clippy::all` on the command line would override this table
+# and re-enable the backlog.
+all = { level = "deny", priority = -1 }
+
+doc_lazy_continuation        = "allow"  # ~39: rustdoc list indentation
+doc_overindented_list_items  = "allow"  # ~16: ditto
+unusual_byte_groupings       = "allow"  # ~39: domain-separation tag literals
+type_complexity              = "allow"  # ~12: generic PCS/engine signatures
+bool_assert_comparison       = "allow"  # ~12: assert_eq!(x, true) in tests
+too_many_arguments           = "allow"  #   5: publish/lookup plumbing
+needless_range_loop          = "allow"  #   4: index-parallel tensor walks
+result_large_err             = "allow"  #   1: AegonError carries context
+ptr_arg                      = "allow"  #   1: signature is trait-shaped
+unnecessary_unwrap            = "allow" #   1: guarded by a compound condition
+zero_prefixed_literal        = "allow"  #   2: inherited test vectors
+unnecessary_fallible_conversions = "allow"  # 2: inherited ecvrf tests
+extra_unused_type_parameters = "allow"  #   1: inherited test helper
+useless_vec                  = "allow"  #   1: inherited test helper
+manual_unwrap_or_default     = "allow"  #   1
+
+[patch.crates-io]
+ark-std = { git = "https://github.com/arkworks-rs/std", rev = "1693bc56d2ca6657b623f33a3f0b009d0ffeb892" }
+ark-poly = { git = "https://github.com/arkworks-rs/algebra.git", rev = "598a5fbabc1903c7bab6668ef8812bfdf2158723" }
+ark-ff = { git = "https://github.com/arkworks-rs/algebra.git", rev = "598a5fbabc1903c7bab6668ef8812bfdf2158723" }
+ark-ec = { git = "https://github.com/arkworks-rs/algebra.git", rev = "598a5fbabc1903c7bab6668ef8812bfdf2158723" }
+ark-serialize = { git = "https://github.com/arkworks-rs/algebra.git", rev = "598a5fbabc1903c7bab6668ef8812bfdf2158723" }
+ark-bn254 = { git = "https://github.com/arkworks-rs/algebra.git", rev = "598a5fbabc1903c7bab6668ef8812bfdf2158723" }

@@ -1,0 +1,14 @@
+{
+  "label": "small",
+  "shard_log_capacity": 22,
+  "kzh_k": 7,
+  "setup_seed": 0,
+  "gen_duration_secs": 4.656658,
+  "trim_duration_secs": 0.000001,
+  "compute_secs": 4.656659,
+  "communication_secs": 0.0,
+  "universal_params_bytes": 288679685,
+  "prover_param_bytes": 288679493,
+  "verifier_param_bytes": 1070493,
+  "h_t_entries": [4194304, 262144, 32768, 4096, 512, 64, 8]
+}

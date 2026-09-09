@@ -1,0 +1,30 @@
+{
+  "params": {
+    "shard_log_capacity": 22,
+    "true_log_capacity": 20,
+    "kzh_k": 7,
+    "n_shards": 1,
+    "log_n_shards": 0,
+    "target_fill_percent": 90,
+    "target_count": 131072,
+    "chunk_size": 131072,
+    "setup_seed": 42,
+    "prefill_seed": 1,
+    "private": true,
+    "endpoints": []
+  },
+  "setup_secs": 0.7426,
+  "milestones": [
+    {
+      "fill_percent": 100,
+      "users_migrated": 131072,
+      "elapsed_ms": 50828.7845,
+      "throughput_users_per_sec": 2578.70
+    }
+  ],
+  "total": {
+    "users_migrated": 131072,
+    "elapsed_ms": 50843.2838,
+    "throughput_users_per_sec": 2577.96
+  }
+}

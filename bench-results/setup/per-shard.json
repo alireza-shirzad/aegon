@@ -1,0 +1,14 @@
+{
+  "label": "per-shard",
+  "shard_log_capacity": 27,
+  "kzh_k": 9,
+  "setup_seed": 0,
+  "gen_duration_secs": 144.801235,
+  "trim_duration_secs": 0.000001,
+  "compute_secs": 144.801237,
+  "communication_secs": 0.0,
+  "universal_params_bytes": 9818272269,
+  "prover_param_bytes": 9818272077,
+  "verifier_param_bytes": 1204229,
+  "h_t_entries": [134217728, 16777216, 2097152, 262144, 32768, 4096, 512, 64, 8]
+}

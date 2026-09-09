@@ -1,0 +1,30 @@
+syntax = "proto3";
+
+package aegon.masking.v1;
+
+// Aegon ZK masking server. Holds a hot queue of opening-point-agnostic
+// `KZHKMaskingPackage` instances pre-built against a fixed SRS, and
+// hands them out to shards on demand. The server intentionally does
+// not know the opening point, the polynomial, or any per-shard
+// secrets — each package is consumed exactly once by a shard at the
+// moment of opening, where it is turned into a hiding opening over
+// the shard's chosen `(commitment, polynomial, point)`.
+service MaskingService {
+  // Pop one pre-built masking package from the server's queue. Blocks
+  // (server-side) until a package is available or the deadline hits.
+  rpc GetMaskingPackage(MaskingPackageRequest) returns (MaskingPackageResponse);
+}
+
+message MaskingPackageRequest {
+  // Number of variables of the polynomial the consumer is about to
+  // open. The server maintains one queue per `num_vars`; mismatches
+  // return `FAILED_PRECONDITION`.
+  uint32 num_vars = 1;
+}
+
+message MaskingPackageResponse {
+  // Canonical-uncompressed-serialised `KZHKMaskingPackage<E>`.
+  // Uncompressed encoding is deliberate — every package is consumed
+  // immediately, so deserialise speed dominates wire size.
+  bytes package_uncompressed = 1;
+}

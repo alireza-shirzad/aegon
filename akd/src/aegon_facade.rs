@@ -1,0 +1,176 @@
+// Copyright (c) Meta Platforms, Inc. and affiliates.
+//
+// This source code is licensed under the MIT license found in the
+// LICENSE file in the root directory of this source tree.
+
+//! Aegon-native verifier surface for AKD.
+//!
+//! These are the Category-3 additions: functionality that exists in
+//! the Aegon engine but has no analogue in the original SEEMless AKD
+//! API. They live alongside the legacy `client::lookup_verify`,
+//! `auditor::audit_verify`, etc. surface — those legacy functions
+//! `unimplemented!()` in the AKD-on-Aegon backend, and downstream
+//! callers should migrate to the entry points in this module.
+//!
+//! Concrete typing: everything is fixed to BN254 + KZH-k via the
+//! [`crate::directory::DirectoryE`] / [`crate::directory::DirectoryPcs`]
+//! aliases. We re-export type aliases so downstream callers do not
+//! need to spell out the generic parameters.
+
+use crate::directory::{decode_lookup_payload, DirectoryE, DirectoryPcs};
+use crate::errors::AkdError;
+use crate::{AkdLabel, LookupProof};
+
+use crate::aegon::verify_lookup_history as aegon_verify_value_history;
+use crate::aegon::verify_lookup_label_history as aegon_verify_label_history;
+use crate::aegon::verify_sharded_consistency_two_layer as aegon_verify_consistency;
+use crate::aegon::verify_sharded_invariance as aegon_verify_invariance;
+use crate::aegon::verify_sharded_lookup_two_layer as aegon_verify_lookup;
+use crate::aegon::AegonError;
+use crate::aegon::EcVrfHash;
+
+/// Sharded epoch commitment specialised to AKD's BN254+KZHK backend.
+pub type EpochCommitment = crate::aegon::ShardedEpochCommitment<DirectoryE, DirectoryPcs>;
+/// Sharded consistency proof specialised to AKD's BN254+KZHK backend.
+pub type ConsistencyProof = crate::aegon::ShardedConsistencyProofTwoLayer<DirectoryE, DirectoryPcs>;
+/// Sharded verifier context specialised to AKD's BN254+KZHK backend.
+pub type VerifierContext = crate::aegon::ShardedVerifierContext<DirectoryE, DirectoryPcs>;
+/// A label's value history, specialised to AKD's BN254+KZHK backend.
+pub type ValueHistory = crate::aegon::ShardedValueHistory<DirectoryE, DirectoryPcs>;
+/// A label's placement record, specialised to AKD's BN254+KZHK backend.
+pub type LabelHistory = crate::aegon::ShardedLabelHistory<DirectoryE, DirectoryPcs>;
+/// Roots recovered from a verified [`ValueHistory`].
+pub type VerifiedValueHistory = crate::aegon::VerifiedLookupHistory;
+/// Roots recovered from a verified [`LabelHistory`].
+pub type VerifiedLabelHistory = crate::aegon::VerifiedLookupLabelHistory;
+
+/// Aegon `AuditState` over BN254's scalar field.
+pub type AuditState =
+    crate::aegon::AuditState<<DirectoryE as ark_ec::pairing::Pairing>::ScalarField>;
+/// Sharded audit state over BN254's scalar field. Carries one
+/// Fiat-Shamir accumulator per chain group; `Default` is the
+/// single-group deployment.
+pub type ShardedAuditState =
+    crate::aegon::ShardedAuditState<<DirectoryE as ark_ec::pairing::Pairing>::ScalarField>;
+
+/// Verify a lookup proof produced by [`crate::Directory::lookup`]
+/// against an explicit Aegon `VerifierContext`.
+///
+/// The Merkle-shaped fields of the legacy [`LookupProof`] wire format
+/// are ignored; the real proof bytes ride inside `proof.commitment_nonce`
+/// (see [`crate::directory`] for the wire contract). The `epoch` and
+/// `value` fields are checked for consistency with the embedded
+/// payload.
+pub fn verify_lookup(
+    ctx: &VerifierContext,
+    label: &AkdLabel,
+    proof: &LookupProof,
+) -> Result<bool, AkdError> {
+    let (commitment, aegon_proof) = decode_lookup_payload(&proof.commitment_nonce)?;
+    if commitment.epoch != proof.epoch {
+        return Err(AkdError::Directory(crate::errors::DirectoryError::Publish(
+            format!(
+                "lookup proof epoch mismatch: outer {} vs payload {}",
+                proof.epoch, commitment.epoch
+            ),
+        )));
+    }
+    let value: crate::aegon::Value = proof.value.0.clone();
+    let label_bytes: crate::aegon::Label = label.0.clone();
+    verify_lookup_aegon(ctx, &commitment, &label_bytes, &value, &aegon_proof)
+}
+
+/// Direct passthrough for callers that already hold the typed Aegon
+/// commitment + proof (e.g. inside test code that does not bother
+/// going through the AKD wire format).
+pub fn verify_lookup_aegon(
+    ctx: &VerifierContext,
+    commitment: &EpochCommitment,
+    label: &crate::aegon::Label,
+    value: &crate::aegon::Value,
+    proof: &crate::aegon::ShardedLookupProofTwoLayer<DirectoryE, DirectoryPcs>,
+) -> Result<bool, AkdError> {
+    aegon_verify_lookup::<DirectoryE, DirectoryPcs, EcVrfHash>(ctx, commitment, label, value, proof)
+        .map_err(map_aegon_err)
+}
+
+/// Verify a single-transition sharded invariance relation. Callers walk
+/// consecutive pairs of the commitment chain returned by
+/// [`crate::Directory::aegon_epoch_commits`] and call this for each
+/// step, threading a single `ShardedAuditState`. No per-epoch proof bytes
+/// flow — verification reads only from the published
+/// `EpochCommitment`s (commitment-homomorphism path).
+pub fn verify_invariance(
+    ctx: &VerifierContext,
+    audit_state: &mut ShardedAuditState,
+    prev: &EpochCommitment,
+    next: &EpochCommitment,
+) -> Result<bool, AkdError> {
+    aegon_verify_invariance::<DirectoryE, DirectoryPcs>(ctx, audit_state, prev, next)
+        .map_err(map_aegon_err)
+}
+
+/// Verify a per-user consistency proof showing the user's slot did
+/// not change between two epochs `s0 < s1`. In the two-layer
+/// routing model the routing trail length is bundled in the proof
+/// itself, so no client-side pinning is required.
+pub fn verify_consistency(
+    ctx: &VerifierContext,
+    s0: &EpochCommitment,
+    s1: &EpochCommitment,
+    label: &AkdLabel,
+    proof: &ConsistencyProof,
+) -> Result<bool, AkdError> {
+    let label_bytes: crate::aegon::Label = label.0.clone();
+    aegon_verify_consistency::<DirectoryE, DirectoryPcs, EcVrfHash>(
+        ctx,
+        s0,
+        s1,
+        &label_bytes,
+        proof,
+    )
+    .map_err(map_aegon_err)
+}
+
+/// Verify a value-history bundle from
+/// [`crate::Directory::value_history`].
+///
+/// Checks, for every entry: both polynomial openings, the Merkle
+/// anchoring of the shard commitment at the epoch before and the
+/// epoch after the change, and finally the freshness attestation
+/// binding the newest entry to the live root. Returns the
+/// `(prev_root, post_root)` pair per entry plus the live root, for the
+/// caller to cross-check against whatever it trusts as the
+/// bulletin-board view.
+///
+/// This is the Aegon counterpart of AKD's `key_history_verify`. The
+/// evidence is different in kind — polynomial openings under a
+/// sharded Merkle root, not a Merkle version chain — so the roots
+/// come back for the caller to check rather than being validated
+/// against a single passed-in root hash.
+pub fn verify_value_history(
+    ctx: &VerifierContext,
+    history: &ValueHistory,
+) -> Result<VerifiedValueHistory, AkdError> {
+    aegon_verify_value_history::<DirectoryE, DirectoryPcs, EcVrfHash>(ctx, history)
+        .map_err(map_aegon_err)
+}
+
+/// Verify a placement record from
+/// [`crate::Directory::label_history`]: the stored `rand_index`
+/// opening under the placement epoch's shard commitment, its Merkle
+/// anchoring, and the live freshness opening proving the placement
+/// still holds.
+pub fn verify_label_history(
+    ctx: &VerifierContext,
+    history: &LabelHistory,
+) -> Result<VerifiedLabelHistory, AkdError> {
+    aegon_verify_label_history::<DirectoryE, DirectoryPcs, EcVrfHash>(ctx, history)
+        .map_err(map_aegon_err)
+}
+
+fn map_aegon_err(e: AegonError) -> AkdError {
+    AkdError::Directory(crate::errors::DirectoryError::Publish(format!(
+        "aegon verify: {e}"
+    )))
+}

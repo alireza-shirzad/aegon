@@ -1,0 +1,277 @@
+{
+  "params": {
+    "log_capacity": 22,
+    "regime": "small"
+  },
+  "setup_ms": 6618.0,
+  "lookup": {
+    "server_ms": 14.41,
+    "client_ms": 28.51,
+    "proof_bytes": 4784,
+    "client_key_bytes": 1070150
+  },
+  "audit": {
+    "audit_ms": 29.26,
+    "audit_bytes": 20009
+  },
+  "publish_keys": {
+    "by_batch": [
+      {
+        "log_update": 4,
+        "batch_size": 16,
+        "median_ms": 111.1,
+        "fastest_ms": 81.82,
+        "slowest_ms": 117.0,
+        "mean_ms": 111.0,
+        "bulletin_bytes": 13923
+      },
+      {
+        "log_update": 5,
+        "batch_size": 32,
+        "median_ms": 113.6,
+        "fastest_ms": 82.49,
+        "slowest_ms": 118.7,
+        "mean_ms": 113.4,
+        "bulletin_bytes": 13617
+      },
+      {
+        "log_update": 6,
+        "batch_size": 64,
+        "median_ms": 115.6,
+        "fastest_ms": 82.1,
+        "slowest_ms": 124.1,
+        "mean_ms": 116.0,
+        "bulletin_bytes": 13311
+      },
+      {
+        "log_update": 7,
+        "batch_size": 128,
+        "median_ms": 121.6,
+        "fastest_ms": 83.98,
+        "slowest_ms": 131.4,
+        "mean_ms": 120.8,
+        "bulletin_bytes": 12699
+      },
+      {
+        "log_update": 8,
+        "batch_size": 256,
+        "median_ms": 128.5,
+        "fastest_ms": 85.42,
+        "slowest_ms": 140.0,
+        "mean_ms": 126.6,
+        "bulletin_bytes": 12087
+      },
+      {
+        "log_update": 9,
+        "batch_size": 512,
+        "median_ms": 139.2,
+        "fastest_ms": 82.0,
+        "slowest_ms": 167.5,
+        "mean_ms": 139.2,
+        "bulletin_bytes": 11016
+      },
+      {
+        "log_update": 10,
+        "batch_size": 1024,
+        "median_ms": 170.0,
+        "fastest_ms": 84.15,
+        "slowest_ms": 247.7,
+        "mean_ms": 172.2,
+        "bulletin_bytes": 9027
+      },
+      {
+        "log_update": 11,
+        "batch_size": 2048,
+        "median_ms": 193.6,
+        "fastest_ms": 87.68,
+        "slowest_ms": 313.5,
+        "mean_ms": 204.5,
+        "bulletin_bytes": 7650
+      },
+      {
+        "log_update": 12,
+        "batch_size": 4096,
+        "median_ms": 250.9,
+        "fastest_ms": 93.54,
+        "slowest_ms": 425.3,
+        "mean_ms": 258.2,
+        "bulletin_bytes": 6120
+      },
+      {
+        "log_update": 13,
+        "batch_size": 8192,
+        "median_ms": 323.2,
+        "fastest_ms": 99.54,
+        "slowest_ms": 631.4,
+        "mean_ms": 338.1,
+        "bulletin_bytes": 4590
+      },
+      {
+        "log_update": 14,
+        "batch_size": 16384,
+        "median_ms": 415.3,
+        "fastest_ms": 113.1,
+        "slowest_ms": 919.0,
+        "mean_ms": 466.4,
+        "bulletin_bytes": 3366
+      },
+      {
+        "log_update": 15,
+        "batch_size": 32768,
+        "median_ms": 622.3,
+        "fastest_ms": 151.0,
+        "slowest_ms": 1200.0,
+        "mean_ms": 641.0,
+        "bulletin_bytes": 2448
+      },
+      {
+        "log_update": 16,
+        "batch_size": 65536,
+        "median_ms": 870.5,
+        "fastest_ms": 233.3,
+        "slowest_ms": 1628.0,
+        "mean_ms": 909.9,
+        "bulletin_bytes": 1683
+      },
+      {
+        "log_update": 17,
+        "batch_size": 131072,
+        "median_ms": 1427.0,
+        "fastest_ms": 424.0,
+        "slowest_ms": 2574.0,
+        "mean_ms": 1461.0,
+        "bulletin_bytes": 1224
+      }
+    ]
+  },
+  "publish_reg": {
+    "by_batch": [
+      {
+        "log_update": 4,
+        "batch_size": 16,
+        "median_ms": 1998.0,
+        "fastest_ms": 1998.0,
+        "slowest_ms": 1998.0,
+        "mean_ms": 1998.0,
+        "bulletin_bytes": 6086
+      },
+      {
+        "log_update": 5,
+        "batch_size": 32,
+        "median_ms": 1928.0,
+        "fastest_ms": 1928.0,
+        "slowest_ms": 1928.0,
+        "mean_ms": 1928.0,
+        "bulletin_bytes": 6126
+      },
+      {
+        "log_update": 6,
+        "batch_size": 64,
+        "median_ms": 1966.0,
+        "fastest_ms": 1966.0,
+        "slowest_ms": 1966.0,
+        "mean_ms": 1966.0,
+        "bulletin_bytes": 6126
+      },
+      {
+        "log_update": 7,
+        "batch_size": 128,
+        "median_ms": 2013.9999999999998,
+        "fastest_ms": 2013.9999999999998,
+        "slowest_ms": 2013.9999999999998,
+        "mean_ms": 2013.9999999999998,
+        "bulletin_bytes": 6126
+      },
+      {
+        "log_update": 8,
+        "batch_size": 256,
+        "median_ms": 1967.0,
+        "fastest_ms": 1967.0,
+        "slowest_ms": 1967.0,
+        "mean_ms": 1967.0,
+        "bulletin_bytes": 6126
+      },
+      {
+        "log_update": 9,
+        "batch_size": 512,
+        "median_ms": 1931.0,
+        "fastest_ms": 1931.0,
+        "slowest_ms": 1931.0,
+        "mean_ms": 1931.0,
+        "bulletin_bytes": 6126
+      },
+      {
+        "log_update": 10,
+        "batch_size": 1024,
+        "median_ms": 1939.0,
+        "fastest_ms": 1939.0,
+        "slowest_ms": 1939.0,
+        "mean_ms": 1939.0,
+        "bulletin_bytes": 6126
+      },
+      {
+        "log_update": 11,
+        "batch_size": 2048,
+        "median_ms": 1957.0,
+        "fastest_ms": 1957.0,
+        "slowest_ms": 1957.0,
+        "mean_ms": 1957.0,
+        "bulletin_bytes": 6126
+      },
+      {
+        "log_update": 12,
+        "batch_size": 4096,
+        "median_ms": 2072.0,
+        "fastest_ms": 2072.0,
+        "slowest_ms": 2072.0,
+        "mean_ms": 2072.0,
+        "bulletin_bytes": 6126
+      },
+      {
+        "log_update": 13,
+        "batch_size": 8192,
+        "median_ms": 2116.0,
+        "fastest_ms": 2116.0,
+        "slowest_ms": 2116.0,
+        "mean_ms": 2116.0,
+        "bulletin_bytes": 6126
+      },
+      {
+        "log_update": 14,
+        "batch_size": 16384,
+        "median_ms": 2165.0,
+        "fastest_ms": 2165.0,
+        "slowest_ms": 2165.0,
+        "mean_ms": 2165.0,
+        "bulletin_bytes": 6126
+      },
+      {
+        "log_update": 15,
+        "batch_size": 32768,
+        "median_ms": 2307.0,
+        "fastest_ms": 2307.0,
+        "slowest_ms": 2307.0,
+        "mean_ms": 2307.0,
+        "bulletin_bytes": 6126
+      },
+      {
+        "log_update": 16,
+        "batch_size": 65536,
+        "median_ms": 2488.0,
+        "fastest_ms": 2488.0,
+        "slowest_ms": 2488.0,
+        "mean_ms": 2488.0,
+        "bulletin_bytes": 6126
+      },
+      {
+        "log_update": 17,
+        "batch_size": 131072,
+        "median_ms": 2906.0,
+        "fastest_ms": 2906.0,
+        "slowest_ms": 2906.0,
+        "mean_ms": 2906.0,
+        "bulletin_bytes": 6126
+      }
+    ]
+  }
+}

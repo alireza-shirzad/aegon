@@ -1,0 +1,33 @@
+[2026-06-25T11:44:22+0000] host: instance-20260503-131121
+[2026-06-25T11:44:22+0000] PROJECT=jbonneau-mwalfish-9a0c  N_SHARDS=128  SHARD_LOG_CAPACITY=27  KZH_K=9  ZONE=us-west1-a
+[2026-06-25T11:44:22+0000] PUBLISH_BATCH_SIZES=4096,8192,16384,32768,65536,131072
+[2026-06-25T11:44:22+0000] MIGRATION_REGIME=large
+[2026-06-25T11:44:22+0000] results dir: /home/alrshir/aegon/bench-results
+[2026-06-25T11:44:22+0000] PUBLISH_WARMUP_BATCH_SIZE not set; using migration-best K=1048576 from /home/alrshir/aegon/bench-results/migration/large_best_k.txt
+[2026-06-25T11:44:22+0000] PUBLISH_WARMUP_BATCH_SIZE=1048576 (used by lookup-bench for between-fill preload climbs)
+[2026-06-25T11:44:22+0000] starting watchdog loop (per-shard probe every 60s) -> /home/alrshir/aegon/bench-results/large-watchdog.log
+[2026-06-25T11:44:22+0000] watchdog PID=431208
+[2026-06-25T11:44:22+0000] ==== large-lookup-bench START ====
+[2026-06-25T12:36:34+0000] ==== large-lookup-bench OK in 3132s ====
+[2026-06-25T12:36:34+0000] watchdog stopped (PID=431208)
+[2026-06-25T12:36:34+0000] fetching postmortems (parallel, 128 shards) -> /home/alrshir/aegon/bench-results/large-postmortem-20260625T114422
+[2026-06-25T12:37:57+0000] postmortems saved to /home/alrshir/aegon/bench-results/large-postmortem-20260625T114422
+[2026-06-25T12:37:57+0000] ==== LARGE CLUSTER DONE ====
+[2026-06-25T12:37:57+0000] JSON outputs:
+/home/alrshir/aegon/bench-results/_backup-pre-nfs-refactor/setup/large-per-shard.json
+/home/alrshir/aegon/bench-results/lookup/large-combined-partial.json
+/home/alrshir/aegon/bench-results/lookup/large-combined.json
+/home/alrshir/aegon/bench-results/lookup/large-partial-1-3pct.json
+/home/alrshir/aegon/bench-results/lookup/large-partial-1-4pct.json
+/home/alrshir/aegon/bench-results/lookup/large-stream-ladder-v11c-combined.json
+/home/alrshir/aegon/bench-results/lookup/large-stream-ladder-v11c-patch4-combined.json
+/home/alrshir/aegon/bench-results/lookup/large-stream-ladder-v12-fill1-combined.json
+/home/alrshir/aegon/bench-results/lookup/large-stream-ladder-v13c-fill1-combined.json
+/home/alrshir/aegon/bench-results/lookup/large-stream-ladder-v14-channels8-fill1-combined.json
+/home/alrshir/aegon/bench-results/lookup/large-stream-ladder-v15-masking12-instrumented-combined.json
+/home/alrshir/aegon/bench-results/lookup/large-stream-ladder-v8-combined.json
+/home/alrshir/aegon/bench-results/migration/large_K1048576.json
+/home/alrshir/aegon/bench-results/migration/large_K16384.json
+/home/alrshir/aegon/bench-results/migration/large_K262144.json
+/home/alrshir/aegon/bench-results/migration/large_K65536.json
+/home/alrshir/aegon/bench-results/setup/large_cluster.json
