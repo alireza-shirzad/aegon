@@ -16,6 +16,18 @@ env:
   CARGO_PROFILE_DEV_DEBUG: "0"
   CARGO_PROFILE_TEST_DEBUG: "0"
   CARGO_INCREMENTAL: "0"
+  # Rayon sizes its global pool from the core count, and a standard runner
+  # has two cores. That is not enough: the private-mode value-history path
+  # nests parallel work inside the KZH-k/arkworks MSM, and with a small pool
+  # the outer job blocks in `LockLatch::wait_and_reset` waiting for a worker
+  # that every other job is also waiting for. Measured on one test in
+  # isolation: 1, 2, 3 and 4 threads all hang; 8 passes. Threads are cheap
+  # and these are blocked, not runnable, so oversubscribing two cores costs
+  # context switches rather than throughput.
+  #
+  # This is a workaround, not a fix -- the same deadlock hits anyone running
+  # the suite on a small machine. See "Known limitations" in README.md.
+  RAYON_NUM_THREADS: "8"
 
 jobs:
   check:

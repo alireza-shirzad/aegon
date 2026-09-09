@@ -433,6 +433,25 @@ thread limit inside arkworks' MSM.
 A few tests are `#[ignore]`d, all of them slow benchmarks rather than known
 failures; each carries its reason in the attribute, and `--ignored` runs them.
 
+#### Known limitation: the suite needs a reasonably wide rayon pool
+
+Set `RAYON_NUM_THREADS=8` (or run on a machine with at least that many cores)
+before `cargo test`. Rayon sizes its global pool from the core count, and on a
+narrow one the private-mode value-history path deadlocks: it nests parallel
+work inside the KZH-k/arkworks MSM, and the outer job ends up blocked in
+`LockLatch::wait_and_reset` waiting for a worker that every other job is also
+waiting for. Measured on `private_mode_lookup_history_round_trip` in isolation,
+1/2/3/4 threads all hang and 8 passes; CI therefore pins `RAYON_NUM_THREADS: 8`
+on its two-core runners.
+
+Threads are cheap here — the ones in question are blocked rather than runnable,
+so oversubscribing a small machine costs context switches, not throughput.
+
+This is the same root cause as the `akd_core` + `parallel` interaction above,
+and it is a real bug rather than a test artifact: any deployment on a narrow
+machine can hit it. Fixing it properly means bounding the nesting inside the
+MSM, which is not yet done.
+
 #### In-process shards now carry their own store
 
 Until recently an in-process shard had no storage: its publish write-sink
