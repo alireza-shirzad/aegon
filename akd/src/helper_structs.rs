@@ -27,7 +27,11 @@ impl EpochHash {
 #[derive(Clone, Debug)]
 /// Info needed for a lookup of a user for an epoch
 pub struct LookupInfo {
+    // Part of the SEEMless/Merkle surface Aegon replaced behind `Directory`; unreachable on this backend.
+    #[allow(dead_code)]
     pub(crate) value_state: ValueState,
+    // Part of the SEEMless/Merkle surface Aegon replaced behind `Directory`; unreachable on this backend.
+    #[allow(dead_code)]
     pub(crate) marker_version: u64,
     pub(crate) existent_label: NodeLabel,
     pub(crate) marker_label: NodeLabel,

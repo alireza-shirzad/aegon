@@ -3,6 +3,11 @@
 // This source code is licensed under the MIT license found in the
 // LICENSE file in the root directory of this source tree.
 
+// The SEEMless/Merkle append-only-tree node. Aegon replaced this backend
+// behind `Directory`, so much of it is unreachable; it is retained rather
+// than deleted to keep the divergence from facebook/akd reviewable.
+#![allow(dead_code)]
+
 //! The implementation of a node for a history patricia tree
 
 use crate::errors::{AkdError, StorageError, TreeNodeError};

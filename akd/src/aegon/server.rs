@@ -131,7 +131,9 @@ where
 /// Each `Vec<u8>` is the ECVRF proof bytes (`VRF_PROOF_BYTES = 80`).
 #[derive(Clone, Debug, Default, CanonicalSerialize, CanonicalDeserialize)]
 pub struct CachedLabelVrfProofs {
+    /// The coordinator's inter-shard routing chain, ctr 0 first.
     pub vrf_proofs_shard: Vec<Vec<u8>>,
+    /// This shard's intra-shard `H_slot` probe chain, ctr 0 first.
     pub vrf_proofs_slot: Vec<Vec<u8>>,
 }
 
@@ -188,6 +190,12 @@ where
     pub fullness_proof: Option<Vec<u8>>,
 }
 
+/// A single Aegon shard: the polynomials, their commitments, and the
+/// per-epoch state needed to publish and to serve lookups.
+///
+/// Also acts as an in-process
+/// [`ShardHandle`](super::shard_grpc::ShardHandle), so a `ShardedAegon`
+/// can drive shards directly instead of over gRPC.
 pub struct Aegon<E, P, H = Sha256Hash>
 where
     E: Pairing,
@@ -217,6 +225,16 @@ where
     /// at construction time. In non-hiding mode the field stays
     /// `None` and value-side openings degrade to plain non-ZK proofs.
     masking_client: Option<std::sync::Arc<dyn super::masking::MaskingSource<E, P>>>,
+
+    /// This shard's own key-value store, when one is attached.
+    ///
+    /// Mirrors the DB the gRPC `ShardServiceImpl` holds for a remote
+    /// shard: raw values, the value-history sliding window, label
+    /// placements, and the per-epoch history openings all live here,
+    /// keyed shard-locally. `None` means `DbSource::None` -- reads
+    /// return empty and the publish write-sink discards, which is the
+    /// behaviour every in-memory test relies on.
+    db: Option<Box<dyn super::db::Db>>,
 
     epoch: u64,
 
@@ -328,21 +346,37 @@ struct SetupBaseline<E: Pairing, P: AegonPcs<E>> {
 ///   which clears `pending`.
 #[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
 pub struct AegonCheckpoint<E: Pairing, P: AegonPcs<E>> {
+    /// Epoch this checkpoint was taken at.
     pub epoch: u64,
+    /// Sparse `index` polynomial, as `(slot, value)` pairs.
     pub index_poly_evals: Vec<(u64, E::ScalarField)>,
+    /// Sparse `value` polynomial, as `(slot, value)` pairs.
     pub value_poly_evals: Vec<(u64, E::ScalarField)>,
+    /// Sparse randomized `index` polynomial.
     pub rand_index_poly_evals: Vec<(u64, E::ScalarField)>,
+    /// Sparse randomized `value` polynomial.
     pub rand_value_poly_evals: Vec<(u64, E::ScalarField)>,
+    /// Commitment to `index_poly_evals`.
     pub index_commitment: P::Commitment,
+    /// PCS prover state for the `index` commitment.
     pub index_state: P::State,
+    /// Commitment to `value_poly_evals`.
     pub value_commitment: P::Commitment,
+    /// PCS prover state for the `value` commitment.
     pub value_state: P::State,
+    /// Commitment to `rand_index_poly_evals`.
     pub rand_index_commitment: P::Commitment,
+    /// PCS prover state for the `rand_index` commitment.
     pub rand_index_state: P::State,
+    /// Commitment to `rand_value_poly_evals`.
     pub rand_value_commitment: P::Commitment,
+    /// PCS prover state for the `rand_value` commitment.
     pub rand_value_state: P::State,
+    /// Chain scalar for the index chain at this epoch.
     pub r_index: E::ScalarField,
+    /// Chain scalar for the value chain at this epoch.
     pub r_value: E::ScalarField,
+    /// Label table as `(label, slot_bits, probe_ctr)` triples.
     pub label_table_entries: Vec<(Vec<u8>, Vec<bool>, u64)>,
 }
 
@@ -626,6 +660,7 @@ where
             verifier_param,
             audit_fs: config.audit_fs,
             masking_client,
+            db: None,
             epoch: 0,
             index_poly,
             value_poly,
@@ -667,6 +702,40 @@ where
         self.masking_client = Some(source);
     }
 
+    /// Attach this shard's key-value store.
+    ///
+    /// An in-process shard is otherwise storage-less: its publish
+    /// write-sink discards and its reads return empty, which is
+    /// correct for `DbSource::None` but silently wrong for any real
+    /// `DbSource`. `ShardedAegon::setup` calls this so an in-process
+    /// deployment behaves like the gRPC one, where the DB hangs off
+    /// `ShardServiceImpl`.
+    pub(crate) fn set_db(&mut self, db: Box<dyn super::db::Db>) {
+        self.db = Some(db);
+    }
+
+    /// Whether a key-value store is attached (see [`Aegon::set_db`]).
+    pub fn has_db(&self) -> bool {
+        self.db.is_some()
+    }
+
+    /// Borrow this shard's store, if one is attached.
+    pub(crate) fn db(&self) -> Option<&dyn super::db::Db> {
+        self.db.as_deref()
+    }
+
+    /// Take the store out so a `&mut self` method can still be handed a
+    /// write-sink closure that borrows it. Pair with
+    /// [`Aegon::restore_db`].
+    pub(crate) fn take_db(&mut self) -> Option<Box<dyn super::db::Db>> {
+        self.db.take()
+    }
+
+    /// Put back what [`Aegon::take_db`] removed.
+    pub(crate) fn restore_db(&mut self, db: Option<Box<dyn super::db::Db>>) {
+        self.db = db;
+    }
+
     /// Attach a VRF prover so `publish_batch` can compute and cache the
     /// per-label H_slot proofs locally. The coordinator still computes
     /// H_shard proofs (it holds the inter-shard routing state) and
@@ -701,6 +770,7 @@ where
         self.retain_epoch_polys = retain;
     }
 
+    /// Clone of this shard's PCS verifier key.
     pub fn verifier_param(&self) -> P::VerifierParam {
         self.verifier_param.clone()
     }
@@ -894,6 +964,7 @@ where
             verifier_param,
             audit_fs: config.audit_fs,
             masking_client,
+            db: None,
             epoch: ckpt.epoch,
             index_poly,
             value_poly,
@@ -1132,12 +1203,15 @@ where
         Ok(())
     }
 
+    /// Log2 of this shard's slot count.
     pub fn log_capacity(&self) -> usize {
         self.log_capacity
     }
+    /// KZH-k block dimensions `[d_1, ..., d_k]`.
     pub fn dims(&self) -> &[usize] {
         &self.dims
     }
+    /// The shard's current epoch.
     pub fn epoch(&self) -> u64 {
         self.epoch
     }
@@ -1150,6 +1224,13 @@ where
             .with_audit_fs(self.audit_fs)
     }
 
+    /// This shard's commitment at the current epoch.
+    ///
+    /// Reads the live commitment fields, so during a publish -- after
+    /// phase 1 has mutated them but before the epoch counter is
+    /// incremented -- it returns the *new* commitments under the old
+    /// epoch number. Use [`Aegon::epoch_commitment`] when you need the
+    /// commitment a specific past epoch actually published.
     pub fn current_commitment(&self) -> EpochCommitment<E, P> {
         EpochCommitment {
             epoch: self.epoch,
@@ -2300,17 +2381,34 @@ where
         // Capture the *previous* per-shard EpochCommitment BEFORE we
         // advance the epoch below. Used by the inline DbOps build at
         // the end of this method as the anchor for value_history
-        // entries. `None` when there's no prior publish (genesis):
-        // `self.epoch` is the about-to-be-old epoch; on the first
-        // publish it's still 0, meaning "no prior epoch commit to
-        // anchor against" and value_history writes are skipped — same
-        // condition the legacy `prev_shard_commit.is_some()` guard
-        // used.
-        let prev_shard_commit: Option<EpochCommitment<E, P>> = if self.epoch == 0 {
-            None
-        } else {
-            Some(self.current_commitment())
-        };
+        // entries.
+        //
+        // This is always `Some`, including on the first publish. It
+        // used to be `None` at `self.epoch == 0` on the reasoning that
+        // genesis has "no prior epoch commit to anchor against", which
+        // skipped value_history writes for the entire first publish --
+        // so a label's placement never appeared in its history, only
+        // later updates did.
+        //
+        // That reasoning conflated "epoch 0" with "no commitment".
+        // Epoch 0's per-shard commitment exists, is published on the
+        // bulletin board, and commits the zero polynomials -- which is
+        // precisely the case `StoredValueHistoryEntry` documents for
+        // `rand_value_pre_eval` ("Zero on a brand-new placement"). So
+        // anchoring the first epoch's entries against it is both
+        // well-defined and what the entry format already expected.
+        //
+        // It also has to come from `epoch_commitment(self.epoch)`, not
+        // `current_commitment()`. By this point phase 1 and the earlier
+        // part of phase 2 have already overwritten `self.*_commitment`
+        // with the NEW epoch's values, while `self.epoch` has not yet
+        // been incremented -- so `current_commitment()` here returns the
+        // new commitments wearing the old epoch number. Anchoring
+        // `rand_value_pre_proof` (an opening against the OLD polynomial)
+        // to that gives "history entry rand_value_pre opening did not
+        // verify". `epoch_history` still holds the previous epoch's
+        // snapshot until it is replaced after the increment below.
+        let prev_shard_commit: Option<EpochCommitment<E, P>> = self.epoch_commitment(self.epoch);
 
         // Finalize the new epoch. `self.*` already holds the new
         // commitments / states / polynomials (mutated in place during
@@ -2935,6 +3033,8 @@ where
         }
     }
 
+    /// Prove the current value of `label` on this shard: the
+    /// open-addressing probe walk plus the opening at the resolved slot.
     pub fn lookup(&self, label: &Label) -> Result<LookupProof<E, P>, AegonError> {
         let (bool_index, ctr0) = self
             .label_table
@@ -3060,6 +3160,8 @@ where
 
 // ---------- helpers --------------------------------------------------
 
+// Superseded during the per-shard-DB / two-layer refactors. Kept for reference rather than deleted; nothing calls it.
+#[allow(dead_code)]
 /// One-shot "open this poly at `slot_bits`" used by the slot-driven
 /// API. Returns the evaluation alongside the proof. Used by the
 /// sharded coordinator (which has already computed `slot_bits`) and
@@ -3142,6 +3244,8 @@ where
         fields(nnz = poly.evaluations.len())
     )
 )]
+// Superseded during the per-shard-DB / two-layer refactors. Kept for reference rather than deleted; nothing calls it.
+#[allow(dead_code)]
 fn commit_with_aux<E, P>(
     pp: &P::ProverParam,
     poly: &SparseMultilinearExtension<E::ScalarField>,
@@ -3253,6 +3357,8 @@ fn audit_path_csprng() -> rand_chacha::ChaCha20Rng {
     feature = "tracing_instrument",
     tracing::instrument(level = "debug", skip_all, name = "Aegon::UpdateRand")
 )]
+// Superseded during the per-shard-DB / two-layer refactors. Kept for reference rather than deleted; nothing calls it.
+#[allow(dead_code)]
 fn update_rand<F: ark_ff::Field>(
     rand: &mut SparseMultilinearExtension<F>,
     prev: &SparseMultilinearExtension<F>,

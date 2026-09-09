@@ -197,7 +197,7 @@
 //! these checks are repeated iteratively.
 //!
 
-#![warn(missing_docs)]
+#![deny(missing_docs)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(feature = "nostd", no_std)]
 extern crate alloc;

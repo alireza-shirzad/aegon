@@ -41,6 +41,8 @@ where
         .expect("transcript challenge")
 }
 
+// Superseded during the per-shard-DB / two-layer refactors. Kept for reference rather than deleted; nothing calls it.
+#[allow(dead_code)]
 /// Derive a random evaluation point of length `num_vars` for the
 /// invariance check on a given chain. Bound to all four commitments
 /// involved (prev/next of the data poly, prev/next of the rand poly) so a

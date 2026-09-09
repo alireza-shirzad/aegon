@@ -93,7 +93,11 @@ use super::types::AegonPcs;
 /// `CanonicalSerialize` alongside the rest of `EpochCommitment`.
 #[derive(Debug, CanonicalSerialize, CanonicalDeserialize)]
 pub struct BlindingEqProof<E: Pairing, P: AegonPcs<E>> {
+    /// The prover's nonce commitment `k · h`, carried in commitment
+    /// shape so the auditor can `Add`/`Sub` it against the residue.
     pub r_commit: P::Commitment,
+    /// The Schnorr response `k + e · c`, where `e` is the Fiat-Shamir
+    /// challenge and `c` the blinding difference being proven.
     pub response: E::ScalarField,
 }
 

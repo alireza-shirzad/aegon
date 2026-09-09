@@ -451,6 +451,11 @@ where
 // arrival rate this gives even load across all N servers; under a
 // burst it still spreads cleanly because every individual fetch picks
 // the next slot.
+/// A round-robin pool of [`MaskingClient`]s.
+///
+/// Each `fetch_package` call takes the next server in sequence, so a
+/// shard's masking throughput scales with the size of the pool rather
+/// than with any single server.
 pub struct MaskingClientPool<E, P>
 where
     E: Pairing,
@@ -486,6 +491,8 @@ where
         })
     }
 
+    /// Fetch one precomputed masking package for a `num_vars`-variable
+    /// opening, from the next server in the rotation.
     pub fn fetch_package(&self, num_vars: usize) -> Result<P::MaskingPackage, AegonError> {
         let i = self
             .cursor

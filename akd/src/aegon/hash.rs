@@ -235,6 +235,8 @@ fn vrf_alpha_with_tag(tag: &[u8], ctr: u64, label: &[u8]) -> Vec<u8> {
     alpha
 }
 
+// Superseded during the per-shard-DB / two-layer refactors. Kept for reference rather than deleted; nothing calls it.
+#[allow(dead_code)]
 /// Legacy single-layer alpha (`b"aegon.h_bits"` tag). Retained so the
 /// unsharded code paths and existing unit tests stay byte-stable.
 /// New code should use `vrf_alpha_with_tag` with a layer-specific tag.

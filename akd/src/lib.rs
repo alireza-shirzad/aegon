@@ -540,7 +540,7 @@
 //!
 //!
 
-#![warn(missing_docs)]
+#![deny(missing_docs)]
 #![allow(clippy::multiple_crate_versions)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 

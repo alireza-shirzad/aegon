@@ -156,6 +156,7 @@ where
     H: HashSuite<E::ScalarField> + Send + Sync + 'static,
     EpochCommitment<E, P>: CanonicalSerialize + Send + Sync + 'static,
 {
+    /// Wrap a live `ShardedAegon` as a gRPC coordinator service.
     pub fn new(state: ShardedAegon<E, P, H>) -> Self {
         Self {
             state: Arc::new(AsyncRwLock::new(state)),
@@ -637,14 +638,21 @@ where
 /// Connection config for `CoordinatorClient`. Plaintext by default;
 /// optional TLS via `with_tls_ca`.
 pub struct CoordinatorClientConfig<E: Pairing, P: AegonPcs<E>> {
+    /// Coordinator address, e.g. `http://10.0.0.2:50100`.
     pub endpoint: String,
+    /// Verifier bundle used to check whatever the coordinator returns.
     pub verifier_ctx: ShardedVerifierContext<E, P>,
+    /// PEM-encoded CA certificate. `None` means plaintext HTTP/2.
     pub tls_ca_pem: Option<Vec<u8>>,
+    /// Domain to match against the server certificate, when it differs
+    /// from the host in `endpoint`.
     pub tls_domain: Option<String>,
+    /// Connect timeout; `None` uses tonic's default.
     pub connect_timeout: Option<std::time::Duration>,
 }
 
 impl<E: Pairing, P: AegonPcs<E>> CoordinatorClientConfig<E, P> {
+    /// A plaintext config with no TLS and tonic's default timeout.
     pub fn new(endpoint: String, verifier_ctx: ShardedVerifierContext<E, P>) -> Self {
         Self {
             endpoint,
@@ -655,11 +663,13 @@ impl<E: Pairing, P: AegonPcs<E>> CoordinatorClientConfig<E, P> {
         }
     }
 
+    /// Enable TLS, verifying the server against this PEM-encoded CA.
     pub fn with_tls_ca(mut self, ca_pem: Vec<u8>) -> Self {
         self.tls_ca_pem = Some(ca_pem);
         self
     }
 
+    /// Override the domain matched against the server certificate.
     pub fn with_tls_domain(mut self, domain: impl Into<String>) -> Self {
         self.tls_domain = Some(domain.into());
         self

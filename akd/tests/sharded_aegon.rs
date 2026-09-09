@@ -138,17 +138,6 @@ fn two_layer_publish_lookup_round_trip_multi_shard() {
 }
 
 #[test]
-#[ignore = "KNOWN FAILURE (regression, c152aa5 2026-06-25): value history is \
-           unimplemented for in-process shards. That commit moved history from \
-           the coordinator's DB -- which `lookup_history` used to read directly, \
-           and which is what made this test pass when it was written -- to \
-           per-shard DBs behind `ShardHandle::fetch_full_value_history`. Only \
-           the gRPC shard implements that: in-process reads fall through to the \
-           trait default returning `Ok(vec![])`, and in-process writes are \
-           dropped by the `|_chunk| Ok(())` sink in `impl ShardHandle for \
-           Aegon`. So `ShardTransport::InProcess` has no history at any \
-           `DbSource`. Cluster deployments use `Remote` and are unaffected. \
-           Fix: give the in-process shard a DB handle. Run with `--ignored`."]
 fn two_layer_publish_lookup_history_round_trip() {
     use akd::aegon::{verify_lookup_history, verify_lookup_label_history, DbSource};
 
@@ -514,17 +503,6 @@ fn private_mode_publish_lookup_round_trip() {
 }
 
 #[test]
-#[ignore = "KNOWN FAILURE (regression, c152aa5 2026-06-25): value history is \
-           unimplemented for in-process shards. That commit moved history from \
-           the coordinator's DB -- which `lookup_history` used to read directly, \
-           and which is what made this test pass when it was written -- to \
-           per-shard DBs behind `ShardHandle::fetch_full_value_history`. Only \
-           the gRPC shard implements that: in-process reads fall through to the \
-           trait default returning `Ok(vec![])`, and in-process writes are \
-           dropped by the `|_chunk| Ok(())` sink in `impl ShardHandle for \
-           Aegon`. So `ShardTransport::InProcess` has no history at any \
-           `DbSource`. Cluster deployments use `Remote` and are unaffected. \
-           Fix: give the in-process shard a DB handle. Run with `--ignored`."]
 fn private_mode_lookup_history_round_trip() {
     // Heavier round-trip under private=true with RocksDB: publish
     // twice, fetch lookup_history (which produces per-epoch §6.4
@@ -836,17 +814,6 @@ fn print_rss(stage: &str) {
 }
 
 #[test]
-#[ignore = "KNOWN FAILURE (regression, c152aa5 2026-06-25): value history is \
-           unimplemented for in-process shards. That commit moved history from \
-           the coordinator's DB -- which `lookup_history` used to read directly, \
-           and which is what made this test pass when it was written -- to \
-           per-shard DBs behind `ShardHandle::fetch_full_value_history`. Only \
-           the gRPC shard implements that: in-process reads fall through to the \
-           trait default returning `Ok(vec![])`, and in-process writes are \
-           dropped by the `|_chunk| Ok(())` sink in `impl ShardHandle for \
-           Aegon`. So `ShardTransport::InProcess` has no history at any \
-           `DbSource`. Cluster deployments use `Remote` and are unaffected. \
-           Fix: give the in-process shard a DB handle. Run with `--ignored`."]
 fn rocks_backend_publish_lookup_history_round_trip() {
     use akd::aegon::{verify_lookup_history, verify_lookup_label_history, DbSource};
 

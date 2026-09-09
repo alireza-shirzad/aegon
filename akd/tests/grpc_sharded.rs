@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use akd::aegon::shard_grpc::ShardServer;
 use akd::aegon::{
-    verify_sharded_lookup_two_layer, AegonConfig, EcVrfHash, Sha256Hash, ShardTransport,
+    verify_sharded_lookup_two_layer, AegonConfig, DbSource, EcVrfHash, Sha256Hash, ShardTransport,
     ShardedAegon, ShardedAegonConfig, ShardedVerifierContext, VrfProver, BENCH_VRF_SEED,
 };
 use akd_core::aegon_crypto::pcs::kzhk::structs::KZHKConfig;
@@ -51,7 +51,28 @@ fn build_local_aegon(log_capacity: usize, seed: u64) -> Aegon {
 /// address (as `http://...` URI for tonic's `connect`) plus a join
 /// handle. The handle isn't awaited; tokio aborts the task at test
 /// end.
-async fn spawn_shard(aegon: Aegon) -> (String, JoinHandle<Result<(), tonic::transport::Error>>) {
+/// Unique on-disk store for one spawned shard. The gRPC shard answers
+/// `FetchValue`, `FetchValueHistory` and `FetchLabelPlacement` out of its
+/// own DB; started with `ShardServer::new` it has none and those RPCs fail
+/// with `Config("shard has no DB configured ...")`. Each shard gets its own
+/// directory: `key_history_openings_local(epoch)` has no shard
+/// discriminator, so a shared store would let shards clobber each other.
+fn shard_db_path(tag: &str, shard_id: u32) -> std::path::PathBuf {
+    let nonce: u64 = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0xC0FFEE);
+    std::env::temp_dir().join(format!(
+        "aegon-grpc-{tag}-{}-{nonce}-shard{shard_id}",
+        std::process::id()
+    ))
+}
+
+async fn spawn_shard(
+    aegon: Aegon,
+    tag: &str,
+    shard_id: u32,
+) -> (String, JoinHandle<Result<(), tonic::transport::Error>>) {
     // Bind to port 0 to get an ephemeral port; we use a TcpListener
     // first to discover the port, then pass the address to tonic.
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -60,7 +81,12 @@ async fn spawn_shard(aegon: Aegon) -> (String, JoinHandle<Result<(), tonic::tran
     let addr: SocketAddr = listener.local_addr().expect("local_addr");
     drop(listener);
 
-    let server = ShardServer::<Bn254, Pcs, Sha256Hash>::new(aegon);
+    let server = ShardServer::<Bn254, Pcs, Sha256Hash>::new_with_checkpoint(
+        aegon,
+        DbSource::Rocks(shard_db_path(tag, shard_id)),
+        shard_id,
+    )
+    .expect("ShardServer with a RocksDB store");
     let handle = tokio::spawn(async move { server.serve(addr).await });
     // Give the server a moment to actually start accepting before
     // the client tries to connect.
@@ -69,9 +95,6 @@ async fn spawn_shard(aegon: Aegon) -> (String, JoinHandle<Result<(), tonic::tran
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "KNOWN FAILURE: the gRPC shard under test is started without a KV \
-           backend, so FetchValue returns Config(\"shard has no DB configured\"). \
-           Needs the test harness to attach a DbSource. Run with `--ignored`."]
 async fn grpc_sharded_publish_lookup_verify_roundtrip() {
     // Two shards, each with log_capacity=6 (64 slots/shard).
     // Coordinator total log_capacity = 6 + 1 = 7.
@@ -84,8 +107,8 @@ async fn grpc_sharded_publish_lookup_verify_roundtrip() {
     let aegon_a = build_local_aegon(shard_log_capacity, 0xAEC0_A);
     let aegon_b = build_local_aegon(shard_log_capacity, 0xAEC0_B);
 
-    let (addr_a, _h_a) = spawn_shard(aegon_a).await;
-    let (addr_b, _h_b) = spawn_shard(aegon_b).await;
+    let (addr_a, _h_a) = spawn_shard(aegon_a, "roundtrip", 0).await;
+    let (addr_b, _h_b) = spawn_shard(aegon_b, "roundtrip", 1).await;
 
     // Coordinator: build a sharded config pointing at the two
     // remote endpoints. SrsSource::DangerouslyGenerate here is only
@@ -179,9 +202,6 @@ async fn grpc_sharded_publish_lookup_verify_roundtrip() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "KNOWN FAILURE: the gRPC shard under test is started without a KV \
-           backend, so FetchValue returns Config(\"shard has no DB configured\"). \
-           Needs the test harness to attach a DbSource. Run with `--ignored`."]
 async fn grpc_sharded_two_layer_publish_lookup_verify_roundtrip() {
     // Two-layer-routing variant of the gRPC round-trip. Exercises
     // the PublishBatch + FindLabelSlot RPCs end-to-end against
@@ -194,8 +214,8 @@ async fn grpc_sharded_two_layer_publish_lookup_verify_roundtrip() {
     let aegon_a = build_local_aegon(shard_log_capacity, 0xAEC0_A);
     let aegon_b = build_local_aegon(shard_log_capacity, 0xAEC0_B);
 
-    let (addr_a, _h_a) = spawn_shard(aegon_a).await;
-    let (addr_b, _h_b) = spawn_shard(aegon_b).await;
+    let (addr_a, _h_a) = spawn_shard(aegon_a, "twolayer", 0).await;
+    let (addr_b, _h_b) = spawn_shard(aegon_b, "twolayer", 1).await;
 
     let cfg = ShardedAegonConfig::<Bn254, Pcs>::builder()
         .shard_log_capacity(shard_log_capacity)
@@ -290,6 +310,8 @@ fn build_local_aegon_vrf(log_capacity: usize, seed: u64) -> AegonVrf {
 
 async fn spawn_shard_vrf(
     aegon: AegonVrf,
+    tag: &str,
+    shard_id: u32,
 ) -> (String, JoinHandle<Result<(), tonic::transport::Error>>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -297,16 +319,18 @@ async fn spawn_shard_vrf(
     let addr: SocketAddr = listener.local_addr().expect("local_addr");
     drop(listener);
 
-    let server = ShardServer::<Bn254, Pcs, EcVrfHash>::new(aegon);
+    let server = ShardServer::<Bn254, Pcs, EcVrfHash>::new_with_checkpoint(
+        aegon,
+        DbSource::Rocks(shard_db_path(tag, shard_id)),
+        shard_id,
+    )
+    .expect("ShardServer with a RocksDB store");
     let handle = tokio::spawn(async move { server.serve(addr).await });
     tokio::time::sleep(Duration::from_millis(100)).await;
     (format!("http://{addr}"), handle)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "KNOWN FAILURE: the gRPC shard under test is started without a KV \
-           backend, so FetchValue returns Config(\"shard has no DB configured\"). \
-           Needs the test harness to attach a DbSource. Run with `--ignored`."]
 async fn grpc_sharded_publish_lookup_verify_roundtrip_ecvrf() {
     let shard_log_capacity = 6usize;
     let log_n_shards = 1usize;
@@ -314,8 +338,8 @@ async fn grpc_sharded_publish_lookup_verify_roundtrip_ecvrf() {
     let aegon_a = build_local_aegon_vrf(shard_log_capacity, 0xAEC0_A);
     let aegon_b = build_local_aegon_vrf(shard_log_capacity, 0xAEC0_B);
 
-    let (addr_a, _h_a) = spawn_shard_vrf(aegon_a).await;
-    let (addr_b, _h_b) = spawn_shard_vrf(aegon_b).await;
+    let (addr_a, _h_a) = spawn_shard_vrf(aegon_a, "ecvrf", 0).await;
+    let (addr_b, _h_b) = spawn_shard_vrf(aegon_b, "ecvrf", 1).await;
 
     let cfg = ShardedAegonConfig::<Bn254, Pcs>::builder()
         .shard_log_capacity(shard_log_capacity)

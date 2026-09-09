@@ -13,7 +13,9 @@ use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 
 use super::sigma::BlindingEqProof;
 
+/// A dictionary key, as opaque bytes.
 pub type Label = Vec<u8>;
+/// A dictionary value, as opaque bytes.
 pub type Value = Vec<u8>;
 
 /// Trait alias for the PCS shape Aegon needs everywhere. Avoids
@@ -56,10 +58,17 @@ where
 /// commitments to verify their slot did not change between two epochs.
 #[derive(Debug, CanonicalSerialize, CanonicalDeserialize)]
 pub struct EpochCommitment<E: Pairing, P: AegonPcs<E>> {
+    /// Epoch number this commitment describes.
     pub epoch: u64,
+    /// Commitment to the `index` polynomial (label -> slot).
     pub index_commitment: P::Commitment,
+    /// Commitment to the `value` polynomial (slot -> H_F(value)).
     pub value_commitment: P::Commitment,
+    /// Commitment to the randomized index polynomial, which carries the
+    /// index chain across epochs.
     pub rand_index_commitment: P::Commitment,
+    /// Commitment to the randomized value polynomial, which carries the
+    /// value chain across epochs.
     pub rand_value_commitment: P::Commitment,
     /// Sigma proof tying the published `rand_value_commitment` back to
     /// the chain rule. `Some` whenever the SRS is hiding (paper §7
@@ -67,6 +76,7 @@ pub struct EpochCommitment<E: Pairing, P: AegonPcs<E>> {
     /// non-hiding SRS, in which case the audit checks the chain
     /// equation exactly. See [`super::sigma`] for the protocol.
     pub audit_value_blinding_proof: Option<BlindingEqProof<E, P>>,
+    /// Ties the commitment to its pairing without storing one.
     pub _e: PhantomData<E>,
 }
 
@@ -89,13 +99,20 @@ impl<E: Pairing, P: AegonPcs<E>> Clone for EpochCommitment<E, P> {
 /// verifier.
 #[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
 pub struct LookupProof<E: Pairing, P: AegonPcs<E>> {
+    /// Probe counter at which the label's slot was found, so the
+    /// verifier can replay the same open-addressing walk.
     pub ctr0: u64,
+    /// One `(evaluation, proof)` per probed slot along that walk: the
+    /// occupied slots skipped over, then the label's own.
     pub probes: Vec<(E::ScalarField, P::Proof)>,
+    /// `value(slot) = H_F(value)` at the resolved slot.
     pub value_evaluation: E::ScalarField,
+    /// Opening proof for `value_evaluation`.
     pub value_proof: P::Proof,
 }
 
 impl<E: Pairing, P: AegonPcs<E>> LookupProof<E, P> {
+    /// How many slots the open-addressing walk had to probe.
     pub fn num_probes(&self) -> usize {
         self.probes.len()
     }
@@ -109,7 +126,9 @@ impl<E: Pairing, P: AegonPcs<E>> LookupProof<E, P> {
 /// initial state (before the first transition) is `(0, 0)`.
 #[derive(Clone, Copy, Debug)]
 pub struct AuditState<F: Zero> {
+    /// Running Fiat-Shamir scalar for the index chain.
     pub r_index: F,
+    /// Running Fiat-Shamir scalar for the value chain.
     pub r_value: F,
 }
 
@@ -167,9 +186,13 @@ impl<F: Zero> Default for ShardedAuditState<F> {
 /// equality `eval_s0 == eval_s1`.
 #[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
 pub struct RandPair<E: Pairing, P: AegonPcs<E>> {
+    /// Evaluation at the earlier epoch `s0`.
     pub eval_s0: E::ScalarField,
+    /// Opening proof for `eval_s0` against the `s0` commitment.
     pub proof_s0: P::Proof,
+    /// Evaluation at the later epoch `s1`.
     pub eval_s1: E::ScalarField,
+    /// Opening proof for `eval_s1` against the `s1` commitment.
     pub proof_s1: P::Proof,
 }
 
@@ -187,8 +210,13 @@ pub struct RandPair<E: Pairing, P: AegonPcs<E>> {
 ///   slot `x_ctr0`.
 #[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
 pub struct ConsistencyProof<E: Pairing, P: AegonPcs<E>> {
+    /// Probe counter at which the user's slot was resolved; fixes the
+    /// probe walk the verifier replays.
     pub ctr0: u64,
+    /// One `rand_index` opening pair per probe point along that walk,
+    /// establishing the slot still belongs to the same label.
     pub index_witnesses: Vec<RandPair<E, P>>,
+    /// The `rand_value` opening pair at the user's own slot.
     pub value_witness: RandPair<E, P>,
 }
 
@@ -220,24 +248,29 @@ pub struct HistoryOpeningEntry<E: Pairing, P: AegonPcs<E>> {
     /// `rand_index_commitment`. Will be zero for a brand-new slot,
     /// but the proof binds it to the prior commitment regardless.
     pub rand_index_pre_eval: E::ScalarField,
+    /// Opening proof for `rand_index_pre_eval` against the prior-epoch `rand_index_commitment`.
     pub rand_index_pre_proof: P::Proof,
     /// `rand_value_n(slot)` opened against the prior-epoch
     /// `rand_value_commitment`. Same caveat — zero on fresh slots.
     pub rand_value_pre_eval: E::ScalarField,
+    /// Opening proof for `rand_value_pre_eval` against the prior-epoch `rand_value_commitment`.
     pub rand_value_pre_proof: P::Proof,
     /// `rand_index_{n+1}(slot)` opened against the new-epoch
     /// `rand_index_commitment`. Equals `r_index_n · H_F(label)` on a
     /// fresh slot.
     pub rand_index_post_eval: E::ScalarField,
+    /// Opening proof for `rand_index_post_eval` against the new-epoch `rand_index_commitment`.
     pub rand_index_post_proof: P::Proof,
     /// `rand_value_{n+1}(slot)` opened against the new-epoch
     /// `rand_value_commitment`. Equals `r_value_n · H_F(value)` on a
     /// fresh slot.
     pub rand_value_post_eval: E::ScalarField,
+    /// Opening proof for `rand_value_post_eval` against the new-epoch `rand_value_commitment`.
     pub rand_value_post_proof: P::Proof,
     /// `value_{n+1}(slot) = H_F(value)` opened against the new-epoch
     /// `value_commitment`.
     pub value_post_eval: E::ScalarField,
+    /// Opening proof for `value_post_eval` against the new-epoch `value_commitment`.
     pub value_post_proof: P::Proof,
 }
 
@@ -270,13 +303,16 @@ pub struct ValueChangeEntry<E: Pairing, P: AegonPcs<E>> {
     pub slot_bits: Vec<bool>,
     /// `rand_value_n(slot)` at the prior-epoch rand_value commitment.
     pub rand_value_pre_eval: E::ScalarField,
+    /// Opening proof for `rand_value_pre_eval` against the prior-epoch `rand_value_commitment`.
     pub rand_value_pre_proof: P::Proof,
     /// `rand_value_{n+1}(slot)` at the new-epoch rand_value commitment.
     pub rand_value_post_eval: E::ScalarField,
+    /// Opening proof for `rand_value_post_eval` against the new-epoch `rand_value_commitment`.
     pub rand_value_post_proof: P::Proof,
     /// `value_{n+1}(slot) = H_F(value)` at the new-epoch value
     /// commitment.
     pub value_post_eval: E::ScalarField,
+    /// Opening proof for `value_post_eval` against the new-epoch `value_commitment`.
     pub value_post_proof: P::Proof,
 }
 
@@ -291,7 +327,11 @@ pub struct ValueChangeEntry<E: Pairing, P: AegonPcs<E>> {
 /// shows up in `value_changes`.
 #[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
 pub struct HistoryOpenings<E: Pairing, P: AegonPcs<E>> {
+    /// Full 5-opening bundles, one per brand-new placement in this
+    /// publish (the §6.4 audit path).
     pub entries: Vec<HistoryOpeningEntry<E, P>>,
+    /// 3-opening bundles, one per slot whose value changed in this
+    /// publish (the user-facing value-history feature).
     pub value_changes: Vec<ValueChangeEntry<E, P>>,
 }
 

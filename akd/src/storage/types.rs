@@ -99,6 +99,8 @@ impl crate::storage::Storable for ValueState {
 }
 
 impl ValueState {
+    // Part of the SEEMless/Merkle surface Aegon replaced behind `Directory`; unreachable on this backend.
+    #[allow(dead_code)]
     pub(crate) fn new(
         username: AkdLabel,
         plaintext_val: AkdValue,

@@ -422,42 +422,29 @@ them that way. Test the two crates in **separate** invocations: a combined
 and runs its SRS-heavy unit tests under nested rayon pools, exhausting the
 thread limit inside arkworks' MSM.
 
-Some tests are `#[ignore]`d. Each carries its reason in the attribute; run
-them with `--ignored`. Three groups are known failures rather than slow
-benchmarks:
+A few tests are `#[ignore]`d, all of them slow benchmarks rather than known
+failures; each carries its reason in the attribute, and `--ignored` runs them.
 
-| Test | Status |
-| :--- | :--- |
-| `sharded_aegon::*_history_round_trip` (3) | **Known failure** — value history is unimplemented for in-process shards; see below. |
-| `grpc_sharded::*` (3) | **Known failure.** The harness starts the gRPC shard without a KV backend, so `FetchValue` fails. Needs a `DbSource` attached in the test setup. |
-| `univariate_polynomial::test_build_l*` (2) | **Known failure.** Vendored HyperPlonk helper with no caller in Aegon; does not affect the KZH-k path. |
+#### In-process shards now carry their own store
 
-#### Value history is unimplemented for in-process shards
+Until recently an in-process shard had no storage: its publish write-sink
+discarded every chunk and its reads returned empty, so `ShardTransport::InProcess`
+served empty values and empty history at *any* `DbSource` -- silently, as `Ok`.
+`DbSource` configured only the coordinator. Two things changed:
 
-A regression, introduced by `c152aa5` (2026-06-25). Value history used to live
-in the coordinator's DB, and `ShardedAegon::lookup_history` read it there
-directly. That commit moved it to per-shard DBs behind
-`ShardHandle::fetch_full_value_history`. Only the gRPC shard implements that
-method: it reads its own store with `lrange`. The in-process shard implements
-neither half —
-
-* reads fall through to the trait default,
-  `fn fetch_value_history(..) -> Ok(Vec::new())` in `shard_grpc.rs`;
-* writes are discarded by the `|_chunk| Ok(())` sink in
-  `impl ShardHandle for Aegon`, because the `Aegon` struct has no DB field.
-
-So `ShardTransport::InProcess` returns empty history at *any* `DbSource`; the
-`DbSource` in an in-process config only configures the coordinator. The three
-tests were written before the move, passed then, and have failed since — there
-was no CI to notice.
-
-**Cluster deployments are unaffected.** The benchmark scripts pass
-`--endpoints`, which selects `ShardTransport::Remote`, where both halves are
-implemented.
-
-Fixing it means giving the in-process shard a DB handle (or routing its writes
-and reads back through the coordinator's). That is a design choice about what
-`DbSource` should mean for in-process deployments, so it is left open.
+* `Aegon` now holds an optional `Box<dyn Db>`. `ShardedAegon::setup` opens one
+  RocksDB per in-process shard under `<db-path>.shards/<i>`, mirroring the
+  per-shard store a gRPC deployment gets. Each shard needs its own, because
+  `key_history_openings_local(epoch)` carries no shard discriminator --
+  shards sharing a keyspace would overwrite each other every epoch. For that
+  reason `DbSource::Redis` combined with `ShardTransport::InProcess` is now a
+  setup-time error rather than silent corruption.
+* A history entry's `prev_shard_commit` is read from the epoch snapshot rather
+  than the live commitment fields. By the time it was captured, phase 1 had
+  already overwritten those with the *new* epoch's values while `self.epoch`
+  was still the old number, so entries anchored their `rand_value_pre_proof`
+  against the wrong commitment. The genesis publish was also skipped entirely,
+  so a label's placement never appeared in its own history.
 
 The upstream SEEMless/Merkle suites (`append_only_zks::tests` and
 `akd::tests`, 74 tests) are behind the off-by-default `upstream_tests`

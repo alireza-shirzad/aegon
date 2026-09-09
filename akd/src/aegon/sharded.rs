@@ -67,7 +67,10 @@ pub enum ShardTransport {
     /// is the address of shard `i` (e.g. `"http://10.0.0.7:50051"`
     /// or `"https://aegon-shard-7.svc.cluster.local:50051"`). Length
     /// must equal `1 << log_n_shards`.
-    Remote { endpoints: Vec<String> },
+    Remote {
+        /// Address of shard `i` at index `i`.
+        endpoints: Vec<String>,
+    },
 }
 
 /// Where the SRS / (prover_param, verifier_param) come from.
@@ -155,6 +158,7 @@ pub struct ShardedAegonConfig<E: Pairing, P: AegonPcs<E>> {
     /// Every verifier in the deployment must be configured with the
     /// same value; a mismatch makes every audit fail.
     pub chain_groups: usize,
+    /// Ties the config to its pairing without storing one.
     pub _e: PhantomData<E>,
 }
 
@@ -166,6 +170,7 @@ impl<E: Pairing, P: AegonPcs<E>> ShardedAegonConfig<E, P> {
         ShardedAegonConfigBuilder::new()
     }
 
+    /// Number of shards, `1 << log_n_shards`.
     pub fn n_shards(&self) -> usize {
         1usize << self.log_n_shards
     }
@@ -294,6 +299,7 @@ impl<E: Pairing, P: AegonPcs<E>> Default for ShardedAegonConfigBuilder<E, P> {
 }
 
 impl<E: Pairing, P: AegonPcs<E>> ShardedAegonConfigBuilder<E, P> {
+    /// An empty builder with every field unset.
     pub fn new() -> Self {
         Self {
             shard_log_capacity: None,
@@ -402,6 +408,8 @@ impl<E: Pairing, P: AegonPcs<E>> ShardedAegonConfigBuilder<E, P> {
         self
     }
 
+    /// Validate and finalize. Errors when a required field is missing
+    /// or when `chain_groups` does not divide the shard count exactly.
     pub fn build(self) -> Result<ShardedAegonConfig<E, P>, AegonError> {
         let shard_log_capacity = self.shard_log_capacity.ok_or_else(|| {
             AegonError::Config("ShardedAegonConfig: shard_log_capacity is required".into())
@@ -550,8 +558,11 @@ struct RecoveredState<E: Pairing, P: AegonPcs<E>> {
 /// branch is needed in callers — empty path is handled uniformly.
 #[derive(Debug)]
 pub struct ShardedEpochCommitment<E: Pairing, P: AegonPcs<E>> {
+    /// Epoch this commitment describes.
     pub epoch: u64,
+    /// Merkle root over the per-shard leaves; the dictionary commitment.
     pub merkle_root: EpochDigest,
+    /// One commitment per shard, indexed by shard id.
     pub per_shard: Vec<EpochCommitment<E, P>>,
     /// Sibling-only Merkle paths, one per shard. Derived from
     /// `per_shard` and never serialised — see the type-level docs.
@@ -677,7 +688,9 @@ where
 /// without having to re-prove residency.
 #[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize, PartialEq, Eq)]
 pub struct LabelSlot {
+    /// Which shard owns this slot.
     pub shard_id: u32,
+    /// Slot address within that shard, low bit first.
     pub slot_bits: Vec<bool>,
 }
 
@@ -691,11 +704,17 @@ pub struct LabelSlot {
 /// confirms `evaluation == H_F(value)`.
 #[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
 pub struct ShardedValueProof<E: Pairing, P: AegonPcs<E>> {
+    /// Which shard owns this slot.
     pub shard_id: u32,
+    /// Slot address within that shard, low bit first.
     pub slot_bits: Vec<bool>,
+    /// The owning shard's per-shard commitment (the Merkle leaf).
     pub leaf: EpochCommitment<E, P>,
+    /// Sibling path from `leaf` up to the sharded root.
     pub merkle_path: Vec<EpochDigest>,
+    /// `value(slot)` at the resolved slot.
     pub evaluation: E::ScalarField,
+    /// Opening proof for `evaluation`.
     pub proof: P::Proof,
 }
 
@@ -732,13 +751,16 @@ pub struct StoredValueHistoryEntry<E: Pairing, P: AegonPcs<E>> {
     /// `rand_value_n(slot)` at the prior-epoch rand_value commitment
     /// inside `prev_shard_commit`. Zero on a brand-new placement.
     pub rand_value_pre_eval: E::ScalarField,
+    /// Opening proof for `rand_value_pre_eval` against the prior epoch.
     pub rand_value_pre_proof: P::Proof,
     /// `rand_value_{n+1}(slot)` at the new-epoch rand_value commitment.
     pub rand_value_post_eval: E::ScalarField,
+    /// Opening proof for `rand_value_post_eval` against the new epoch.
     pub rand_value_post_proof: P::Proof,
     /// `value_{n+1}(slot) = H_F(value)` at the new-epoch value
     /// commitment.
     pub value_post_eval: E::ScalarField,
+    /// Opening proof for `value_post_eval` against the new epoch.
     pub value_post_proof: P::Proof,
     /// Per-shard commitment at epoch (epoch - 1) — the leaf the
     /// `rand_value_pre_proof` anchors against. Carries
@@ -767,7 +789,9 @@ pub struct StoredValueHistoryEntry<E: Pairing, P: AegonPcs<E>> {
 /// is **not** a pure DB read.
 #[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
 pub struct ShardedValueHistory<E: Pairing, P: AegonPcs<E>> {
+    /// The label these entries belong to.
     pub label: Vec<u8>,
+    /// Most recent first, at most `HISTORY_WINDOW` entries.
     pub entries: Vec<StoredValueHistoryEntry<E, P>>,
     /// Live opening of the latest `rand_value_poly` at the label's
     /// slot, anchored under the live sharded root. `None` iff
@@ -805,6 +829,7 @@ pub struct StoredLabelPlacement<E: Pairing, P: AegonPcs<E>> {
     /// `r_index_{epoch-1} · H_F(label)` on a fresh placement (the
     /// pre-placement value is zero because the slot was empty).
     pub rand_index_eval: E::ScalarField,
+    /// Opening proof for the rand_index evaluation above.
     pub rand_index_proof: P::Proof,
     /// Per-shard `EpochCommitment` at the placement epoch — anchors
     /// the placement opening.
@@ -829,6 +854,7 @@ pub struct StoredLabelPlacement<E: Pairing, P: AegonPcs<E>> {
 /// displaced it, no migration has occurred.
 #[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
 pub struct ShardedLabelHistory<E: Pairing, P: AegonPcs<E>> {
+    /// The label this placement record belongs to.
     pub label: Vec<u8>,
     /// `None` iff the label is unknown to the coordinator
     /// (placement record has never been written for it).
@@ -843,11 +869,14 @@ pub struct ShardedLabelHistory<E: Pairing, P: AegonPcs<E>> {
 /// `rand_index_commitment` (rather than `rand_value`).
 #[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
 pub struct FreshnessAttestationLabel<E: Pairing, P: AegonPcs<E>> {
+    /// Which shard owns this slot.
     pub shard_id: u32,
+    /// Slot address within that shard, low bit first.
     pub slot_bits: Vec<bool>,
     /// `rand_index_live(slot)` — the live shard's rand_index poly
     /// evaluated at the slot.
     pub rand_index_current_eval: E::ScalarField,
+    /// Opening proof for the current-epoch rand_index evaluation.
     pub rand_index_current_proof: P::Proof,
     /// Live per-shard `EpochCommitment` for `shard_id`.
     pub shard_commit: EpochCommitment<E, P>,
@@ -885,6 +914,7 @@ pub struct FreshnessAttestation<E: Pairing, P: AegonPcs<E>> {
     /// `rand_value_live(slot)` — the live shard's rand_value poly
     /// evaluated at the slot.
     pub rand_value_current_eval: E::ScalarField,
+    /// Opening proof for the current-epoch rand_value evaluation.
     pub rand_value_current_proof: P::Proof,
     /// Live per-shard `EpochCommitment` for `shard_id`. Carries
     /// `rand_value_commitment` (used) plus the other per-shard
@@ -950,6 +980,7 @@ pub struct ShardSlotProbe<E: Pairing, P: AegonPcs<E>> {
     /// `index_poly(slot_bits)` opened against
     /// `dest_leaf.index_commitment`.
     pub evaluation: E::ScalarField,
+    /// Opening proof for the evaluation above.
     pub proof: P::Proof,
 }
 
@@ -1110,10 +1141,15 @@ pub struct FullLabelHistory<E: Pairing, P: AegonPcs<E>> {
 ///     the final probe must hold exactly `H_F(label)`.
 #[derive(Debug, CanonicalSerialize, CanonicalDeserialize)]
 pub struct ShardedLabelProofTwoLayer<E: Pairing, P: AegonPcs<E>> {
+    /// Inter-shard routing probes, ctr 0 first.
     pub route: Vec<ShardRoutingProbe>,
+    /// Shard the routing walk landed on.
     pub dest_shard_id: u32,
+    /// That shard's per-shard commitment (the Merkle leaf).
     pub dest_leaf: EpochCommitment<E, P>,
+    /// Sibling path from `dest_leaf` up to the sharded root.
     pub dest_merkle_path: Vec<EpochDigest>,
+    /// Intra-shard slot probes on the destination shard.
     pub slots: Vec<ShardSlotProbe<E, P>>,
 }
 
@@ -1134,10 +1170,12 @@ impl<E: Pairing, P: AegonPcs<E>> Clone for ShardedLabelProofTwoLayer<E, P> {
 /// two-layer routing model.
 #[derive(Debug, CanonicalSerialize, CanonicalDeserialize)]
 pub struct ShardedLookupProofTwoLayer<E: Pairing, P: AegonPcs<E>> {
+    /// Residency half: which slot this label owns.
     pub label_proof: ShardedLabelProofTwoLayer<E, P>,
     /// `value_poly(final_slot_bits)` opened against
     /// `dest_leaf.value_commitment`.
     pub value_evaluation: E::ScalarField,
+    /// Opening proof for the value evaluation.
     pub value_proof: P::Proof,
 }
 
@@ -1163,9 +1201,13 @@ pub struct ShardSlotRandPair<E: Pairing, P: AegonPcs<E>> {
     /// RFC 9381 ECVRF proof for `(slot_ctr, label)`, empty in
     /// SHA-256 deployments.
     pub vrf_proof: Vec<u8>,
+    /// `rand_index(slot)` at the earlier epoch `s0`.
     pub rand_index_s0_eval: E::ScalarField,
+    /// Opening proof for `rand_index_s0_eval`.
     pub rand_index_s0_proof: P::Proof,
+    /// `rand_index(slot)` at the later epoch `s1`.
     pub rand_index_s1_eval: E::ScalarField,
+    /// Opening proof for `rand_index_s1_eval`.
     pub rand_index_s1_proof: P::Proof,
 }
 
@@ -1197,16 +1239,27 @@ impl<E: Pairing, P: AegonPcs<E>> Clone for ShardSlotRandPair<E, P> {
 ///     epochs (its s0 == s1 equality attests "value unchanged").
 #[derive(Debug, CanonicalSerialize, CanonicalDeserialize)]
 pub struct ShardedConsistencyProofTwoLayer<E: Pairing, P: AegonPcs<E>> {
+    /// Inter-shard routing probes, ctr 0 first.
     pub route: Vec<ShardRoutingProbe>,
+    /// Shard the routing walk landed on.
     pub dest_shard_id: u32,
+    /// Destination shard's commitment at the earlier epoch `s0`.
     pub dest_leaf_s0: EpochCommitment<E, P>,
+    /// Destination shard's commitment at the later epoch `s1`.
     pub dest_leaf_s1: EpochCommitment<E, P>,
+    /// Sibling path from `dest_leaf_s0` up to the `s0` root.
     pub dest_merkle_path_s0: Vec<EpochDigest>,
+    /// Sibling path from `dest_leaf_s1` up to the `s1` root.
     pub dest_merkle_path_s1: Vec<EpochDigest>,
+    /// Per-slot rand_index opening pairs along the probe walk.
     pub slots: Vec<ShardSlotRandPair<E, P>>,
+    /// `rand_value(slot)` at the earlier epoch `s0`.
     pub value_rand_s0_eval: E::ScalarField,
+    /// Opening proof for `value_rand_s0_eval`.
     pub value_rand_s0_proof: P::Proof,
+    /// `rand_value(slot)` at the later epoch `s1`.
     pub value_rand_s1_eval: E::ScalarField,
+    /// Opening proof for `value_rand_s1_eval`.
     pub value_rand_s1_proof: P::Proof,
 }
 
@@ -1236,6 +1289,7 @@ impl<E: Pairing, P: AegonPcs<E>> Clone for ShardedConsistencyProofTwoLayer<E, P>
 pub struct ShardedVerifierContext<E: Pairing, P: AegonPcs<E>> {
     /// `inner.log_capacity` is the *per-shard* log_capacity.
     pub inner: VerifierContext<E, P>,
+    /// Log2 of the shard count.
     pub log_n_shards: usize,
     /// `Some(verifier)` when the deployment runs with `EcVrfHash`
     /// (RFC 9381 ECVRF) and `verify_lookup_label` should consume
@@ -1249,6 +1303,7 @@ pub struct ShardedVerifierContext<E: Pairing, P: AegonPcs<E>> {
 }
 
 impl<E: Pairing, P: AegonPcs<E>> ShardedVerifierContext<E, P> {
+    /// Build a sharded verifier context over a single shard's context.
     pub fn new(inner: VerifierContext<E, P>, log_n_shards: usize) -> Self {
         Self {
             inner,
@@ -1282,10 +1337,12 @@ impl<E: Pairing, P: AegonPcs<E>> ShardedVerifierContext<E, P> {
         self
     }
 
+    /// Log2 of one shard's slot count.
     pub fn shard_log_capacity(&self) -> usize {
         self.inner.log_capacity
     }
 
+    /// Log2 of the whole dictionary's slot count.
     pub fn total_log_capacity(&self) -> usize {
         self.inner.log_capacity + self.log_n_shards
     }
@@ -1301,6 +1358,8 @@ where
     H: HashSuite<E::ScalarField>,
 {
     shards: Vec<Box<dyn super::shard_grpc::ShardHandle<E, P, H>>>,
+    // Derivable from the shard config; nothing reads it.
+    #[allow(dead_code)]
     /// PCS block dims; cached at setup so the coordinator can encode
     /// boolean slot vectors to canonical PCS indices without going
     /// through a per-call method on the ShardHandle. All shards
@@ -1457,7 +1516,7 @@ where
                 };
                 let mut shards: Vec<Box<dyn super::shard_grpc::ShardHandle<E, P, H>>> =
                     Vec::with_capacity(n_shards);
-                for _ in 0..n_shards {
+                for i in 0..n_shards {
                     let mut aegon = Aegon::<E, P, H>::init(
                         prover_param.clone(),
                         verifier_param.clone(),
@@ -1465,6 +1524,44 @@ where
                     )?;
                     if let Some(src) = &masking_source {
                         aegon.set_masking_source(std::sync::Arc::clone(src));
+                    }
+                    // Give each in-process shard its own store, so an
+                    // in-process deployment persists what a gRPC one does
+                    // (raw values, the value-history window, placements).
+                    // Without this the shard's write-sink discards and its
+                    // reads return empty -- silently, as `Ok`.
+                    //
+                    // Each shard needs a *separate* store, not a shared one:
+                    // `key_history_openings_local(epoch)` is
+                    // `aegon:openings:{epoch}` with no shard discriminator,
+                    // because on a real deployment the store is already
+                    // shard-local. N shards sharing one keyspace would
+                    // overwrite each other's openings every epoch.
+                    match &config.db {
+                        DbSource::None => {}
+                        DbSource::Rocks(path) => {
+                            // Sibling of the coordinator's directory rather
+                            // than a child, so nothing nests inside a live
+                            // RocksDB directory.
+                            let mut shard_path = path.clone();
+                            let leaf = shard_path
+                                .file_name()
+                                .map(|n| n.to_string_lossy().into_owned())
+                                .unwrap_or_else(|| "aegon".to_string());
+                            shard_path.set_file_name(format!("{leaf}.shards"));
+                            shard_path.push(format!("{i}"));
+                            aegon.set_db(Box::new(crate::aegon::db::RocksDb::open(&shard_path)?));
+                        }
+                        DbSource::Redis(_) => {
+                            return Err(AegonError::Config(format!(
+                                "DbSource::Redis is not supported with \
+                                 ShardTransport::InProcess ({n_shards} shards would share one \
+                                 keyspace, and per-epoch history openings are stored without a \
+                                 shard discriminator, so shards would overwrite each other). \
+                                 Use DbSource::Rocks, which gives each in-process shard its own \
+                                 store, or ShardTransport::Remote, where every shard owns its DB."
+                            )));
+                        }
                     }
                     shards.push(Box::new(aegon));
                 }
@@ -1778,28 +1875,34 @@ where
             .unwrap_or(false)
     }
 
+    /// Opaque fullness proof for `shard_id`, when one was published.
     pub fn shard_fullness_proof(&self, shard_id: usize) -> Option<&[u8]> {
         self.shard_full_proofs
             .get(shard_id)
             .and_then(|entry| entry.as_deref())
     }
 
+    /// Number of shards in the cluster.
     pub fn n_shards(&self) -> usize {
         self.shards.len()
     }
 
+    /// Log2 of the shard count.
     pub fn log_n_shards(&self) -> usize {
         self.log_n_shards
     }
 
+    /// Log2 of one shard's slot count.
     pub fn shard_log_capacity(&self) -> usize {
         self.shard_log_capacity_cached
     }
 
+    /// Log2 of the whole dictionary's slot count.
     pub fn log_capacity(&self) -> usize {
         self.shard_log_capacity_cached + self.log_n_shards
     }
 
+    /// The coordinator's current epoch.
     pub fn epoch(&self) -> u64 {
         self.epoch
     }
@@ -1829,6 +1932,7 @@ where
         ctx
     }
 
+    /// The sharded commitment at the current epoch.
     pub fn current_commitment(&self) -> ShardedEpochCommitment<E, P> {
         self.epoch_commits
             .last()
@@ -1836,6 +1940,7 @@ where
             .clone()
     }
 
+    /// The sharded commitment published at `epoch`, if still retained.
     pub fn epoch_commitment(&self, epoch: u64) -> Option<ShardedEpochCommitment<E, P>> {
         self.epoch_commits.get(epoch as usize).cloned()
     }
@@ -3250,10 +3355,14 @@ where
 /// "this history is current as of right now".
 #[derive(Clone, Debug)]
 pub struct VerifiedLookupHistory {
+    /// `(prev_root, post_root)` per verified history entry.
     pub entry_roots: Vec<(EpochDigest, EpochDigest)>,
+    /// The live sharded root the freshness opening anchors to.
     pub live_root: Option<EpochDigest>,
 }
 
+/// Verify a value-history bundle: every entry's openings, its Merkle
+/// anchoring at both epochs, and the freshness attestation.
 pub fn verify_lookup_history<E, P, H>(
     ctx: &ShardedVerifierContext<E, P>,
     history: &ShardedValueHistory<E, P>,
@@ -3411,7 +3520,9 @@ where
 /// record stored, e.g. label unknown or pre-publish race).
 #[derive(Clone, Debug)]
 pub struct VerifiedLookupLabelHistory {
+    /// Root the placement record anchors under, if one was returned.
     pub placement_root: Option<EpochDigest>,
+    /// The live sharded root the freshness opening anchors to.
     pub live_root: Option<EpochDigest>,
 }
 
@@ -4110,6 +4221,8 @@ where
     (shard_id, slot_bits)
 }
 
+// Superseded during the per-shard-DB / two-layer refactors. Kept for reference rather than deleted; nothing calls it.
+#[allow(dead_code)]
 /// Re-export of `aegon::hash::bool_index_to_usize` under a name that
 /// doesn't collide with the field above. Used internally to dedup
 /// in-batch slot claims by their canonical PCS index.
@@ -4117,6 +4230,8 @@ fn bool_index_to_usize_dims(bits: &[bool], dims: &[usize]) -> usize {
     super::hash::bool_index_to_usize(bits, dims)
 }
 
+// Superseded by the per-group `derive_chain_scalars`.
+#[allow(dead_code)]
 /// FS-derive a field-element challenge from `(domain, prev, &[commits...])`.
 fn fs_chain_scalar<F, C>(domain: &'static [u8], prev: F, commits: &[C]) -> F
 where

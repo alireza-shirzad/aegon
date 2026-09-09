@@ -113,6 +113,9 @@ where
     P: AegonPcs<E>,
     H: HashSuite<E::ScalarField>,
 {
+    /// Apply a batch of writes at already-resolved slots and return the
+    /// new `(index, value)` commitments. Phase 1 of a publish: the data
+    /// polynomials are mutated, the rand polynomials are not.
     fn publish_phase_1_at_slots(
         &mut self,
         batch: &[ShardWrite<E::ScalarField>],
@@ -135,24 +138,31 @@ where
         shard_id: u32,
     ) -> Result<EpochCommitment<E, P>, AegonError>;
 
+    /// Whether the open-addressing walk should skip past this slot.
     fn is_index_slot_occupied(&self, slot_bits: &[bool]) -> bool;
 
+    /// Open the `index` polynomial at `slot_bits` in the current epoch.
     fn open_index_at_slot(
         &self,
         slot_bits: &[bool],
     ) -> Result<(E::ScalarField, P::Proof), AegonError>;
 
+    /// Open the `value` polynomial at `slot_bits` in the current epoch.
     fn open_value_at_slot(
         &self,
         slot_bits: &[bool],
     ) -> Result<(E::ScalarField, P::Proof), AegonError>;
 
+    /// Open the randomized `index` polynomial at `slot_bits` as of
+    /// `epoch`. Requires that epoch to still be retained.
     fn open_rand_index_at_slot_in_epoch(
         &self,
         slot_bits: &[bool],
         epoch: u64,
     ) -> Result<(E::ScalarField, P::Proof), AegonError>;
 
+    /// Open the randomized `value` polynomial at `slot_bits` as of
+    /// `epoch`. Requires that epoch to still be retained.
     fn open_rand_value_at_slot_in_epoch(
         &self,
         slot_bits: &[bool],
@@ -186,6 +196,7 @@ where
         entry: super::sharded::StoredValueHistoryEntry<E, P>,
     ) -> Result<super::sharded::StoredValueHistoryEntry<E, P>, AegonError>;
 
+    /// This shard's commitment at its current epoch.
     fn current_commitment(&self) -> EpochCommitment<E, P>;
 
     /// Per-shard verifier context. Only really needed at coordinator
@@ -193,6 +204,7 @@ where
     /// `ShardedVerifierContext`.
     fn verifier_context(&self) -> VerifierContext<E, P>;
 
+    /// Log2 of this shard's slot count.
     fn log_capacity(&self) -> usize;
 
     /// Pre-populate this shard's polynomials with `count` random
@@ -501,19 +513,48 @@ where
         new_r_value: E::ScalarField,
         shard_id: u32,
     ) -> Result<EpochCommitment<E, P>, AegonError> {
-        // In-process path: the Aegon-as-shard impl has no per-shard
-        // RocksDB attached (DB lives on the gRPC ShardServiceImpl,
-        // not on the Aegon itself). Pass a no-op write_chunk
-        // closure so each streamed chunk is discarded — the
-        // in-process bench / test path uses DbSource::None and the
-        // coord holds nothing else to persist for the shard side.
-        Aegon::publish_phase_2_and_persist(
-            self,
-            new_r_index,
-            new_r_value,
-            shard_id,
-            |_chunk| Ok(()),
-        )
+        // Stream each chunk into this shard's own store, mirroring what
+        // `ShardServiceImpl` does for a remote shard. The DB is moved
+        // out for the duration so the sink can borrow it while
+        // `publish_phase_2_and_persist` holds `&mut self`, then put
+        // back -- including on the error path.
+        //
+        // With no DB attached (`DbSource::None`) the sink discards, which
+        // is the historical in-memory behaviour every unit test relies on.
+        let db = self.take_db();
+        let res =
+            Aegon::publish_phase_2_and_persist(self, new_r_index, new_r_value, shard_id, |chunk| {
+                match &db {
+                    Some(d) => d.write_atomic(chunk),
+                    None => Ok(()),
+                }
+            });
+        self.restore_db(db);
+        res
+    }
+
+    fn fetch_value(&self, label: &super::types::Label) -> Result<Option<Vec<u8>>, AegonError> {
+        match self.db() {
+            Some(db) => db.get(&super::db::key_value(label)),
+            None => Ok(None),
+        }
+    }
+
+    fn fetch_value_history(&self, label: &super::types::Label) -> Result<Vec<Vec<u8>>, AegonError> {
+        match self.db() {
+            Some(db) => db.lrange(&super::db::key_value_history(label), 0, -1),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    fn fetch_label_placement(
+        &self,
+        label: &super::types::Label,
+    ) -> Result<Option<Vec<u8>>, AegonError> {
+        match self.db() {
+            Some(db) => db.get(&super::db::key_label_placement(label)),
+            None => Ok(None),
+        }
     }
 
     fn is_index_slot_occupied(&self, slot_bits: &[bool]) -> bool {
@@ -831,6 +872,8 @@ where
     H: HashSuite<E::ScalarField> + Send + Sync + 'static,
     EpochCommitment<E, P>: CanonicalSerialize + Send + Sync + 'static,
 {
+    /// Serve a shard with no attached store. Reads that need one
+    /// (values, history, placements) will report a missing DB.
     pub fn new(aegon: Aegon<E, P, H>) -> Self {
         Self {
             aegon: Arc::new(AsyncRwLock::new(aegon)),
@@ -1474,8 +1517,11 @@ where
 /// errors are deterministic.
 #[derive(Clone, Debug)]
 pub struct RetryPolicy {
+    /// Total attempts including the first; `1` disables retrying.
     pub max_attempts: usize,
+    /// Delay before the first retry.
     pub initial_backoff: Duration,
+    /// Ceiling the exponential backoff is clamped to.
     pub max_backoff: Duration,
 }
 
@@ -1490,6 +1536,7 @@ impl Default for RetryPolicy {
 }
 
 impl RetryPolicy {
+    /// A policy that never retries.
     pub fn off() -> Self {
         Self {
             max_attempts: 1,
@@ -1501,8 +1548,11 @@ impl RetryPolicy {
 
 /// Connection options for [`GrpcShardClient::connect_with`].
 pub struct GrpcShardClientConfig<E: Pairing, P: AegonPcs<E>> {
+    /// Shard address, e.g. `http://10.0.0.7:50051`.
     pub endpoint: String,
+    /// Verifier bundle for checking what this shard returns.
     pub verifier_context: VerifierContext<E, P>,
+    /// Log2 of the shard's slot count. Must match the server's.
     pub log_capacity: usize,
     /// PEM-encoded CA bundle used to verify the shard's server cert.
     /// `None` → plaintext HTTP/2 (matches the server side default).
@@ -1510,11 +1560,14 @@ pub struct GrpcShardClientConfig<E: Pairing, P: AegonPcs<E>> {
     /// Optional SNI / domain name override for TLS. Useful when the
     /// endpoint URL holds an IP but the cert is for a hostname.
     pub tls_domain: Option<String>,
+    /// How transport failures are retried.
     pub retry: RetryPolicy,
+    /// Connect timeout; `None` uses tonic's default.
     pub connect_timeout: Option<Duration>,
 }
 
 impl<E: Pairing, P: AegonPcs<E>> GrpcShardClientConfig<E, P> {
+    /// A plaintext config with the default retry policy and no TLS.
     pub fn new(
         endpoint: String,
         verifier_context: VerifierContext<E, P>,
@@ -1531,22 +1584,27 @@ impl<E: Pairing, P: AegonPcs<E>> GrpcShardClientConfig<E, P> {
         }
     }
 
+    /// Enable TLS, verifying the shard against this PEM-encoded CA.
     pub fn with_tls_ca(mut self, ca_pem: Vec<u8>) -> Self {
         self.tls_ca_pem = Some(ca_pem);
         self
     }
 
+    /// Override the domain matched against the shard's certificate.
     pub fn with_tls_domain(mut self, domain: impl Into<String>) -> Self {
         self.tls_domain = Some(domain.into());
         self
     }
 
+    /// Replace the retry policy.
     pub fn with_retry(mut self, retry: RetryPolicy) -> Self {
         self.retry = retry;
         self
     }
 }
 
+/// A remote shard, driven over gRPC. Implements [`ShardHandle`] so a
+/// `ShardedAegon` can treat it exactly like an in-process shard.
 pub struct GrpcShardClient<E, P>
 where
     E: Pairing,

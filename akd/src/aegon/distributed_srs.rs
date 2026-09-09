@@ -104,8 +104,12 @@ pub(crate) const SLAB_CHUNK_BYTES_TARGET: usize = 64 * 1024 * 1024;
 pub struct Trapdoors<E: Pairing> {
     /// `[d_1, ..., d_k]` — same as `KZHKUniversalParams::dimensions`.
     pub dimensions: Vec<usize>,
+    /// G1 generator.
     pub g: E::G1Affine,
+    /// The hiding generator, used for blinded commitments and by the
+    /// Sigma protocol.
     pub h: E::G1Affine,
+    /// G2 generator.
     pub v: E::G2Affine,
     /// `mu_mat[j][i]` for `j in [k]`, `i in [2^{d_j}]`.
     pub mu_mat: Vec<Vec<E::ScalarField>>,
@@ -144,10 +148,12 @@ impl<E: Pairing> Trapdoors<E> {
         }
     }
 
+    /// Number of KZH-k blocks, i.e. `dimensions.len()`.
     pub fn k(&self) -> usize {
         self.dimensions.len()
     }
 
+    /// Total variable count, `d_1 + ... + d_k`.
     pub fn num_vars(&self) -> usize {
         self.dimensions.iter().sum()
     }
@@ -161,6 +167,7 @@ impl<E: Pairing> Trapdoors<E> {
         Ok(buf)
     }
 
+    /// Inverse of [`Trapdoors::encode`].
     pub fn decode(bytes: &[u8]) -> Result<Self, AegonError> {
         Self::deserialize_uncompressed_unchecked(bytes)
             .map_err(|e| AegonError::Config(format!("trapdoors decode: {e}")))
@@ -174,13 +181,19 @@ impl<E: Pairing> Trapdoors<E> {
 /// multi-index that selects `mu_mat` entries) and the assembly step.
 #[derive(Clone, Debug)]
 pub struct HtGeometry {
+    /// Which `H_t` this describes, `t in [0, k)`.
     pub t: usize,
+    /// Extent along each axis: `2^{d_j}` for `j >= t`.
     pub shape: Vec<usize>,
+    /// C-order strides, for decomposing a flat index into the
+    /// multi-index that selects `mu_mat` entries.
     pub strides: Vec<usize>,
+    /// Total element count, the product of `shape`.
     pub len: usize,
 }
 
 impl HtGeometry {
+    /// Geometry for every `H_t`, `t in [0, k)`, from the block dims.
     pub fn all(dimensions: &[usize]) -> Vec<HtGeometry> {
         let k = dimensions.len();
         (0..k)
@@ -564,10 +577,17 @@ pub fn matrix_to_tensors<E: Pairing>(
 /// on the shard server and passed to [`SrsBootstrapState::new`].
 #[derive(Clone, Debug)]
 pub struct SrsBootstrapConfig {
+    /// This shard's index in the cluster.
     pub shard_id: u32,
+    /// Log2 of this shard's slot count.
     pub log_capacity: u32,
+    /// Number of KZH-k blocks.
     pub k: u32,
+    /// Seed the trapdoors are sampled from. NOT a ceremony -- see
+    /// `SECURITY.md`.
     pub setup_seed: u64,
+    /// Directory holding the on-disk SRS cache, keyed by
+    /// `(log_capacity, k, setup_seed)`.
     pub cache_dir: PathBuf,
 }
 
@@ -591,6 +611,7 @@ pub enum Phase {
 }
 
 impl Phase {
+    /// Stable lowercase name, for logs and the `WaitForReady` wire.
     pub fn as_str(self) -> &'static str {
         match self {
             Phase::AwaitingBootstrap => "awaiting-bootstrap",
@@ -609,15 +630,26 @@ impl Phase {
 /// `GetMetrics` handler + tests.
 #[derive(Debug, Clone)]
 pub struct MetricsSnapshot {
+    /// Shard these metrics came from.
     pub shard_id: u32,
+    /// Whether the SRS was served from the on-disk cache rather than
+    /// recomputed.
     pub cache_hit: bool,
+    /// Wall-clock spent in each bootstrap phase.
     pub phases: Vec<PhaseEntry>,
+    /// Slab bytes received from peers.
     pub inbound_slab_bytes: u64,
+    /// Slab bytes sent to peers.
     pub outbound_slab_bytes: u64,
+    /// Size of the prover key.
     pub pk_bytes: u64,
+    /// Size of the verifier key.
     pub vk_bytes: u64,
+    /// Size of the universal parameters before trimming.
     pub universal_bytes: u64,
+    /// Seconds spent computing.
     pub compute_secs: f64,
+    /// Seconds spent transferring slabs.
     pub communication_secs: f64,
 }
 
@@ -690,6 +722,7 @@ pub struct SrsBootstrapState<E: Pairing> {
 }
 
 impl<E: Pairing> SrsBootstrapState<E> {
+    /// Start a bootstrap actor in the `Idle` phase.
     pub fn new(config: SrsBootstrapConfig) -> Arc<Self> {
         // Allocate slab slots up front, sized by `k`. We don't know the
         // geometry until trapdoors arrive (well, we do — k is in
@@ -719,6 +752,7 @@ impl<E: Pairing> SrsBootstrapState<E> {
         })
     }
 
+    /// The config this actor was built with.
     pub fn config(&self) -> &SrsBootstrapConfig {
         &self.config
     }
@@ -927,10 +961,12 @@ impl<E: Pairing> SrsBootstrapState<E> {
         }
     }
 
+    /// Current bootstrap phase.
     pub async fn phase(&self) -> Phase {
         self.inner.lock().await.phase
     }
 
+    /// Human-readable progress line for `WaitForReady`.
     pub async fn status(&self) -> String {
         self.inner.lock().await.status.clone()
     }
@@ -947,6 +983,7 @@ pub struct SrsServer<E: Pairing> {
 }
 
 impl<E: Pairing> SrsServer<E> {
+    /// Wrap a bootstrap actor as the gRPC `SrsService`.
     pub fn new(state: Arc<SrsBootstrapState<E>>) -> Self {
         Self { state }
     }

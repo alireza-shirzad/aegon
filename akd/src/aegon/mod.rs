@@ -26,6 +26,7 @@ pub mod consistency;
 pub mod coordinator_grpc;
 pub mod db;
 pub mod distributed_srs;
+/// The engine's error type.
 pub mod error;
 pub(crate) mod fs;
 pub mod hash;
@@ -43,6 +44,7 @@ pub mod sharded;
 pub mod sigma;
 #[cfg(feature = "tracing_instrument")]
 pub mod tracing_init;
+/// Shared wire and state types (labels, values, epoch commitments).
 pub mod types;
 pub mod verify;
 

@@ -14,10 +14,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 static RSS_LOG_ENABLED: AtomicBool = AtomicBool::new(false);
 
+/// Turn peak-RSS logging on or off for this process.
 pub fn set_rss_log(enabled: bool) {
     RSS_LOG_ENABLED.store(enabled, Ordering::Relaxed);
 }
 
+/// Whether peak-RSS logging is currently on.
 pub fn rss_log_enabled() -> bool {
     RSS_LOG_ENABLED.load(Ordering::Relaxed)
 }
@@ -58,6 +60,8 @@ pub fn log_rss_ctx(stage: &str, ctx: &str) {
 /// disabled (one relaxed atomic load).
 static PUBLISH_PROFILE_INIT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
+/// Whether per-phase publish profiling is on, read once from the
+/// environment and cached. Gates the `[pub-profile]` timing lines.
 pub fn publish_profile_enabled() -> bool {
     *PUBLISH_PROFILE_INIT.get_or_init(|| {
         matches!(

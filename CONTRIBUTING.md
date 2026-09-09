@@ -39,14 +39,14 @@ present it as such will not be merged.
 
 ## Known gaps
 
-Several tests are `#[ignore]`d with their reason in the attribute, and the
-upstream SEEMless/Merkle suites sit behind the off-by-default
-`upstream_tests` feature. The README tables both. Fixes for any of them are
-useful contributions — start with the value-history round-trip against the
-Rocks backend, which is an undiagnosed failure rather than a stale test.
+The upstream SEEMless/Merkle suites sit behind the off-by-default
+`upstream_tests` feature; they exercise a backend Aegon replaced and do not
+pass. Everything else is green, and `missing_docs` is denied crate-wide, so
+new public API needs documenting.
 
-There are roughly 250 `missing_docs` sites on public API. CI reports the
-count without failing on it.
+`akd_core`'s own tests cannot run with the `parallel` feature — nested rayon
+pools inside arkworks' MSM exhaust the thread limit — which is why the two
+crates are tested separately. Fixing that would be a useful contribution.
 
 ## Issues
 

@@ -168,6 +168,7 @@ pub struct AegonConfig<E: Pairing, P: AegonPcs<E>> {
     /// deployment audited via IVC installs the Poseidon bundle here
     /// and on the verifier side alike.
     pub audit_fs: super::audit_fs::AuditFsHooks<E, P>,
+    /// Ties the config to its pairing without storing one.
     pub _e: PhantomData<E>,
 }
 
@@ -218,12 +219,15 @@ impl<E: Pairing, P: AegonPcs<E>> AegonConfig<E, P> {
 /// `Aegon::verifier_context()`.
 #[derive(Debug)]
 pub struct VerifierContext<E: Pairing, P: AegonPcs<E>> {
+    /// Log2 of this shard's slot count. Must match the server's.
     pub log_capacity: usize,
+    /// The PCS verifier key, trimmed to `log_capacity`.
     pub verifier_param: P::VerifierParam,
     /// Which Fiat-Shamir derivations the audit path uses. Must match
     /// what the server was configured with, or every audit fails.
     /// Defaults to SHA256, i.e. the original behaviour.
     pub audit_fs: super::audit_fs::AuditFsHooks<E, P>,
+    /// Ties the context to its pairing without storing one.
     pub _e: PhantomData<E>,
 }
 
@@ -244,6 +248,9 @@ where
 }
 
 impl<E: Pairing, P: AegonPcs<E>> VerifierContext<E, P> {
+    /// Build a context with the default (SHA256) audit Fiat-Shamir
+    /// bundle. Use the `with_audit_fs` variant for a server configured
+    /// with Poseidon.
     pub fn new(log_capacity: usize, verifier_param: P::VerifierParam) -> Self {
         Self {
             log_capacity,

@@ -58,18 +58,15 @@ rustdoc-args = ["--html-in-header", "../docs-header.html"]
 #
 # Counts are as of the initial open-source cleanup.
 [workspace.lints.rust]
-# Dead code inherited from the SEEMless/Merkle backend that Aegon replaced
-# (tree_node, append_only_zks internals) plus a handful of superseded
-# Aegon-side helpers, e.g. db::key_history_openings, whose per-shard-local
-# successor is the one actually wired up. Retained rather than deleted so
-# the divergence from facebook/akd stays reviewable.
-dead_code = "allow"
+# `dead_code` is deliberately NOT allowed workspace-wide. The inherited
+# SEEMless/Merkle modules carry their own file-level `#![allow(dead_code)]`
+# with a reason, and the handful of superseded Aegon-side helpers carry
+# item-level ones. Anything new that goes unused shows up as a warning
+# rather than disappearing under a blanket allow.
 
-# NOTE: `missing_docs` is NOT set here. Both crates carry a crate-level
-# `#![warn(missing_docs)]`, and an inner attribute overrides whatever this
-# table says, so setting it here would be a no-op that reads as policy.
-# The ~250 outstanding sites are suppressed at the CI invocation instead
-# (`-A missing_docs`); see .github/workflows/ci.yml.
+# `missing_docs` is enforced by the crate-level `#![deny(missing_docs)]` in
+# each crate's lib.rs, not from here: an inner attribute overrides this
+# table, so setting it here would be a no-op that reads as policy.
 
 [workspace.lints.clippy]
 # Deny the whole `clippy::all` group at negative priority so the

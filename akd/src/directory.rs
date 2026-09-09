@@ -335,6 +335,8 @@ where
         )
     }
 
+    // Part of the SEEMless/Merkle surface Aegon replaced behind `Directory`; unreachable on this backend.
+    #[allow(dead_code)]
     /// **Internal helper retained for source compatibility.** Always
     /// errors — there is no AZKS in the Aegon backend.
     #[cfg_attr(feature = "tracing_instrument", tracing::instrument(skip_all))]
@@ -507,6 +509,8 @@ where
 }
 
 // Helper retained to avoid breaking pub(crate) references elsewhere.
+// Part of the SEEMless/Merkle surface Aegon replaced behind `Directory`; unreachable on this backend.
+#[allow(dead_code)]
 pub(crate) fn get_marker_version(version: u64) -> u64 {
     (64 - version.leading_zeros() - 1).into()
 }

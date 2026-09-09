@@ -76,21 +76,39 @@ pub enum DbSource {
 #[derive(Debug, Clone)]
 pub enum DbOp {
     /// `SET key value` — overwrite if present.
-    Set { key: Vec<u8>, value: Vec<u8> },
+    Set {
+        /// Key to overwrite.
+        key: Vec<u8>,
+        /// New value.
+        value: Vec<u8>,
+    },
     /// `SADD key member` — add `member` to the set at `key`.
-    SAdd { key: Vec<u8>, member: Vec<u8> },
+    SAdd {
+        /// Key of the set.
+        key: Vec<u8>,
+        /// Member to add.
+        member: Vec<u8>,
+    },
     /// `LPUSH key member` — prepend `member` to the head of the list
     /// at `key`. Used by the value-history sliding window: combined
     /// with an `LTrim 0 (N-1)` immediately after, this implements
     /// "keep the most recent N entries" atomically inside a publish's
     /// MULTI/EXEC.
-    LPush { key: Vec<u8>, member: Vec<u8> },
+    LPush {
+        /// Key of the list.
+        key: Vec<u8>,
+        /// Element to prepend at the head.
+        member: Vec<u8>,
+    },
     /// `LTRIM key start stop` — keep only `list[start..=stop]`,
     /// discarding the rest. Negative indices count from the tail.
     /// Paired with `LPush` to bound the value-history list length.
     LTrim {
+        /// Key of the list.
         key: Vec<u8>,
+        /// First index to keep; negative counts from the tail.
         start: isize,
+        /// Last index to keep, inclusive; negative counts from the tail.
         stop: isize,
     },
 }
@@ -287,14 +305,20 @@ pub(crate) trait Db: Send + Sync {
     fn write_atomic(&self, ops: &[DbOp]) -> Result<(), AegonError>;
     /// Single-key read. `None` if the key doesn't exist.
     fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, AegonError>;
+    // Set/exists helpers the current schema does not use.
+    #[allow(dead_code)]
     /// Existence check — same cost as `get` but skips the payload.
     fn exists(&self, key: &[u8]) -> Result<bool, AegonError>;
+    // Set/exists helpers the current schema does not use.
+    #[allow(dead_code)]
     /// Pipelined batch existence check. One round-trip / batch lookup
     /// for every key in `keys`, returning a `Vec<bool>` parallel to
     /// the input. Used by the publish-path open-addressing loop
     /// where per-key `exists` round-trips dominate at large batch
     /// sizes.
     fn exists_many(&self, keys: &[Vec<u8>]) -> Result<Vec<bool>, AegonError>;
+    // Set/exists helpers the current schema does not use.
+    #[allow(dead_code)]
     /// Members of a SET-typed key. Used for recovery-time
     /// enumeration (the `aegon:labels` set).
     fn smembers(&self, key: &[u8]) -> Result<Vec<Vec<u8>>, AegonError>;
@@ -618,6 +642,8 @@ impl RocksDb {
         k
     }
 
+    // Set/exists helpers the current schema does not use.
+    #[allow(dead_code)]
     /// Prefix for prefix-scan over set members (`set_key + ":"`).
     fn set_member_prefix(set_key: &[u8]) -> Vec<u8> {
         let mut k = Vec::with_capacity(set_key.len() + 1);
@@ -957,6 +983,8 @@ pub(crate) fn key_shard_state(shard_id: u32) -> Vec<u8> {
     format!("aegon:shard:{shard_id}:state").into_bytes()
 }
 
+// Legacy coord-side key; `key_history_openings_local` is the one wired up.
+#[allow(dead_code)]
 /// `aegon:openings:{epoch}:{shard_id}` — paper §6.4 history witnesses
 /// for every brand-new label `shard_id` placed during the transition
 /// into `epoch`. Serialized `HistoryOpenings<E, P>` bytes. Absent when

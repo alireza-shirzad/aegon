@@ -35,7 +35,8 @@ jobs:
         run: cargo fmt --all -- --check
       # No `-D` flags on purpose: the lint policy lives in the workspace
       # manifest's [workspace.lints], and command-line flags override it.
-      # clippy type-checks every target, so this is also the build check.
+      # `missing_docs` is denied by each crate's lib.rs. clippy type-checks
+      # every target, so this is also the build check.
       - name: clippy (default features)
         run: cargo clippy --workspace --all-targets
       - name: clippy (ivc_audit)
