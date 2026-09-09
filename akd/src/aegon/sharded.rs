@@ -36,6 +36,7 @@ use ark_serialize::{
 };
 use ark_std::rand::Rng;
 use rayon::prelude::*;
+
 use sha2::{Digest, Sha256};
 
 use super::audit::verify_chain;
@@ -47,6 +48,36 @@ use super::error::AegonError;
 use super::hash::{bool_index_to_point, HashSuite, Sha256Hash};
 use super::server::Aegon;
 use super::types::{AegonPcs, EpochCommitment, Label, ShardedAuditState, Value};
+
+/// The thread pool that shard fan-out runs on.
+///
+/// `ShardHandle` methods block the calling thread, and for
+/// [`GrpcShardClient`](super::shard_grpc::GrpcShardClient) they block it on a
+/// network round trip (`runtime.block_on`). Fanning those out across rayon's
+/// *global* pool deadlocks whenever a shard server shares the process --- the
+/// gRPC integration tests, and any single-box deployment. Every global worker
+/// parks inside `block_on` waiting for a reply, while the server handling that
+/// very request calls `rayon::join` and blocks waiting for a global worker to
+/// come free. Nothing breaks the cycle.
+///
+/// How many cores you have decides whether you ever see it: a 2-core CI runner
+/// hangs outright, a 12-core laptop has enough spare workers to hide it, and a
+/// 16-core coordinator talking to 128 shards is safe only because the shards
+/// are in other processes with pools of their own.
+///
+/// A separate pool breaks the cycle: the fan-out no longer occupies the global
+/// pool, so shard-side compute always finds a worker there. The width matches
+/// the global pool, so the number of shards in flight at once is unchanged.
+fn shard_fanout_pool() -> &'static rayon::ThreadPool {
+    static POOL: std::sync::OnceLock<rayon::ThreadPool> = std::sync::OnceLock::new();
+    POOL.get_or_init(|| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(rayon::current_num_threads().max(1))
+            .thread_name(|i| format!("aegon-shard-fanout-{i}"))
+            .build()
+            .expect("build the shard fan-out pool")
+    })
+}
 
 /// Where the shards live, and how the coordinator talks to them.
 ///
@@ -2179,20 +2210,23 @@ where
                 super::server::PublishBatchOutcome<E2, P2>,
                 Vec<(Label, Value)>,
             )>;
-            let wave_results: Vec<Result<WaveItem<E, P>, AegonError>> = self
-                .shards
-                .par_iter_mut()
-                .zip(groups.into_par_iter())
-                .zip(group_vrf_proofs.into_par_iter())
-                .enumerate()
-                .map(|(shard_id, ((shard, group), vrf_proofs))| {
-                    if group.is_empty() {
-                        return Ok(None);
-                    }
-                    let outcome = shard.publish_batch(&group, &vrf_proofs)?;
-                    Ok(Some((shard_id, outcome, group)))
-                })
-                .collect();
+            let shards = &mut self.shards;
+            let wave_results: Vec<Result<WaveItem<E, P>, AegonError>> = shard_fanout_pool()
+                .install(move || {
+                    shards
+                        .par_iter_mut()
+                        .zip(groups.into_par_iter())
+                        .zip(group_vrf_proofs.into_par_iter())
+                        .enumerate()
+                        .map(|(shard_id, ((shard, group), vrf_proofs))| {
+                            if group.is_empty() {
+                                return Ok(None);
+                            }
+                            let outcome = shard.publish_batch(&group, &vrf_proofs)?;
+                            Ok(Some((shard_id, outcome, group)))
+                        })
+                        .collect()
+                });
 
             let mut next_unplaced: Vec<(Label, Value)> = Vec::new();
             for r in wave_results {
@@ -2223,19 +2257,24 @@ where
         if needs_cleanup.iter().any(|&b| b) {
             let cleanup_results: Vec<
                 Result<Option<(usize, super::server::PublishBatchOutcome<E, P>)>, AegonError>,
-            > = self
-                .shards
-                .par_iter_mut()
-                .zip(needs_cleanup.par_iter())
-                .enumerate()
-                .map(|(shard_id, (shard, &needs))| {
-                    if !needs {
-                        return Ok(None);
-                    }
-                    let outcome = shard.publish_batch(&[], &[])?;
-                    Ok(Some((shard_id, outcome)))
+            > = {
+                let shards = &mut self.shards;
+                let needs_cleanup = &needs_cleanup;
+                shard_fanout_pool().install(move || {
+                    shards
+                        .par_iter_mut()
+                        .zip(needs_cleanup.par_iter())
+                        .enumerate()
+                        .map(|(shard_id, (shard, &needs))| {
+                            if !needs {
+                                return Ok(None);
+                            }
+                            let outcome = shard.publish_batch(&[], &[])?;
+                            Ok(Some((shard_id, outcome)))
+                        })
+                        .collect()
                 })
-                .collect();
+            };
             for r in cleanup_results {
                 if let Some((shard_id, outcome)) = r? {
                     shard_outcomes[shard_id] = Some(outcome);
@@ -2472,15 +2511,19 @@ where
         // ones -- unlike `audit_fs`, which a remote shard configures
         // for itself.
         let plan = super::chain_groups::GroupPlan::new(self.n_shards(), self.chain_groups)?;
-        let results: Vec<Result<EpochCommitment<E, P>, AegonError>> = self
-            .shards
-            .par_iter_mut()
-            .zip(shard_ids.into_par_iter())
-            .map(|(shard, shard_id)| {
-                let g = plan.group_of(shard_id as usize);
-                shard.publish_phase_2_and_persist(new_r_index[g], new_r_value[g], shard_id)
-            })
-            .collect();
+        let shards = &mut self.shards;
+        let plan = &plan;
+        let results: Vec<Result<EpochCommitment<E, P>, AegonError>> =
+            shard_fanout_pool().install(move || {
+                shards
+                    .par_iter_mut()
+                    .zip(shard_ids.into_par_iter())
+                    .map(|(shard, shard_id)| {
+                        let g = plan.group_of(shard_id as usize);
+                        shard.publish_phase_2_and_persist(new_r_index[g], new_r_value[g], shard_id)
+                    })
+                    .collect()
+            });
         results.into_iter().collect::<Result<Vec<_>, _>>()
     }
 
