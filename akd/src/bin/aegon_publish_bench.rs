@@ -180,6 +180,13 @@ struct Args {
     /// Output JSON path.
     #[arg(long)]
     out: PathBuf,
+    /// Fiat-Shamir transcript for the audit path: `poseidon`
+    /// (default) or `sha256`.
+    ///
+    /// Every node in a deployment must agree, and the choice is baked
+    /// into each published epoch, so it cannot change on a live chain.
+    #[arg(long, default_value_t = akd::aegon::audit_fs::AuditFs::Poseidon)]
+    audit_fs: akd::aegon::audit_fs::AuditFs,
 }
 
 /// Per-(batch_size) record after a sample sweep. Aggregates into the
@@ -479,6 +486,7 @@ fn main() -> ExitCode {
 /// a pre-generated SRS file.
 fn build_server(args: &Args, k: usize, log_n_shards: usize) -> Result<Sharded, AegonError> {
     let mut builder = ShardedAegonConfig::<Bn254, Pcs>::builder()
+        .audit_fs(akd::aegon::ivc::adapter::hooks_for(args.audit_fs))
         .shard_log_capacity(args.shard_log_capacity)
         .log_n_shards(log_n_shards)
         .private(args.private)

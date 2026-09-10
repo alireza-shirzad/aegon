@@ -88,6 +88,13 @@ struct Args {
     /// (single-process style). URL form: `redis://host[:port][/db]`.
     #[arg(long)]
     db_url: Option<String>,
+    /// Fiat-Shamir transcript for the audit path: `poseidon`
+    /// (default) or `sha256`.
+    ///
+    /// Every node in a deployment must agree, and the choice is baked
+    /// into each published epoch, so it cannot change on a live chain.
+    #[arg(long, default_value_t = akd::aegon::audit_fs::AuditFs::Poseidon)]
+    audit_fs: akd::aegon::audit_fs::AuditFs,
 }
 
 fn main() -> ExitCode {
@@ -107,6 +114,7 @@ fn main() -> ExitCode {
     let log_n_shards = args.endpoints.len().trailing_zeros() as usize;
 
     let mut builder = ShardedAegonConfig::<Bn254, Pcs>::builder()
+        .audit_fs(akd::aegon::ivc::adapter::hooks_for(args.audit_fs))
         .shard_log_capacity(args.shard_log_capacity)
         .log_n_shards(log_n_shards)
         .private(args.private)

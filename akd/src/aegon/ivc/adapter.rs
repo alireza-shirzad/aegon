@@ -23,7 +23,7 @@
 use akd_core::aegon_crypto::pcs::kzhk::KZHK;
 use ark_bn254::{Bn254, Fr as ArkFr, G1Affine as ArkG1Affine};
 
-use super::circuit::SigmaWitness;
+use super::fs_poseidon::SigmaWitness;
 use super::fs_poseidon::{
     domain, poseidon_chain_scalar, poseidon_sigma_challenge, ro_constants_cached, FsParams,
     ShardCommitments,
@@ -171,6 +171,27 @@ fn poseidon_sigma(
 /// every audit — the mismatch cannot be mistaken for acceptance.
 pub fn poseidon_audit_fs() -> AuditFsHooks<Bn254, Pcs> {
     AuditFsHooks::new(AuditFs::Poseidon, poseidon_chain, poseidon_sigma)
+}
+
+/// The hook bundle for a named transcript, at this crate's concrete
+/// `(BN254, KZH-k)` instantiation.
+///
+/// This is what a deployment should call: [`AuditFs::default`] is
+/// [`AuditFs::Poseidon`], so `hooks_for(Default::default())` installs
+/// the default transcript, and a `--audit-fs sha256` flag threads
+/// straight through.
+///
+/// Note the generic [`AuditFsHooks::default`] still yields SHA-256, and
+/// has to: the Poseidon derivations hash into BN254's base field and are
+/// simply undefined for another curve, so a generic
+/// `AuditFsHooks<E, P>` has no Poseidon to fall back to. Every concrete
+/// entry point in this crate — the `Directory`, the shard and
+/// coordinator servers, the client — routes through here instead.
+pub fn hooks_for(kind: AuditFs) -> AuditFsHooks<Bn254, Pcs> {
+    match kind {
+        AuditFs::Poseidon => poseidon_audit_fs(),
+        AuditFs::Sha256 => AuditFsHooks::sha256(),
+    }
 }
 
 // ---------- deriving the partition from the deployment ------------------

@@ -59,18 +59,30 @@
 //! tuple, so it checks the SHA256 root natively just as it does
 //! today.
 
+// The Poseidon transcript is the default for every deployment, so the
+// pieces that compute it natively -- the field/point bridge, the
+// derivations themselves, and the hook bundle that installs them --
+// build unconditionally. Only the folding circuit and the prover /
+// verifier around it sit behind `ivc_audit`, because only they pull in
+// bellpepper and the Nova machinery.
 pub mod adapter;
 pub mod bridge;
-pub mod circuit;
 pub mod fs_poseidon;
+
+#[cfg(feature = "ivc_audit")]
+pub mod circuit;
 /// Group-sharded auditing: split the shard set into independent
 /// folding chains that prove in parallel. See the module docs.
+#[cfg(feature = "ivc_audit")]
 pub mod grouped;
+#[cfg(feature = "ivc_audit")]
 pub mod prover;
-#[cfg(test)]
+#[cfg(all(test, feature = "ivc_audit"))]
 mod tests;
 
 /// Synthetic epoch-transition fixtures, shared by the unit tests and
 /// the `aegon_ivc_bench` binary. Not part of the audit protocol.
+#[cfg(feature = "ivc_audit")]
 pub mod synthetic;
+#[cfg(feature = "ivc_audit")]
 pub mod verifier;

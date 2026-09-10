@@ -72,6 +72,26 @@ use super::bridge::{
     ark_fr_to_circuit, ark_g1_to_coords, circuit_to_ark_fr, CircuitField, PointCoords,
 };
 
+/// One shard's Schnorr blinding-equality proof, as consumed by the
+/// circuit. Mirrors [`BlindingEqProof`](crate::aegon::BlindingEqProof)
+/// with the commitment unwrapped to a bare group element.
+#[derive(Clone, Copy, Debug)]
+pub struct SigmaWitness {
+    /// The prover's Schnorr commitment `R = k·h`.
+    pub r_commit: ArkG1Affine,
+    /// The response `s = k + e·c`.
+    pub response: ArkFr,
+}
+
+impl Default for SigmaWitness {
+    fn default() -> Self {
+        Self {
+            r_commit: ArkG1Affine::identity(),
+            response: ArkFr::from(0u64),
+        }
+    }
+}
+
 /// Domain tags. Distinct small field constants rather than hashed
 /// byte strings, so the circuit can allocate them as constants for
 /// free. They mirror the byte tags the SHA256 path uses:

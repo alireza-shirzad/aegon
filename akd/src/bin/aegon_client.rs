@@ -95,6 +95,14 @@ struct Args {
     /// may not return value bytes inline for a slot-only request).
     #[arg(long)]
     expected_value: Option<String>,
+    /// Fiat-Shamir transcript for the audit path: `poseidon`
+    /// (default) or `sha256`.
+    ///
+    /// Server and auditor must agree, and the choice is baked into
+    /// every epoch the server publishes, so it cannot be changed on a
+    /// live chain. `poseidon` is what a fast-forward auditor needs.
+    #[arg(long, default_value_t = akd::aegon::audit_fs::AuditFs::Poseidon)]
+    audit_fs: akd::aegon::audit_fs::AuditFs,
 }
 
 fn main() -> ExitCode {
@@ -148,7 +156,7 @@ fn main() -> ExitCode {
     let verifier_inner = VerifierContext::<Bn254, Pcs> {
         log_capacity: args.shard_log_capacity,
         verifier_param,
-        audit_fs: Default::default(),
+        audit_fs: akd::aegon::ivc::adapter::hooks_for(args.audit_fs),
         _e: PhantomData,
     };
     let verifier_ctx = ShardedVerifierContext::new(verifier_inner, args.log_n_shards);

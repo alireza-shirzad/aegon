@@ -1171,3 +1171,90 @@ fn auditor_rederives_shared_fs_scalars() {
 
     let _ = prev;
 }
+
+// ---------- the default (Poseidon) audit transcript ----------------
+
+/// A full publish → audit round trip on the **default** transcript.
+///
+/// Poseidon is what every deployment gets unless it passes
+/// `--audit-fs sha256`, but until now it was exercised only by the
+/// `ivc_audit`-gated examples, so the default configuration had no
+/// coverage in a plain `cargo test`. Server and verifier must derive
+/// the same chain scalars and the same Σ-challenge, or every epoch
+/// transition is rejected.
+#[test]
+fn poseidon_transcript_publishes_and_audits() {
+    use akd::aegon::audit_fs::AuditFs;
+    use akd::aegon::ivc::adapter::hooks_for;
+    use akd::aegon::verify_sharded_invariance;
+
+    let cfg = ShardedAegonConfig::<Bn254, Pcs>::builder()
+        .shard_log_capacity(8 - 2)
+        .log_n_shards(2)
+        .private(false)
+        .kzh_k(2)
+        .audit_fs(hooks_for(AuditFs::Poseidon))
+        .build()
+        .expect("poseidon config builds");
+    let mut rng = ChaCha20Rng::seed_from_u64(0xA56_5);
+    let mut server = Sharded::setup(&mut rng, &cfg).expect("setup");
+
+    let mut commits = Vec::new();
+    commits.push(server.current_commitment());
+    for e in 0..3u32 {
+        let updates: Vec<(Vec<u8>, Vec<u8>)> = (0..4u32)
+            .map(|i| {
+                (
+                    format!("user-{e}-{i}").into_bytes(),
+                    format!("v-{e}-{i}").into_bytes(),
+                )
+            })
+            .collect();
+        commits.push(server.publish_two_layer(&updates).expect("publish"));
+    }
+
+    let ctx: ShardedVerifierContext<Bn254, Pcs> = server.sharded_verifier_context();
+    let mut state =
+        ShardedAuditState::<<Bn254 as Pairing>::ScalarField>::with_groups(ctx.chain_groups);
+    for pair in commits.windows(2) {
+        let ok = verify_sharded_invariance::<Bn254, Pcs>(&ctx, &mut state, &pair[0], &pair[1])
+            .expect("poseidon audit runs");
+        assert!(ok, "poseidon epoch transition must verify");
+    }
+}
+
+/// The transcript is not interchangeable: a verifier on SHA-256 must
+/// reject a chain the server published under Poseidon. A mismatch that
+/// silently accepted would mean the chain scalars were not binding.
+#[test]
+fn transcript_mismatch_is_rejected() {
+    use akd::aegon::audit_fs::AuditFs;
+    use akd::aegon::ivc::adapter::hooks_for;
+    use akd::aegon::verify_sharded_invariance;
+
+    let cfg = ShardedAegonConfig::<Bn254, Pcs>::builder()
+        .shard_log_capacity(8 - 2)
+        .log_n_shards(2)
+        .private(false)
+        .kzh_k(2)
+        .audit_fs(hooks_for(AuditFs::Poseidon))
+        .build()
+        .expect("poseidon config builds");
+    let mut rng = ChaCha20Rng::seed_from_u64(0xA56_5);
+    let mut server = Sharded::setup(&mut rng, &cfg).expect("setup");
+
+    let prev = server.current_commitment();
+    let next = server
+        .publish_two_layer(&[(b"alice".to_vec(), b"alice-v1".to_vec())])
+        .expect("publish");
+
+    let mut ctx: ShardedVerifierContext<Bn254, Pcs> = server.sharded_verifier_context();
+    ctx.inner.audit_fs = hooks_for(AuditFs::Sha256);
+    let mut state =
+        ShardedAuditState::<<Bn254 as Pairing>::ScalarField>::with_groups(ctx.chain_groups);
+    let verdict = verify_sharded_invariance::<Bn254, Pcs>(&ctx, &mut state, &prev, &next);
+    assert!(
+        matches!(verdict, Ok(false) | Err(_)),
+        "a SHA-256 verifier must not accept a Poseidon chain, got {verdict:?}"
+    );
+}

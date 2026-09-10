@@ -76,6 +76,11 @@ fn default_aegon_config(db: DbSource) -> ShardedAegonConfig<DirectoryE, Director
         .private(false)
         .kzh_k(optimal_kzh_k(DEFAULT_SHARD_LOG_CAPACITY))
         .db(db)
+        // Poseidon is the deployment default: server and auditor must
+        // agree on the transcript, and it is fixed from a chain's first
+        // epoch, so a directory that might ever want fast-forward
+        // auditing has to start on it.
+        .audit_fs(crate::aegon::ivc::adapter::hooks_for(Default::default()))
         .build()
         .expect("default ShardedAegonConfig must build")
 }

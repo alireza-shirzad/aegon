@@ -512,11 +512,24 @@ cargo run --release -p akd --features ivc_audit --bin aegon_ivc_bench -- --help
 cargo run --release -p akd --features ivc_audit --example ivc_audit_grouped_e2e
 ```
 
-Enabling it switches the audit path's Fiat-Shamir derivations from SHA-256 to
-Poseidon, because the derivation is recomputed inside the proof circuit.
+The feature gates the folding circuit and prover only. The Poseidon audit
+transcript they depend on is the **default** and is always compiled in, so a
+directory started today can be fast-forward audited later without having been
+built with `ivc_audit` — which matters, because the transcript is fixed from a
+chain's first epoch and cannot be changed later.
+
+Select the transcript with `--audit-fs poseidon` (default) or `--audit-fs
+sha256` on `aegon_shard_server`, `aegon_client` and `aegon_rss_probe`, or by
+installing the hooks directly:
+
+```rust
+use akd::aegon::{audit_fs::AuditFs, ivc::adapter::hooks_for};
+let hooks = hooks_for(AuditFs::Sha256);   // or AuditFs::Poseidon, the default
+```
+
 Servers and auditors must agree: a mismatch rejects every epoch. The Merkle
-commitment, lookup, consistency, and history paths are unaffected. See
-`SECURITY.md`.
+commitment, lookup, consistency, and history paths are unaffected and stay on
+SHA-256 either way. See `SECURITY.md`.
 
 ---
 
