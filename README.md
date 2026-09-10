@@ -433,24 +433,33 @@ thread limit inside arkworks' MSM.
 A few tests are `#[ignore]`d, all of them slow benchmarks rather than known
 failures; each carries its reason in the attribute, and `--ignored` runs them.
 
-#### Known limitation: the suite needs a reasonably wide rayon pool
+#### Known limitation: private-mode remasking can deadlock on rayon
 
-Set `RAYON_NUM_THREADS=8` (or run on a machine with at least that many cores)
-before `cargo test`. Rayon sizes its global pool from the core count, and on a
-narrow one the private-mode value-history path deadlocks: it nests parallel
-work inside the KZH-k/arkworks MSM, and the outer job ends up blocked in
-`LockLatch::wait_and_reset` waiting for a worker that every other job is also
-waiting for. Measured on `private_mode_lookup_history_round_trip` in isolation,
-1/2/3/4 threads all hang and 8 passes; CI therefore pins `RAYON_NUM_THREADS: 8`
-on its two-core runners.
+Two tests, `private_mode_publish_lookup_round_trip` and
+`private_mode_lookup_history_round_trip`, are `#[ignore]`d because they
+**hang** rather than fail. Run them with `--ignored` on a wide machine.
 
-Threads are cheap here — the ones in question are blocked rather than runnable,
-so oversubscribing a small machine costs context switches, not throughput.
+`remask_value_history_entry` runs a nested `rayon::join` whose leaves each
+drive an MSM, and the KZH-k MSM wrapper installs the Pippenger call into a
+pool keyed on the input size. `ThreadPool::install` from outside the target
+pool parks the caller until that pool frees a worker, so a worker of one pool
+ends up waiting on another; when workers are scarce that wait can close a
+cycle and nothing progresses.
 
-This is the same root cause as the `akd_core` + `parallel` interaction above,
-and it is a real bug rather than a test artifact: any deployment on a narrow
-machine can hit it. Fixing it properly means bounding the nesting inside the
-MSM, which is not yet done.
+Measured on `sharded_aegon` with `--skip bench`: 1 thread and 4-or-more pass,
+2 and 3 hang, and with `--features ivc_audit` even 8 hangs. The
+non-monotonicity is what you would expect from a cycle that needs at least two
+blocked workers to form and enough headroom to avoid.
+
+Half of it is fixed: `msm()` now runs inline when it is already on a rayon
+worker instead of hopping pools, which is what made the single-thread case
+pass. The nested-join path still crosses pools, and fixing that properly means
+reworking how the MSM wrapper picks its pool — not yet done. CI pins
+`RAYON_NUM_THREADS: 8` for headroom on two-core runners.
+
+This is a real bug, not a test artifact: a deployment doing private-mode
+remasking on a narrow machine can hit it. It shares a root cause with the
+`akd_core` + `parallel` interaction noted above.
 
 #### In-process shards now carry their own store
 

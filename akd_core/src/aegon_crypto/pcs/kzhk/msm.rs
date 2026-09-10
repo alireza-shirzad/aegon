@@ -92,6 +92,25 @@ pub fn msm<G: VariableBaseMSM>(bases: &[G::MulBase], scalars: &[G::ScalarField])
     }
     #[cfg(feature = "parallel")]
     {
+        // Already running on a rayon worker? Then stay on it.
+        //
+        // `ThreadPool::install` called from *outside* the target pool blocks
+        // the calling thread until that pool frees a worker. MSMs nest — an
+        // opening's Pippenger call runs more MSMs underneath it — and the
+        // width comes from the input size, so an inner MSM routinely lands in
+        // a different bucket than its parent. That parks a worker of pool A
+        // waiting on pool B while B's workers wait on A, and once every worker
+        // in the cycle is parked nothing can make progress. Narrow pools just
+        // make the cycle easy to close: it reproduces reliably at one to four
+        // threads and intermittently above that.
+        //
+        // Running inline instead costs nothing — the surrounding pool's
+        // work-stealing parallelises `msm_unchecked` exactly as a dedicated
+        // pool would, minus the hand-off. The size-tuned pools still apply on
+        // the outermost call, which is where the calibration was measured.
+        if rayon::current_thread_index().is_some() {
+            return G::msm_unchecked(bases, scalars);
+        }
         let preferred = threads_for_size(n);
         let budget = rayon::current_num_threads().max(1);
         let threads = preferred.min(budget);
