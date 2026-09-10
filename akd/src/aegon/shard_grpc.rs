@@ -650,20 +650,48 @@ where
 
         // The three remasks are independent — each takes its own
         // masking package, has its own commitment + tau, and writes
-        // its own output proof. `remask_value_side_proof` is `&self`
-        // and the three commitments / evaluations / proofs / taus are
-        // disjoint owned/borrowed slices, so rayon can run them in
+        // its own output proof. The three commitments / evaluations /
+        // proofs / taus are disjoint, so rayon can run them in
         // parallel. With an inline-generated masking package this
-        // saves ~2/3 of the wall (~50 ms → ~17 ms per entry); with a
-        // real masking server it cuts the fetch+apply RTT × 3 down to
-        // a single concurrent burst.
+        // saves ~2/3 of the wall (~50 ms → ~17 ms per entry).
+        //
+        // Fetch all three packages FIRST, here on the calling thread.
+        // Fetching blocks on the masking pool's channel, and the
+        // producers filling that channel need the global rayon pool to
+        // build a package. Fetching from inside the join below parks
+        // every rayon worker waiting for a package that can only be
+        // produced once a worker frees up — a circular wait, and the
+        // hang that made the private-mode tests flaky. Only pure
+        // compute goes inside the join.
+        let pkg_rand_pre = self.fetch_masking_package()?;
+        let pkg_rand_post = self.fetch_masking_package()?;
+        let pkg_value_post = self.fetch_masking_package()?;
+        // A non-hiding SRS needs no package and `remask_*` returns the
+        // plain proof; the dummy is never read in that case.
+        let with_pkg = |pkg: &Option<P::MaskingPackage>,
+                        commitment: &P::Commitment,
+                        eval: &E::ScalarField,
+                        proof: P::Proof,
+                        tau: &P::HidingScalar,
+                        label: &'static [u8]| match pkg {
+            Some(pkg) => self.remask_value_side_proof_with_package(
+                commitment,
+                &entry.slot_bits,
+                eval,
+                proof,
+                tau,
+                label,
+                pkg,
+            ),
+            None => Ok(proof),
+        };
         let ((rand_value_pre_proof, rand_value_post_proof), value_post_proof) = rayon::join(
             || {
                 rayon::join(
                     || {
-                        self.remask_value_side_proof(
+                        with_pkg(
+                            &pkg_rand_pre,
                             &entry.prev_shard_commit.rand_value_commitment,
-                            &entry.slot_bits,
                             &entry.rand_value_pre_eval,
                             entry.rand_value_pre_proof.clone(),
                             &rand_value_pre_tau,
@@ -671,9 +699,9 @@ where
                         )
                     },
                     || {
-                        self.remask_value_side_proof(
+                        with_pkg(
+                            &pkg_rand_post,
                             &entry.post_shard_commit.rand_value_commitment,
-                            &entry.slot_bits,
                             &entry.rand_value_post_eval,
                             entry.rand_value_post_proof.clone(),
                             &rand_value_post_tau,
@@ -683,9 +711,9 @@ where
                 )
             },
             || {
-                self.remask_value_side_proof(
+                with_pkg(
+                    &pkg_value_post,
                     &entry.post_shard_commit.value_commitment,
-                    &entry.slot_bits,
                     &entry.value_post_eval,
                     entry.value_post_proof.clone(),
                     &value_post_tau,

@@ -439,17 +439,6 @@ fn srs_path_round_trip() {
 }
 
 #[test]
-#[ignore = "DEADLOCK (not a failure): private-mode remasking hangs unless rayon's \
-           global pool is wide. `remask_value_history_entry` runs a nested \
-           `rayon::join` whose leaves each drive an MSM, and the KZH-k MSM \
-           wrapper installs into a size-keyed pool; a worker of one pool then \
-           blocks on another, and with few workers the wait can close a cycle. \
-           Measured with `--skip bench` on this file: 1 and 4+ threads pass, 2 \
-           and 3 hang, and under `--features ivc_audit` even 8 hangs. Partly \
-           addressed -- `msm()` no longer crosses pools from inside a worker, \
-           which is what fixed the 1-thread case -- but the nested-join path \
-           still has one. Run with `--ignored` on a wide machine. See \
-           README \"Known limitation\"."]
 fn private_mode_publish_lookup_round_trip() {
     // Same minimal happy-path as `srs_path_round_trip`, but with
     // `private(true)` — exercises:
@@ -514,17 +503,6 @@ fn private_mode_publish_lookup_round_trip() {
 }
 
 #[test]
-#[ignore = "DEADLOCK (not a failure): private-mode remasking hangs unless rayon's \
-           global pool is wide. `remask_value_history_entry` runs a nested \
-           `rayon::join` whose leaves each drive an MSM, and the KZH-k MSM \
-           wrapper installs into a size-keyed pool; a worker of one pool then \
-           blocks on another, and with few workers the wait can close a cycle. \
-           Measured with `--skip bench` on this file: 1 and 4+ threads pass, 2 \
-           and 3 hang, and under `--features ivc_audit` even 8 hangs. Partly \
-           addressed -- `msm()` no longer crosses pools from inside a worker, \
-           which is what fixed the 1-thread case -- but the nested-join path \
-           still has one. Run with `--ignored` on a wide machine. See \
-           README \"Known limitation\"."]
 fn private_mode_lookup_history_round_trip() {
     // Heavier round-trip under private=true with RocksDB: publish
     // twice, fetch lookup_history (which produces per-epoch §6.4
