@@ -16,16 +16,6 @@ env:
   CARGO_PROFILE_DEV_DEBUG: "0"
   CARGO_PROFILE_TEST_DEBUG: "0"
   CARGO_INCREMENTAL: "0"
-  # Rayon sizes its global pool from the core count, and a standard runner has
-  # two cores. Private-mode remasking nests `rayon::join` over MSMs, and the
-  # KZH-k MSM wrapper installs into a size-keyed pool, so a worker of one pool
-  # can park waiting on another; with few workers that closes a cycle. Give it
-  # headroom. The threads in question are blocked rather than runnable, so
-  # oversubscribing two cores costs context switches, not throughput.
-  #
-  # Headroom, not a cure -- the two tests that hang worst are `#[ignore]`d.
-  # See "Known limitation" in README.md.
-  RAYON_NUM_THREADS: "8"
 
 jobs:
   check:

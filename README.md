@@ -433,33 +433,17 @@ thread limit inside arkworks' MSM.
 A few tests are `#[ignore]`d, all of them slow benchmarks rather than known
 failures; each carries its reason in the attribute, and `--ignored` runs them.
 
-#### Known limitation: private-mode remasking can deadlock on rayon
+#### Known limitation: `akd_core` alone, with `parallel`
 
-Two tests, `private_mode_publish_lookup_round_trip` and
-`private_mode_lookup_history_round_trip`, are `#[ignore]`d because they
-**hang** rather than fail. Run them with `--ignored` on a wide machine.
+`cargo test -p akd_core --features parallel` fails. The seven `test_dense_*`
+KZH-k tests each load a large SRS, and running them concurrently exhausts the
+machine — a stack overflow on a rayon worker at the default stack size, and
+still failures at `RUST_MIN_STACK=32M`. Each passes on its own. Add
+`-- --test-threads=1` if you need that combination.
 
-`remask_value_history_entry` runs a nested `rayon::join` whose leaves each
-drive an MSM, and the KZH-k MSM wrapper installs the Pippenger call into a
-pool keyed on the input size. `ThreadPool::install` from outside the target
-pool parks the caller until that pool frees a worker, so a worker of one pool
-ends up waiting on another; when workers are scarce that wait can close a
-cycle and nothing progresses.
-
-Measured on `sharded_aegon` with `--skip bench`: 1 thread and 4-or-more pass,
-2 and 3 hang, and with `--features ivc_audit` even 8 hangs. The
-non-monotonicity is what you would expect from a cycle that needs at least two
-blocked workers to form and enough headroom to avoid.
-
-Half of it is fixed: `msm()` now runs inline when it is already on a rayon
-worker instead of hopping pools, which is what made the single-thread case
-pass. The nested-join path still crosses pools, and fixing that properly means
-reworking how the MSM wrapper picks its pool — not yet done. CI pins
-`RAYON_NUM_THREADS: 8` for headroom on two-core runners.
-
-This is a real bug, not a test artifact: a deployment doing private-mode
-remasking on a narrow machine can hit it. It shares a root cause with the
-`akd_core` + `parallel` interaction noted above.
+This is why the two crates are tested separately: `akd` depends on `akd_core`
+with `parallel` enabled and exercises the same code through its own suite,
+which passes.
 
 #### In-process shards now carry their own store
 

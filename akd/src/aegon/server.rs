@@ -2793,6 +2793,50 @@ where
         let package = source
             .fetch_package(self.log_capacity)
             .map_err(|e| AegonError::Config(format!("masking fetch: {e}")))?;
+        let _ = point;
+        self.remask_value_side_proof_with_package(
+            commitment,
+            slot_bits,
+            value,
+            non_zk_proof,
+            tau_f,
+            transcript_label,
+            &package,
+        )
+    }
+
+    /// [`Self::remask_value_side_proof`] with the masking package
+    /// already in hand.
+    ///
+    /// Split out because fetching is a **blocking wait** and remasking
+    /// is pure compute, and the two must not share a thread when that
+    /// thread is a rayon worker. `MaskingClientPool::fetch_package`
+    /// blocks on a channel until a producer delivers, and the producers
+    /// run `generate_masking_package`, whose arkworks internals reach
+    /// for the global rayon pool. Park every worker inside a fetch and
+    /// the producers can no longer get a worker to finish the very
+    /// package those workers are waiting on — a circular wait that
+    /// closes only when the queue happens to run dry at the wrong
+    /// moment, which is why it presented as a flaky hang rather than a
+    /// clean threshold.
+    ///
+    /// Callers wanting several remasks in parallel therefore fetch all
+    /// their packages first, on the calling thread, and hand them here.
+    #[allow(clippy::too_many_arguments)]
+    pub fn remask_value_side_proof_with_package(
+        &self,
+        commitment: &P::Commitment,
+        slot_bits: &[bool],
+        value: &E::ScalarField,
+        non_zk_proof: P::Proof,
+        tau_f: &P::HidingScalar,
+        transcript_label: &'static [u8],
+        package: &P::MaskingPackage,
+    ) -> Result<P::Proof, AegonError> {
+        if !self.prover_param.is_zk() {
+            return Ok(non_zk_proof);
+        }
+        let point = bool_index_to_point::<E::ScalarField>(slot_bits);
         let mut tr = IOPTranscript::<E::ScalarField>::new(transcript_label);
         let proof = P::remask_with_package(
             self.prover_param.as_ref(),
@@ -2802,9 +2846,31 @@ where
             non_zk_proof,
             tau_f,
             &mut tr,
-            &package,
+            package,
         )?;
         Ok(proof)
+    }
+
+    /// Fetch one masking package on the calling thread.
+    ///
+    /// Exposed so callers can hoist every blocking fetch out of a
+    /// `rayon::join` — see
+    /// [`Self::remask_value_side_proof_with_package`] for why that
+    /// matters. Returns `None` on a non-hiding SRS, where no package is
+    /// needed.
+    pub fn fetch_masking_package(&self) -> Result<Option<P::MaskingPackage>, AegonError> {
+        if !self.prover_param.is_zk() {
+            return Ok(None);
+        }
+        let source = self.masking_client.as_ref().ok_or_else(|| {
+            AegonError::Config(
+                "hiding-mode Aegon missing a MaskingSource — this should be impossible".into(),
+            )
+        })?;
+        source
+            .fetch_package(self.log_capacity)
+            .map(Some)
+            .map_err(|e| AegonError::Config(format!("masking fetch: {e}")))
     }
 
     /// Helper: hiding-open `poly` at `slot_bits` using the masking-
