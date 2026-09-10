@@ -435,15 +435,39 @@ failures; each carries its reason in the attribute, and `--ignored` runs them.
 
 #### Known limitation: `akd_core` alone, with `parallel`
 
-`cargo test -p akd_core --features parallel` fails. The seven `test_dense_*`
-KZH-k tests each load a large SRS, and running them concurrently exhausts the
-machine — a stack overflow on a rayon worker at the default stack size, and
-still failures at `RUST_MIN_STACK=32M`. Each passes on its own. Add
-`-- --test-threads=1` if you need that combination.
+`cargo test -p akd_core --features parallel` fails, and the cause is upstream.
+The pinned arkworks revision builds a **fresh rayon `ThreadPool` per chunk, on
+every MSM call**, and unwraps the result:
 
-This is why the two crates are tested separately: `akd` depends on `akd_core`
-with `parallel` enabled and exercises the same code through its own suite,
-which passes.
+```rust
+// algebra @ 598a5fb, ec/src/scalar_mul/variable_base/mod.rs:546
+let result = rayon::ThreadPoolBuilder::new()
+    .num_threads(THREADS_PER_CHUNK.min(rayon::current_num_threads()))
+    .build()
+    .unwrap()
+    .install(|| msm_bigint_wnaf_parallel::<V>(bases, scalars));
+```
+
+`msm_unchecked` → `msm_bigint` → `msm_bigint_wnaf` is the path BN254 G1 takes
+(`NEGATION_IS_CHEAP`), and `num_chunks` is `current_num_threads() / 2`, so each
+MSM spawns and tears down roughly one thread per core.
+
+Two ways that surfaces, both in debug builds:
+
+* At the default stack, `test_dense_boolean_k4` overflows a worker's stack --
+  alone, at `--test-threads=1`, so it is depth and not contention.
+* Raise `RUST_MIN_STACK` enough to clear that and the four `k5` tests fail
+  instead, because spawning those per-chunk pools with large stacks returns
+  `EAGAIN`: `ThreadPoolBuildError { IOError(Os { code: 35, WouldBlock }) }`.
+
+`akd` depends on `akd_core` with `parallel` enabled and exercises the same code
+through its own suite, which passes -- its MSMs are smaller, so it does not
+reach either edge. That is why the two crates are tested separately.
+
+Worth knowing beyond the test failure: this per-call pool construction is on
+the hot path for every commit and opening, release builds included. Whether a
+newer arkworks revision avoids it is untested here; the revisions are pinned
+deliberately, and changing them moves the published measurements.
 
 #### In-process shards now carry their own store
 
