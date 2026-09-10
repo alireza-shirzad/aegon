@@ -56,9 +56,12 @@ pub enum AegonError {
     #[error("database error: {0}")]
     Database(String),
 
-    /// A failure inside the Nova IVC audit path — parameter setup,
-    /// folding a step, or verifying a recursive proof.
-    #[cfg(feature = "ivc_audit")]
+    /// A failure on the IVC audit path — reading the Poseidon
+    /// transcript's inputs out of a published epoch, parameter setup,
+    /// folding a step, or verifying a recursive proof. Not gated on
+    /// `ivc_audit`: the Poseidon derivations are the default transcript
+    /// and report through here whether or not the folding circuit is
+    /// compiled in.
     #[error("IVC audit error: {0}")]
     Ivc(String),
 }

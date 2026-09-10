@@ -57,15 +57,42 @@ use super::types::AegonPcs;
 /// Which hash family the audit-path Fiat–Shamir derivations use.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum AuditFs {
-    /// The original SHA256 derivations. Default; unchanged wire
-    /// behaviour.
-    #[default]
+    /// The original SHA256 derivations. Select with `--audit-fs
+    /// sha256` on the binaries that expose it, or by installing
+    /// [`AuditFsHooks::sha256`] directly.
     Sha256,
-    /// Poseidon over BN254's base field, so the derivations can be
-    /// recomputed cheaply inside the Nova folding circuit. Requires
-    /// the `ivc_audit` feature to construct — see
+    /// Poseidon over BN254's base field. The default: it is the only
+    /// transcript a fast-forward auditor can recompute affordably in
+    /// circuit, and server and auditor must agree, so a deployment
+    /// that might ever want IVC auditing has to be on it from its
+    /// first epoch. Build the hooks with
     /// [`crate::aegon::ivc::adapter::poseidon_audit_fs`].
+    #[default]
     Poseidon,
+}
+
+impl fmt::Display for AuditFs {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            AuditFs::Sha256 => "sha256",
+            AuditFs::Poseidon => "poseidon",
+        })
+    }
+}
+
+impl std::str::FromStr for AuditFs {
+    type Err = String;
+
+    /// Parse a transcript name, so binaries can expose `--audit-fs`.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "poseidon" => Ok(AuditFs::Poseidon),
+            "sha256" | "sha-256" => Ok(AuditFs::Sha256),
+            other => Err(format!(
+                "unknown audit transcript '{other}' (expected 'poseidon' or 'sha256')"
+            )),
+        }
+    }
 }
 
 /// Derive a chain scalar from the previous one and every shard's new

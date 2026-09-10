@@ -205,6 +205,14 @@ struct Args {
     /// diagnosing publish-time memory spikes.
     #[arg(long)]
     log_rss: bool,
+    /// Fiat-Shamir transcript for the audit path: `poseidon`
+    /// (default) or `sha256`.
+    ///
+    /// Server and auditor must agree, and the choice is baked into
+    /// every epoch the server publishes, so it cannot be changed on a
+    /// live chain. `poseidon` is what a fast-forward auditor needs.
+    #[arg(long, default_value_t = akd::aegon::audit_fs::AuditFs::Poseidon)]
+    audit_fs: akd::aegon::audit_fs::AuditFs,
 }
 
 #[tokio::main]
@@ -225,7 +233,7 @@ async fn main() -> ExitCode {
         log_capacity: args.shard_log_capacity,
         private: args.private,
         pcs_config: KZHKConfig::new(args.kzh_k, args.private),
-        audit_fs: Default::default(),
+        audit_fs: akd::aegon::ivc::adapter::hooks_for(args.audit_fs),
         _e: PhantomData,
     };
 

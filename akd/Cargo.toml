@@ -71,7 +71,7 @@ mimalloc_alloc = []
 # default — pulls in the halo2curves/ff stack that nova-snark uses,
 # which is entirely independent of the arkworks stack the rest of the
 # crate is built on.
-ivc_audit = ["dep:nova-snark", "dep:ff", "dep:serde", "dep:bincode"]
+ivc_audit = ["dep:serde", "dep:bincode"]
 
 [dependencies]
 ## Required dependencies ##
@@ -122,8 +122,11 @@ colored = { version = "2", optional = true }
 # halo2curves bn256/grumpkin field types, so no direct dependency on
 # either is needed here. `ff` is required for the `PrimeField`
 # trait methods used by the ark<->halo2 coordinate bridge.
-nova-snark = { version = "0.75", default-features = false, optional = true }
-ff = { version = "0.13", optional = true }
+# Not optional: the audit transcript defaults to Poseidon, and the native
+# Poseidon lives in nova-snark (`PoseidonRO`). Only the folding circuit
+# and prover sit behind `ivc_audit`.
+nova-snark = { version = "0.75", default-features = false }
+ff = { version = "0.13" }
 # Wire-size measurement for the recursive proof; matches the encoding
 # nova-snark itself uses.
 bincode = { version = "2", features = ["serde"], optional = true }

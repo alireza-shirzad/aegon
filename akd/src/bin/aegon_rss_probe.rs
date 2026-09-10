@@ -75,6 +75,14 @@ struct Args {
     /// Setup seed for ChaCha20Rng. Affects SRS + per-batch label hashing.
     #[arg(long, default_value_t = 42)]
     seed: u64,
+    /// Fiat-Shamir transcript for the audit path: `poseidon`
+    /// (default) or `sha256`.
+    ///
+    /// Server and auditor must agree, and the choice is baked into
+    /// every epoch the server publishes, so it cannot be changed on a
+    /// live chain. `poseidon` is what a fast-forward auditor needs.
+    #[arg(long, default_value_t = akd::aegon::audit_fs::AuditFs::Poseidon)]
+    audit_fs: akd::aegon::audit_fs::AuditFs,
 }
 
 fn main() -> ExitCode {
@@ -102,7 +110,7 @@ fn main() -> ExitCode {
         log_capacity: args.shard_log_capacity,
         private: false,
         pcs_config: KZHKConfig::new(kzh_k, false),
-        audit_fs: Default::default(),
+        audit_fs: akd::aegon::ivc::adapter::hooks_for(args.audit_fs),
         _e: PhantomData,
     };
 

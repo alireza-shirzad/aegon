@@ -34,7 +34,6 @@ pub mod instrument;
 /// IVC (Nova) auditing — fold the per-epoch invariance check into a
 /// single recursive proof. See the module docs for the curve-cycle
 /// argument that makes it cheap.
-#[cfg(feature = "ivc_audit")]
 pub mod ivc;
 pub mod masking;
 pub mod presets;

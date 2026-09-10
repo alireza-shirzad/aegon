@@ -29,10 +29,15 @@ Concretely, before anyone relies on it:
   authorization anywhere — a server trusts whatever reaches it. The
   benchmark topology relies entirely on VPC firewall rules. See
   `scripts/README.md` for the specifics.
-* **The `ivc_audit` feature changes the audit transcript hash.** Enabling it
-  switches the audit path's Fiat-Shamir derivations from SHA-256 to Poseidon.
-  Servers and auditors must agree; a mismatch rejects every epoch. This is a
-  deployment-wide, setup-time decision.
+* **The audit transcript is fixed for the life of a chain.** The audit path's
+  Fiat-Shamir derivations default to Poseidon; `--audit-fs sha256` selects the
+  original SHA-256 ones. Servers and auditors must agree, and the choice is
+  baked into every epoch the server publishes, so it cannot be changed on a
+  live chain -- a mismatch rejects every epoch. Poseidon is the default
+  because it is the only transcript a fast-forward auditor can recompute
+  affordably in circuit, and a deployment that might ever want that has to
+  start on it. The Merkle commitment, lookup, consistency and history paths
+  are unaffected either way and stay on SHA-256.
 
 ## Reporting a vulnerability
 
