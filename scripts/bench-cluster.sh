@@ -33,7 +33,7 @@
 #   SAMPLES_PER_BATCH   timed publishes per batch     (1)
 #   SETUP_SEED          deterministic SRS gen seed    (42)
 #   PREFILL_SEED        deterministic prefill seed    (1)
-#   SHARD_MACHINE_TYPE  GCE machine type for shards   (n2-highmem-16 — 128 GB RAM)
+#   SHARD_MACHINE_TYPE  GCE machine type for shards   (n2-standard-16 — 64 GB RAM)
 #   COORD_MACHINE_TYPE  GCE machine type coordinator  (defaults to SHARD_MACHINE_TYPE)
 #
 # At the defaults above (N_SHARDS=128, SHARD_LOG_CAPACITY=27, KZH_K=9,
@@ -89,23 +89,26 @@ PREFILL_SEED="${PREFILL_SEED:-1}"
 # keeps each phase's wall-clock comparable to medium (4 shards × 1
 # round ≈ 128 shards / 32 × 4 rounds).
 MAX_CONCURRENT_SSH="${MAX_CONCURRENT_SSH:-32}"
-# Bumped from n2-standard-16 (64 GB) to n2-highmem-16 (128 GB) after
-# observing shard RSS climb to ~40 GB at fill=30% on the streaming
-# ladder (~14 GB → 38.8 GB across 8 M entries written, then dropping
-# to ~23 GB after compaction). The peak vs steady-state spread is wide
-# enough that 64 GB was likely to OOM somewhere in fill=60%/90% even
-# though the steady state would fit; doubling RAM at the same core
-# count is the cheapest hedge. Override via env var when running at
-# very small scales where 64 GB suffices.
-SHARD_MACHINE_TYPE="${SHARD_MACHINE_TYPE:-n2-highmem-16}"
+# n2-standard-16 is 16 vCPU / 64 GB, matching the small and medium
+# cluster scripts so every regime reports the same machine.
+#
+# Watch RSS at high fill. Shard RSS was observed climbing to ~40 GB at
+# fill=30% on the streaming ladder (~14 GB → 38.8 GB across 8 M entries
+# written, then dropping to ~23 GB after compaction). Steady state fits
+# in 64 GB comfortably; the peak is what to keep an eye on through
+# fill=60%/90%. If a shard OOMs there, raise RAM at the same core count
+# via SHARD_MACHINE_TYPE rather than changing the core count, so the
+# per-core numbers stay comparable.
+SHARD_MACHINE_TYPE="${SHARD_MACHINE_TYPE:-n2-standard-16}"
 # Coordinator uses the same machine type as the shards by default. The
 # coordinator's in-memory footprint (open-addressing slot index over the
 # 2^true_log_capacity keyspace + per-shard connection/batch buffers +
 # RocksDB memtables) scales with keyspace size and shard count, so the
 # small n2-standard-4 (16 GB) that sufficed for the medium regime OOM-kills
-# at the large regime (2^32 keyspace, 128 shards). Matching the shard type
-# keeps every node's CPU/RAM identical across the cluster; override with
-# COORD_MACHINE_TYPE=... if you need a different size.
+# at the large regime (2^32 keyspace, 128 shards) -- do not drop back to it
+# there. Matching the shard type keeps every node's CPU/RAM identical
+# across the cluster; override with COORD_MACHINE_TYPE=... if you need a
+# different size.
 COORD_MACHINE_TYPE="${COORD_MACHINE_TYPE:-$SHARD_MACHINE_TYPE}"
 # Coordinator boot disk is shared with the RocksDB store at
 # $COORD_DB_PATH. Must fit the AKD history for the deepest fill we

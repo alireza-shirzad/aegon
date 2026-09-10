@@ -108,11 +108,20 @@ export LOOKUP_FILL_PERCENTS="${LOOKUP_FILL_PERCENTS:-1,2,3,4,5,6,7,8,9,10}"
 # overhead get added.
 export USE_REMOTE_COORD="${USE_REMOTE_COORD:-1}"
 
-# Default zone: us-central1-a (us-central1-f was stocked out on
-# n2-highmem-16 during the most recent medium run, and 128-VM cluster
-# requests are more likely to hit zonal capacity limits). Override
-# via ZONE=... if needed.
+# Default zone: us-central1-a (us-central1-f was stocked out during the
+# most recent medium run, and 128-VM cluster requests are more likely to
+# hit zonal capacity limits). Override via ZONE=... if needed.
 export ZONE="${ZONE:-us-central1-a}"
+
+# Pin the machine types explicitly, as the small and medium scripts do.
+# This script used to set none of them and silently inherited whatever
+# bench-cluster.sh defaulted to, which is how the large regime ended up
+# on different hardware than the small and medium ones without anyone
+# choosing that. Every regime now reports n2-standard-16.
+export SHARD_MACHINE_TYPE="${SHARD_MACHINE_TYPE:-n2-standard-16}"
+export COORD_MACHINE_TYPE="${COORD_MACHINE_TYPE:-n2-standard-16}"
+export BENCH_CLIENT_MACHINE_TYPE="${BENCH_CLIENT_MACHINE_TYPE:-n2-standard-16}"
+export MASKING_MACHINE_TYPE="${MASKING_MACHINE_TYPE:-n2-standard-16}"
 
 # --- Disk overrides for the new architecture ----------------------
 # Coord state in the per-shard-DB era is O(N_shards) (just

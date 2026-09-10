@@ -80,12 +80,15 @@ export PUBLISH_WARMUP_BATCH_SIZE="${PUBLISH_WARMUP_BATCH_SIZE:-131072}"
 # Bench-client must hold the in-process coord state up to 10% fill.
 # Footprint: ~26 GB fixed (2^32 open-addressing index) + ~165 B/entry
 # (measured from the v1 OOM trace at 5% / 215M entries → 61.2 GB).
-# 10% × 2^32 ≈ 430M entries → ~97 GB working set; n2-highmem-32 gives
-# 256 GB so there's ~160 GB headroom for RocksDB memtables/block cache,
-# tokio buffers, and audit-time scratch state. Cost delta vs the
-# n2-standard-16 default is ~$1.10/h × ~24h ≈ $27 for the whole run.
+# 10% × 2^32 ≈ 430M entries → ~97 GB working set, so the bench client
+# needs more than the 64 GB an n2-standard-16 provides. n2-standard-32
+# gives 128 GB, which clears the working set with room for RocksDB
+# memtables/block cache, tokio buffers, and audit-time scratch state.
 # The 32 vCPUs also help drive the conc=512/1024 throughput sweep.
-export BENCH_CLIENT_MACHINE_TYPE="${BENCH_CLIENT_MACHINE_TYPE:-n2-highmem-32}"
+#
+# This is the load generator, not a measured node -- nothing reported in
+# the paper is timed on it.
+export BENCH_CLIENT_MACHINE_TYPE="${BENCH_CLIENT_MACHINE_TYPE:-n2-standard-32}"
 # Fill levels: low-fill sweep 1..10%. Real-publish climb to high fill is
 # infeasible at large scale — 90% of 2^32 = 3.9B entries ≈ 10 days at the
 # coordinator's ~4.4k entries/s. Coordinator memory is FLAT (~26 GB, the

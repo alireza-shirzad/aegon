@@ -58,7 +58,7 @@ fi
 sleep 30
 
 # --- Stage 3: large ---
-# N_MASKING_SERVERS=35 and BENCH_CLIENT_MACHINE_TYPE=n2-highmem-32 are
+# N_MASKING_SERVERS=35 and BENCH_CLIENT_MACHINE_TYPE=n2-standard-32 are
 # set as defaults in run-cluster-suite.sh — no overrides needed here.
 log "starting large"
 if "$REPO_ROOT/scripts/run-cluster-suite.sh"; then
