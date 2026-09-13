@@ -40,3 +40,7 @@ aegon_crypto/*.json
 # home directory paths.
 bench-results/*.log.v*-killed
 bench-results/*.log.v*-up-failed
+
+# macOS / iCloud Drive conflict copies ("lib 2.rs", "Cargo 2.toml"), which
+# appear when a synced folder is rewritten mid-sync.
+* 2.*
