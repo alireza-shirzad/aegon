@@ -31,8 +31,8 @@ bench-results/srs/
 
 # Divan-fork JSON output: every `cargo bench` run drops one of these in
 # the crate root, named after the bench binary. Regeneratable, noisy.
-akd/*.json
-akd_core/*.json
+aegon/*.json
+aegon_crypto/*.json
 
 # Logs from crashed/killed cluster runs. The JSON result files in
 # bench-results/ are the actual data and stay tracked; these are multi-MB

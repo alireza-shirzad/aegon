@@ -30,14 +30,15 @@ Concretely, before anyone relies on it:
   benchmark topology relies entirely on VPC firewall rules. See
   `scripts/README.md` for the specifics.
 * **The audit transcript is fixed for the life of a chain.** The audit path's
-  Fiat-Shamir derivations default to Poseidon; `--audit-fs sha256` selects the
-  original SHA-256 ones. Servers and auditors must agree, and the choice is
-  baked into every epoch the server publishes, so it cannot be changed on a
-  live chain -- a mismatch rejects every epoch. Poseidon is the default
-  because it is the only transcript a fast-forward auditor can recompute
-  affordably in circuit, and a deployment that might ever want that has to
-  start on it. The Merkle commitment, lookup, consistency and history paths
-  are unaffected either way and stay on SHA-256.
+  Fiat-Shamir derivations default to Poseidon on every binary; `--audit-fs
+  sha256` selects the original SHA-256 ones. Library code chooses on the
+  config builder, whose generic default is SHA-256 (see the README). Servers
+  and auditors must agree, and the choice is baked into every epoch the server
+  publishes, so it cannot be changed on a live chain -- a mismatch rejects
+  every epoch. Poseidon is the default because it is the only transcript a
+  fast-forward auditor can recompute affordably in circuit, and a deployment
+  that might ever want that has to start on it. The Merkle commitment, lookup,
+  consistency and history paths are unaffected either way and stay on SHA-256.
 
 ## Reporting a vulnerability
 
@@ -50,6 +51,7 @@ hear about it — please include which claim in the paper you believe fails.
 
 ## Upstream
 
-Vulnerabilities in code inherited from
-[facebook/akd](https://github.com/facebook/akd) that also affect upstream
-should be reported to Meta through their process, not here.
+The ECVRF implementation (`aegon_crypto::ecvrf`) is taken from
+[facebook/akd](https://github.com/facebook/akd). Vulnerabilities in it that
+also affect upstream should be reported to Meta through their process, not
+here.

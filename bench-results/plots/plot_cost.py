@@ -76,7 +76,7 @@ class ClusterConfig:
     # Per-shard polynomial capacity (log2). Default matches medium and
     # large in the bench: shard_log_capacity = 27 → 2^27 slots per
     # shard. Over-provisioning factor 4 (LOG2_OVER_PROVISIONING_FACTOR
-    # = 2 in akd/src/aegon/config.rs), so each shard holds 2^25 = ~33M
+    # = 2 in aegon/src/config.rs), so each shard holds 2^25 = ~33M
     # dictionary entries.
     shard_log_capacity: int = 27
     overprov_factor: int = 4

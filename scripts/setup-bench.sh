@@ -12,10 +12,10 @@
 #   medium    | 2^26 entries| 2^27 slots/shard | 27 per shard  | 9     | 2
 #   large     | 2^32 entries| 2^27 slots/shard | 27 per shard  | 9     | 128
 #
-# `auto` = optimal_kzh_k(shard_log_capacity). See akd::aegon::presets.
+# `auto` = optimal_kzh_k(shard_log_capacity). See aegon::presets.
 # The user-facing capacity for each regime is the shard polynomial size
 # divided by `OVER_PROVISIONING_FACTOR` (= 4); see
-# `akd/src/aegon/config.rs`.
+# `aegon/src/config.rs`.
 #
 # What runs where:
 #
@@ -49,7 +49,7 @@ log() { echo "[$(date +%H:%M:%S)] $*"; }
 # at log_cap=28 is unbearably slow; release-mode parallel-feature is
 # the only realistic mode for the medium regime.
 log "building aegon_setup_bench (release)"
-(cd "$REPO_ROOT" && cargo build --release -p akd --bin aegon_setup_bench) >/dev/null
+(cd "$REPO_ROOT" && cargo build --release -p aegon --bin aegon_setup_bench) >/dev/null
 SETUP_BENCH="$REPO_ROOT/target/release/aegon_setup_bench"
 [[ -x "$SETUP_BENCH" ]] || { echo "binary missing: $SETUP_BENCH" >&2; exit 1; }
 

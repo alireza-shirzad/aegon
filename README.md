@@ -8,16 +8,16 @@
   <em>Self-auditable key transparency</em>
 </p>
 
-Sharded, polynomial-commitment-backed auditable key directory. This crate
-preserves the public AKD API surface (publish / lookup / consistency / audit)
-but replaces the original SEEMless+Merkle backend with the **Aegon** engine
-built on KZH-k polynomial commitments, sharded across N machines and
-coordinated over gRPC.
+Sharded, polynomial-commitment-backed key transparency. **Aegon** is built
+on KZH-k polynomial commitments, sharded across N machines, and coordinated
+over gRPC. Every epoch is auditable in constant time, and an auditor that
+falls behind can catch up with a single recursive proof.
 
-This is a fork of [facebook/akd](https://github.com/facebook/akd); the
-top-level wire types (`AkdLabel`, `AkdValue`, `LookupProof`, etc.) are
-intentionally unchanged, so downstream callers can migrate without
-rewrites.
+The repository has two crates: `aegon`, the engine, servers, and clients;
+and `aegon_crypto`, the polynomial commitment scheme and supporting
+primitives. It started as a fork of [facebook/akd](https://github.com/facebook/akd),
+but none of AKD's directory, Merkle-tree backend, or API remains — only its
+ECVRF implementation (see `NOTICE`).
 
 ---
 
@@ -51,7 +51,7 @@ pulled in by Cargo.
 
 | Dependency | Why | Install |
 | :--- | :--- | :--- |
-| `protoc` | `akd_core`'s build script compiles the `.proto` specs | `apt install protobuf-compiler` / `brew install protobuf` |
+| `protoc` | `aegon`'s build script compiles the gRPC `.proto` specs | `apt install protobuf-compiler` / `brew install protobuf` |
 | `libclang` | `librocksdb-sys` runs `bindgen` | `apt install libclang-dev clang` / `brew install llvm` |
 
 On Linux, installing `libclang-dev` is enough. On macOS, Homebrew's LLVM is
@@ -73,9 +73,10 @@ dependency graph moves them.
 ## Quick start (single process, in-memory shards)
 
 ```rust
-use akd::aegon::{ShardedAegon, ShardedAegonConfig, Sha256Hash, verify_sharded_lookup};
+use aegon::ivc::adapter::hooks_for;
+use aegon::{verify_sharded_lookup_two_layer, Sha256Hash, ShardedAegon, ShardedAegonConfig};
+use aegon_crypto::pcs::kzhk::KZHK;
 use ark_bn254::Bn254;
-use akd_core::aegon_crypto::pcs::kzhk::KZHK;
 use ark_std::rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 
@@ -86,27 +87,25 @@ let cfg = ShardedAegonConfig::<Bn254, Pcs>::builder()
     .log_n_shards(2)              // 4 shards
     .private(false)
     .kzh_k(2)
+    // The Poseidon audit transcript, as the binaries use by default.
+    .audit_fs(hooks_for(Default::default()))
     .build()?;
 
 let mut rng = ChaCha20Rng::seed_from_u64(0);
 let mut server = ShardedAegon::<Bn254, Pcs, Sha256Hash>::setup(&mut rng, &cfg)?;
 
-let (commit, _audit_proof) = server.publish(&[
+let commit = server.publish_two_layer(&[
     (b"alice".to_vec(), b"alice-v1".to_vec()),
     (b"bob".to_vec(), b"bob-v1".to_vec()),
 ])?;
 
-let proof = server.lookup(&b"alice".to_vec())?;
+let (_value, proof) = server.lookup_two_layer(&b"alice".to_vec())?;
 let ctx = server.sharded_verifier_context();
-let ok = verify_sharded_lookup::<Bn254, Pcs, Sha256Hash>(
+let ok = verify_sharded_lookup_two_layer::<Bn254, Pcs, Sha256Hash>(
     &ctx, &commit, &b"alice".to_vec(), &b"alice-v1".to_vec(), &proof,
 )?;
 assert!(ok);
 ```
-
-For the integration through the legacy AKD `Directory` API (with
-`AkdLabel`, `AkdValue`, etc.), see `akd::Directory` and
-`akd::aegon_facade::verify_lookup`.
 
 ---
 
@@ -157,7 +156,7 @@ shard_log_capacity = log_capacity - log_n_shards
 kzh_k             = optimal_kzh_k(shard_log_capacity)
 ```
 
-The `optimal_kzh_k` function (in `akd::aegon::presets`) minimizes the
+The `optimal_kzh_k` function (in `aegon::presets`) minimizes the
 aux-precomputation cost `f(k) = k(k − 1) · 2^(N/k)` and is tabulated
 for `N ∈ [20, 35]`. For production at `shard_log_capacity = 29`, it
 returns `k = 10`. Validated on a 16 vCPU / 64 GB box: setup ≈ 12 min,
@@ -174,7 +173,7 @@ gen at `shard_log_capacity`). The output is one file you'll copy to
 every shard + the coordinator.
 
 ```bash
-cargo build --release -p akd --bin aegon_srs_gen
+cargo build --release -p aegon --bin aegon_srs_gen
 ./target/release/aegon_srs_gen \
   --shard-log-capacity 29 \
   --kzh-k 10 \
@@ -202,7 +201,7 @@ sudo mkdir -p /etc/aegon && gsutil cp gs://your-aegon-srs/shard.srs /etc/aegon/
 Build the binary:
 
 ```bash
-cargo build --release -p akd --bin aegon_shard_server
+cargo build --release -p aegon --bin aegon_shard_server
 ```
 
 Run one per machine:
@@ -247,11 +246,10 @@ WantedBy=multi-user.target
 ### Step 3: Wire the coordinator up
 
 ```rust
-use akd::aegon::{
-    DbSource, Sha256Hash, ShardTransport, ShardedAegon, ShardedAegonConfig, SrsSource,
-};
+use aegon::ivc::adapter::hooks_for;
+use aegon::{DbSource, Sha256Hash, ShardTransport, ShardedAegon, ShardedAegonConfig, SrsSource};
+use aegon_crypto::pcs::kzhk::KZHK;
 use ark_bn254::Bn254;
-use akd_core::aegon_crypto::pcs::kzhk::KZHK;
 use ark_std::rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 
@@ -259,6 +257,9 @@ let cfg = ShardedAegonConfig::<Bn254, KZHK<Bn254>>::builder()
     .shard_log_capacity(29)
     .log_n_shards(5)
     .kzh_k(10)
+    // Must match the transcript the shard servers run (`--audit-fs`,
+    // Poseidon by default) or every audit is rejected.
+    .audit_fs(hooks_for(Default::default()))
     .shards(ShardTransport::Remote {
         endpoints: (0..32)
             .map(|i| format!("http://aegon-shard-{i}.internal:50051"))
@@ -290,7 +291,7 @@ After every shard is up, run the smoke client on the coordinator
 machine:
 
 ```bash
-cargo build --release -p akd --bin aegon_coordinator_smoke
+cargo build --release -p aegon --bin aegon_coordinator_smoke
 ./target/release/aegon_coordinator_smoke \
   --shard-log-capacity 29 --kzh-k 10 \
   --srs-path /etc/aegon/shard.srs \
@@ -326,7 +327,7 @@ Coordinator side — use `GrpcShardClientConfig` directly instead of the
 `.shards(...)` builder shortcut:
 
 ```rust
-use akd::aegon::shard_grpc::{GrpcShardClientConfig, GrpcShardClient};
+use aegon::shard_grpc::{GrpcShardClientConfig, GrpcShardClient};
 
 let ca_pem = std::fs::read("/etc/aegon/ca.crt")?;
 let cfg = GrpcShardClientConfig::new(
@@ -396,46 +397,46 @@ max_backoff = 2s`. Override via `GrpcShardClientConfig::with_retry`.
 
 For more depth see the per-module docs:
 
-- [`akd::aegon::sharded`](akd/src/aegon/sharded.rs) — coordinator + sharded proof types
-- [`akd::aegon::shard_grpc`](akd/src/aegon/shard_grpc.rs) — `ShardHandle` trait, server/client adapters
-- [`akd::aegon::server`](akd/src/aegon/server.rs) — single-shard `Aegon`
-- [`akd::aegon::verify`](akd/src/aegon/verify.rs), [`audit`](akd/src/aegon/audit.rs), [`consistency`](akd/src/aegon/consistency.rs) — verifier paths
+- [`aegon::sharded`](aegon/src/sharded.rs) — coordinator + sharded proof types
+- [`aegon::shard_grpc`](aegon/src/shard_grpc.rs) — `ShardHandle` trait, server/client adapters
+- [`aegon::server`](aegon/src/server.rs) — single-shard `Aegon`
+- [`aegon::verify`](aegon/src/verify.rs), [`audit`](aegon/src/audit.rs), [`consistency`](aegon/src/consistency.rs) — verifier paths
 
 ---
 
 ## Build & test
 
 ```bash
-cargo build --release -p akd
-cargo test  --release -p akd --tests
+cargo build --release -p aegon
+cargo test  --release -p aegon --tests
 ```
 
 There are two `#[ignore]`'d benchmarks worth running before sizing:
 
 ```bash
 # 32-shard publish + lookup at log_capacity=15 per shard
-cargo test --release -p akd --test sharded_aegon -- \
+cargo test --release -p aegon --test sharded_aegon -- \
   --ignored bench_setup_and_publish --nocapture
 
 # One shard at production size (log_capacity=29, k=10). ~12 min, ~37 GB RSS.
-cargo test --release -p akd --test sharded_aegon -- \
+cargo test --release -p aegon --test sharded_aegon -- \
   --ignored bench_production_shard_scale --nocapture
 ```
 
 ### Test status
 
-`cargo test -p akd` and `cargo test -p akd_core` are both green, and CI keeps
-them that way. Test the two crates in **separate** invocations: a combined
-`-p akd -p akd_core` unifies features, which switches `akd_core` to `parallel`
-and runs its SRS-heavy unit tests under nested rayon pools, exhausting the
-thread limit inside arkworks' MSM.
+`cargo test -p aegon` and `cargo test -p aegon_crypto` are both green, and CI
+keeps them that way. Test the two crates in **separate** invocations: a combined
+`-p aegon -p aegon_crypto` unifies features, which switches `aegon_crypto` to
+`parallel` and runs its SRS-heavy unit tests under nested rayon pools,
+exhausting the thread limit inside arkworks' MSM.
 
 A few tests are `#[ignore]`d, all of them slow benchmarks rather than known
 failures; each carries its reason in the attribute, and `--ignored` runs them.
 
-#### Known limitation: `akd_core` alone, with `parallel`
+#### Known limitation: `aegon_crypto` alone, with `parallel`
 
-`cargo test -p akd_core --features parallel` fails, and the cause is upstream.
+`cargo test -p aegon_crypto --features parallel` fails, and the cause is upstream.
 The pinned arkworks revision builds a **fresh rayon `ThreadPool` per chunk, on
 every MSM call**, and unwraps the result:
 
@@ -460,7 +461,7 @@ Two ways that surfaces, both in debug builds:
   instead, because spawning those per-chunk pools with large stacks returns
   `EAGAIN`: `ThreadPoolBuildError { IOError(Os { code: 35, WouldBlock }) }`.
 
-`akd` depends on `akd_core` with `parallel` enabled and exercises the same code
+`aegon` depends on `aegon_crypto` with `parallel` enabled and exercises the same code
 through its own suite, which passes -- its MSMs are smaller, so it does not
 reach either edge. That is why the two crates are tested separately.
 
@@ -490,16 +491,6 @@ served empty values and empty history at *any* `DbSource` -- silently, as `Ok`.
   against the wrong commitment. The genesis publish was also skipped entirely,
   so a label's placement never appeared in its own history.
 
-The upstream SEEMless/Merkle suites (`append_only_zks::tests` and
-`akd::tests`, 74 tests) are behind the off-by-default `upstream_tests`
-feature. Aegon replaced the append-only-tree backend, so they exercise a path
-that no longer carries the engine and they do not pass. They are retained,
-not deleted, so the divergence from upstream stays reviewable:
-
-```bash
-cargo test -p akd --features upstream_tests   # expected to fail
-```
-
 ### Fast-forward (IVC) auditing
 
 Behind the off-by-default `ivc_audit` feature. An auditor that has been
@@ -507,9 +498,9 @@ offline verifies one recursive proof instead of replaying every missed
 epoch, at a cost independent of how many it missed.
 
 ```bash
-cargo test -p akd --features ivc_audit
-cargo run --release -p akd --features ivc_audit --bin aegon_ivc_bench -- --help
-cargo run --release -p akd --features ivc_audit --example ivc_audit_grouped_e2e
+cargo test -p aegon --features ivc_audit
+cargo run --release -p aegon --features ivc_audit --bin aegon_ivc_bench -- --help
+cargo run --release -p aegon --features ivc_audit --example ivc_audit_grouped_e2e
 ```
 
 The feature gates the folding circuit and prover only. The Poseidon audit
@@ -518,14 +509,21 @@ directory started today can be fast-forward audited later without having been
 built with `ivc_audit` — which matters, because the transcript is fixed from a
 chain's first epoch and cannot be changed later.
 
-Select the transcript with `--audit-fs poseidon` (default) or `--audit-fs
-sha256` on `aegon_shard_server`, `aegon_client` and `aegon_rss_probe`, or by
-installing the hooks directly:
+Every server, client, and benchmark binary takes `--audit-fs poseidon`
+(default) or `--audit-fs sha256`. In library code, install the hooks on the
+config builder:
 
 ```rust
-use akd::aegon::{audit_fs::AuditFs, ivc::adapter::hooks_for};
-let hooks = hooks_for(AuditFs::Sha256);   // or AuditFs::Poseidon, the default
+use aegon::{audit_fs::AuditFs, ivc::adapter::hooks_for};
+let cfg = ShardedAegonConfig::<Bn254, KZHK<Bn254>>::builder()
+    .audit_fs(hooks_for(AuditFs::Poseidon))   // or AuditFs::Sha256
+    // ...
+    .build()?;
 ```
+
+Note that the builder itself is generic over the curve and so defaults to
+SHA-256: Poseidon hashes into BN254's base field and is undefined elsewhere.
+Library code that wants the Poseidon default has to ask for it, as above.
 
 Servers and auditors must agree: a mismatch rejects every epoch. The Merkle
 commitment, lookup, consistency, and history paths are unaffected and stay on
@@ -537,20 +535,17 @@ SHA-256 either way. See `SECURITY.md`.
 
 | Subfolder    | Description |
 | :---         | :---        |
-| `akd`        | Main library. Sharded coordinator, single-shard engine, gRPC layer, `aegon_shard_server` binary. |
-| `akd_core`   | Cryptographic primitives — KZH-k PCS, transcripts, hash, MSM. |
-| `examples`   | Worked usage examples plus utilities. |
-| `xtask`      | Workspace-wide tooling (code coverage). |
+| `aegon`         | Main library. Sharded coordinator, single-shard engine, gRPC layer, IVC auditing, and the server, client, and benchmark binaries. |
+| `aegon_crypto`  | Cryptographic primitives — KZH-k PCS, multilinear arithmetic, transcripts, MSM, ECVRF. |
+| `scripts`       | Cluster bring-up and benchmark drivers (GCP). |
+| `bench-results` | Benchmark outputs and the plotting scripts behind the paper's figures. |
+| `xtask`         | Workspace-wide tooling (code coverage). |
 
 ---
 
 ## Status
 
-This is research-grade software. Not yet audited.
-
-The original (SEEMless-based) AKD was audited by NCC Group in 2023; that
-audit covered a different codebase. The Aegon engine that powers this
-fork has not been independently reviewed.
+This is research-grade software. It has not been independently audited.
 
 ---
 
@@ -578,12 +573,11 @@ This is the reference implementation for:
 
 MIT. See `LICENSE`.
 
-`NOTICE` records what this repository derives from and what was changed.
-Upstream [facebook/akd](https://github.com/facebook/akd) (Meta Platforms) is
-offered under MIT OR Apache-2.0; this repository exercises the MIT option and
-preserves Meta's copyright notice in every file derived from it, as MIT
-requires. Parts of the multilinear arithmetic, PCS traits, and transcript in
-`akd_core::aegon_crypto` derive from
+`NOTICE` records what this repository derives from. The ECVRF implementation
+in `aegon_crypto::ecvrf` comes from [facebook/akd](https://github.com/facebook/akd)
+(Meta Platforms, MIT OR Apache-2.0; this repository exercises the MIT option and
+preserves Meta's copyright notice). Parts of the multilinear arithmetic, PCS
+traits, and transcript in `aegon_crypto` derive from
 [EspressoSystems/hyperplonk](https://github.com/EspressoSystems/hyperplonk),
 also MIT. Source files carry the header of whichever copyright applies.
 

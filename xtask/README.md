@@ -1,9 +1,5 @@
-This package supports local code-coverage reporting.
-
-Coverage badges are not published for this repository. The upstream
-`facebook/akd` badges that previously appeared here pointed at Meta's
-Codecov project and did not reflect this fork's coverage, so they have
-been removed rather than left to mislead.
+This package supports local code-coverage reporting. Coverage badges are
+not published for this repository.
 
 ## Viewing code coverage locally
 

@@ -21,7 +21,7 @@
 # Prereqs:
 #   * gcloud installed + authenticated (`gcloud auth login`)
 #   * gcloud configured for $PROJECT   (`gcloud config set project $PROJECT`)
-#   * the repository cargo-builds cleanly with `cargo build --release -p akd`
+#   * the repository cargo-builds cleanly with `cargo build --release -p aegon`
 #
 # This script is a prototyping aid, not production infrastructure. It
 # creates resources tagged `aegon-cluster` so the teardown can find them.
@@ -299,7 +299,7 @@ cmd_deploy() {
     docker info >/dev/null 2>&1  || die "Docker daemon unreachable — start Docker Desktop and retry"
 
     log "macOS host: building aegon_srs_gen natively for the operator's laptop"
-    (cd "$REPO_ROOT" && cargo build --release -p akd --bin aegon_srs_gen) >/dev/null
+    (cd "$REPO_ROOT" && cargo build --release -p aegon --bin aegon_srs_gen) >/dev/null
 
     log "building shard + coordinator binaries inside Docker (first run pulls rust image — ~5 min on Apple Silicon)"
     # --platform linux/amd64 forces x86_64 even on Apple Silicon (target VMs
@@ -312,12 +312,12 @@ cmd_deploy() {
       bash -c "set -e; \
         apt-get update >/dev/null && \
         apt-get install -y --no-install-recommends protobuf-compiler ca-certificates >/dev/null && \
-        cargo build --release -p akd --target x86_64-unknown-linux-gnu \
+        cargo build --release -p aegon --target x86_64-unknown-linux-gnu \
           --bin aegon_shard_server --bin aegon_coordinator_smoke"
     remote_bin_dir="$REPO_ROOT/target/x86_64-unknown-linux-gnu/release"
   else
     log "building release binaries"
-    (cd "$REPO_ROOT" && cargo build --release -p akd \
+    (cd "$REPO_ROOT" && cargo build --release -p aegon \
       --bin aegon_srs_gen --bin aegon_shard_server --bin aegon_coordinator_smoke) \
       >/dev/null
   fi
