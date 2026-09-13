@@ -29,7 +29,7 @@
 # Fill percentages (vs. true capacity): 1, 30, 60, 90 — set
 # FILL_PERCENTS to override. True capacity for any regime is the
 # shard polynomial size divided by `OVER_PROVISIONING_FACTOR` (= 4);
-# see `akd/src/aegon/config.rs`.
+# see `aegon/src/config.rs`.
 #
 # The medium (2-shard) and large (128-shard) regimes both run on a
 # real cluster:
@@ -68,7 +68,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 log() { echo "[$(date +%H:%M:%S)] $*"; }
 
 log "building aegon_lookup_bench (release)"
-(cd "$REPO_ROOT" && cargo build --release -p akd --bin aegon_lookup_bench) >/dev/null
+(cd "$REPO_ROOT" && cargo build --release -p aegon --bin aegon_lookup_bench) >/dev/null
 LB="$REPO_ROOT/target/release/aegon_lookup_bench"
 [[ -x "$LB" ]] || { echo "binary missing: $LB" >&2; exit 1; }
 

@@ -1,0 +1,117 @@
+[package]
+name = "aegon"
+version = "0.1.0"
+authors = ["The Aegon Authors"]
+description = "Aegon: sharded, self-auditable key transparency on KZH-k polynomial commitments"
+license = "MIT"
+edition = "2021"
+rust-version = "1.88.0"
+keywords = ["key-transparency", "aegon"]
+repository = "https://github.com/alireza-shirzad/aegon"
+readme = "../README.md"
+
+[features]
+default = []
+# Tracing instrumentation
+tracing = ["dep:tracing"]
+# Tracing-based instrumentation. Pulls in `tracing-subscriber` so the
+# bins can install a console subscriber at startup — gives you a view of
+# phase-level spans (Aegon::PublishPhase1, KZH::FMAState, ShardedAegon::*)
+# without any separate flame-graph tooling.
+tracing_instrument = ["tracing/attributes", "dep:tracing-subscriber"]
+# Use mimalloc as the global allocator for binaries that opt in via the
+# `bin/<name>.rs` `#[cfg(feature = "mimalloc_alloc")]` block. Off by
+# default so debug-tool binaries and unit tests stay on glibc.
+mimalloc_alloc = []
+# IVC (Nova) auditing: fold the per-epoch invariance check into a
+# recursive proof so an auditor verifies ONE proof instead of one per
+# epoch (paper §3, "fast-forwarding via recursive proofs"). Off by
+# default. The native Poseidon transcript is always compiled in; only
+# the folding circuit and prover sit behind this feature.
+ivc_audit = ["dep:bincode"]
+
+[dependencies]
+aegon_crypto = { version = "0.1.0", path = "../aegon_crypto", default-features = false, features = [
+    "std",
+    "parallel",
+] }
+ark-bn254 = { workspace = true }
+ark-ec = { workspace = true }
+ark-ff = { workspace = true }
+ark-poly = { workspace = true }
+ark-serialize = { workspace = true }
+ark-std = { workspace = true }
+ndarray = { workspace = true }
+rand_chacha = { workspace = true }
+futures = "0.3"
+hex = "0.4"
+clap = { version = "4", features = ["derive"] }
+# Drop-in alternative allocator. glibc retains freed memory for reuse and
+# rarely returns it to the OS, which makes the shard's RSS grow well past
+# its actual working set during heavy publish-time alloc/free churn.
+# mimalloc returns freed pages aggressively. Used only via opt-in
+# `#[global_allocator]` in the individual binaries that need it (see
+# `bin/aegon_shard_server.rs`, `bin/aegon_rss_probe.rs`).
+mimalloc = { version = "0.1", default-features = false }
+prost = "0.13"
+rayon = { workspace = true }
+redis = { version = "0.27", default-features = false }
+# RocksDB engine for the second `Db` impl. Single-process, disk-backed
+# LSM store; selected via `DbSource::Rocks(PathBuf)`.
+rocksdb = { version = "0.24", default-features = false, features = ["lz4"] }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+tokio = { version = "1", features = ["sync", "time", "rt", "rt-multi-thread", "net", "macros"] }
+tonic = { version = "0.12", features = ["tls", "tls-roots"] }
+# Nova folding scheme. Brings its own bellpepper-derived `frontend`
+# module and re-exports the halo2curves bn256/grumpkin field types, so
+# no direct dependency on either is needed here. `ff` is required for
+# the `PrimeField` trait methods used by the ark<->halo2 coordinate
+# bridge. Not optional: the audit transcript defaults to Poseidon, and
+# the native Poseidon lives in nova-snark (`PoseidonRO`).
+nova-snark = { version = "0.75", default-features = false }
+ff = { version = "0.13" }
+
+## Optional dependencies ##
+# Wire-size measurement for the recursive proof; matches the encoding
+# nova-snark itself uses.
+bincode = { version = "2", features = ["serde"], optional = true }
+tracing = { version = "0.1.40", optional = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
+
+[dev-dependencies]
+# Fork adds per-sample JSON output (see aegon/benches/publish_sweep.rs).
+# Pinned to an exact revision for the same reason as the arkworks
+# patches in the workspace manifest: unpinned git deps silently move
+# benchmark numbers between clones.
+divan = { git = "https://github.com/alireza-shirzad/divan.git", rev = "54d2574ecfe4f68e6da36f30107edda35d1ed66c" }
+tokio-stream = { version = "0.1", features = ["net"] }
+
+[[bench]]
+name = "publish_sweep"
+harness = false
+
+[[bench]]
+name = "ecvrf_microbench"
+harness = false
+
+[[example]]
+name = "ivc_audit_e2e"
+required-features = ["ivc_audit"]
+
+[[example]]
+name = "ivc_audit_grouped_e2e"
+required-features = ["ivc_audit"]
+
+# Gated so a plain `cargo check --workspace` does not try to build the
+# IVC bench without the Nova stack. Other binaries stay auto-discovered.
+[[bin]]
+name = "aegon_ivc_bench"
+path = "src/bin/aegon_ivc_bench.rs"
+required-features = ["ivc_audit"]
+
+[build-dependencies]
+tonic-build = "0.12"
+
+[lints]
+workspace = true

@@ -10,7 +10,7 @@
 #   N_SHARDS=1, SHARD_LOG_CAPACITY=22, KZH_K=7
 #   true dictionary capacity = 1 × 2^20 = 2^20 entries (~1M)
 #   total polynomial capacity = 1 × 2^22 = 2^22 slots
-#   over-provisioning factor α = 4 (see akd/src/aegon/config.rs)
+#   over-provisioning factor α = 4 (see aegon/src/config.rs)
 #   publish batch sizes: 2,4,8,16,32,64
 #
 # Outputs land at:

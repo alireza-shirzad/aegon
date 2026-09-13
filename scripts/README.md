@@ -11,7 +11,7 @@ the smoke test, and tears it all down on request.
   gcloud auth login
   ```
 - A GCP project you have permission to create instances in.
-- The repository builds locally: `cargo build --release -p akd`.
+- The repository builds locally: `cargo build --release -p aegon`.
 - The remote VMs are `x86_64` Ubuntu 22.04, so the binaries shipped
   to them must be `x86_64-unknown-linux-gnu`.
   - **Linux x86_64 hosts**: nothing extra — `cargo` already targets
@@ -83,7 +83,7 @@ N_SHARDS=32 SHARD_LOG_CAPACITY=29 KZH_K=10 \
 ```
 
 `KZH_K` should follow `optimal_kzh_k(SHARD_LOG_CAPACITY)` from
-`akd::aegon::presets`:
+`aegon::presets`:
 
 ```
 shard_log_capacity:  20  21..23  24..26  27..28  29..31  32..34  35+

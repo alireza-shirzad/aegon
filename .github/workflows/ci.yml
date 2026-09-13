@@ -9,7 +9,7 @@ on:
 env:
   CARGO_TERM_COLOR: always
   # Debug symbols dominate target/ size for this dependency graph (arkworks
-  # and nova built from git, plus rocksdb and mysql). A standard runner has
+  # and nova built from git, plus rocksdb). A standard runner has
   # roughly 14 GB free, and keeping them overruns it: the linker dies with
   # "signal 7 [Bus error]" and then the runner reports no space left.
   # Nothing here needs a debugger.
@@ -90,14 +90,14 @@ jobs:
       # "Test status" in the README. These steps must stay green.
       #
       # The two crates are tested in separate invocations on purpose. A
-      # combined `-p akd -p akd_core` unifies features, which switches
-      # `akd_core` to `parallel` (that is how `akd` depends on it) and runs
-      # akd_core's own SRS-heavy unit tests under nested rayon pools. That
-      # currently exhausts the thread limit inside arkworks' MSM.
-      - name: Test akd
-        run: cargo test -p akd ${{ matrix.flags }}
-      - name: Test akd_core
-        run: cargo test -p akd_core
+      # combined `-p aegon -p aegon_crypto` unifies features, which switches
+      # `aegon_crypto` to `parallel` (that is how `aegon` depends on it) and
+      # runs aegon_crypto's own SRS-heavy unit tests under nested rayon pools.
+      # That currently exhausts the thread limit inside arkworks' MSM.
+      - name: Test aegon
+        run: cargo test -p aegon ${{ matrix.flags }}
+      - name: Test aegon_crypto
+        run: cargo test -p aegon_crypto
       - name: Disk usage after
         if: always()
         run: df -h /

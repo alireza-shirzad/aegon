@@ -93,7 +93,7 @@ trap cleanup EXIT
 
 # --- 0. build the bench binaries locally -------------------------------
 log "building release binaries on dev box"
-(cd "$REPO_ROOT" && cargo build --release -p akd \
+(cd "$REPO_ROOT" && cargo build --release -p aegon \
    --bin aegon_setup_bench \
    --bin aegon_publish_bench \
    --bin aegon_lookup_bench \
@@ -154,7 +154,7 @@ done
 
 # --- 3. push binaries to both VMs --------------------------------------
 # The bench binaries cache the SRS at `cwd/../artifacts/srs/...` (see
-# akd_core/src/aegon_crypto/pcs/kzhk/mod.rs:139). They have to run from
+# aegon_crypto/src/pcs/kzhk/mod.rs:139). They have to run from
 # a subdirectory so the `..` resolves to a writable path. We use
 # $HOME/work as the cwd; the SRS will land in $HOME/artifacts/srs.
 REMOTE_RUN_DIR="\$HOME/work"

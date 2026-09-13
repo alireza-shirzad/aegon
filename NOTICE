@@ -15,35 +15,22 @@ Derived works and third-party code
 1. facebook/akd
    Copyright (c) Meta Platforms, Inc. and affiliates.
    Licensed by its authors under MIT OR Apache-2.0. This repository exercises
-   the MIT option and redistributes the whole work under MIT; Meta's copyright
-   notice is preserved in every file derived from it, as MIT requires.
-   Source: https://github.com/facebook/akd
+   the MIT option. Source: https://github.com/facebook/akd
 
-   This repository began as a copy of the `akd` and `akd_core` crates and
-   retains their public wire types (`AkdLabel`, `AkdValue`, `LookupProof`,
-   `EpochHash`, the storage and VRF layers, and the protobuf definitions
-   for those) so that downstream callers can migrate without rewrites.
+   Aegon began as a fork of the `akd` and `akd_core` crates. The AKD
+   directory, its SEEMless/Merkle append-only-tree backend, its storage and
+   configuration layers, its wire types, and its API have since been removed.
 
-   Modifications made by The Aegon Authors:
+   What remains from upstream:
 
-     * The SEEMless/Merkle append-only-tree backend is no longer the engine
-       behind `Directory`. Publish, lookup, and consistency now route through
-       the Aegon engine (`akd::aegon`), which is built on KZH-k polynomial
-       commitments and sharded across N hosts coordinated over gRPC.
-     * `Directory` methods tied to the Merkle/VRF version model
-       (`key_history`, `audit`, `poll_for_azks_changes`) are retained in the
-       API surface but are not implemented against the Aegon backend; the
-       Aegon-native equivalents live in `akd::aegon_facade`.
-     * New subsystems with no upstream counterpart: the sharded coordinator
-       and shard servers, distributed SRS generation, the masking-server
-       pool, the Sigma-protocol blinding-equality proof, and IVC
-       (fast-forward) auditing under the `ivc_audit` feature.
-     * The upstream test suite for the append-only tree
-       (`akd::append_only_zks`, `akd::tests`) is retained but is not
-       exercised by the Aegon backend. See README for current status.
+     * The ECVRF implementation (ECVRF-EDWARDS25519-SHA512-TAI, RFC 9381) in
+       `aegon_crypto::ecvrf`, which the AKD authors adapted from Diem's
+       NextGen Crypto module. Modifications made by The Aegon Authors: AKD's
+       `VRFKeyStorage` trait and its test key store were removed, and the
+       `no_std` import shims were dropped.
+     * The `xtask` code-coverage helper.
 
-   Files derived from upstream carry the original Meta copyright header.
-   Files authored for Aegon carry a header naming The Aegon Authors.
+   Those files carry Meta's copyright header, as MIT requires.
 
 2. EspressoSystems/hyperplonk
    Copyright (c) 2023 Espresso Systems (espressosys.com)
@@ -52,7 +39,7 @@ Derived works and third-party code
 
    Portions of the multilinear-polynomial arithmetic, the polynomial
    commitment scheme traits, and the Fiat-Shamir transcript in
-   `akd_core::aegon_crypto` are derived from the HyperPlonk library.
+   `aegon_crypto` are derived from the HyperPlonk library.
    Those files retain the Espresso Systems copyright header.
 
 3. arkworks-rs

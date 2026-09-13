@@ -837,14 +837,14 @@ cmd_deploy() {
       bash -c "set -e; \
         apt-get update >/dev/null && \
         apt-get install -y --no-install-recommends protobuf-compiler ca-certificates >/dev/null && \
-        cargo build --release -p akd $cargo_features --target x86_64-unknown-linux-gnu \
+        cargo build --release -p aegon $cargo_features --target x86_64-unknown-linux-gnu \
           --bin aegon_shard_server --bin aegon_coordinator_bench \
           --bin aegon_coordinator_server --bin aegon_srs_gen \
           --bin aegon_masking_server"
     remote_bin_dir="$REPO_ROOT/target/x86_64-unknown-linux-gnu/release"
   else
     log "building release binaries (aegon_shard_server, aegon_coordinator_bench, aegon_coordinator_server, aegon_srs_gen, aegon_masking_server)"
-    (cd "$REPO_ROOT" && cargo build --release -p akd $cargo_features \
+    (cd "$REPO_ROOT" && cargo build --release -p aegon $cargo_features \
       --bin aegon_shard_server --bin aegon_coordinator_bench \
       --bin aegon_coordinator_server --bin aegon_srs_gen \
       --bin aegon_masking_server) >/dev/null
@@ -1512,7 +1512,7 @@ PUBLISH_SAMPLES_PER_BATCH="${PUBLISH_SAMPLES_PER_BATCH:-3}"
 #
 # This is the inverse of the two-layer sizing rule
 #   shard_log_capacity = true_log_capacity + 2 − log_n_shards     (OPF = 4)
-# implemented as `shard_log_capacity_for_two_layer` in akd/src/aegon/config.rs.
+# implemented as `shard_log_capacity_for_two_layer` in aegon/src/config.rs.
 #
 # Auto-deriving avoids a class of latent bugs we hit before, where a
 # static default (32) carried over from the LARGE regime and made
@@ -1525,7 +1525,7 @@ derive_true_log_cap() {
 import math
 n_shards = ${N_SHARDS}
 shard_log_cap = ${SHARD_LOG_CAPACITY}
-log2_alpha = 2  # mirrors LOG2_OVER_PROVISIONING_FACTOR in akd/src/aegon/config.rs
+log2_alpha = 2  # mirrors LOG2_OVER_PROVISIONING_FACTOR in aegon/src/config.rs
 log2_n_shards = int(math.log2(n_shards))
 print(shard_log_cap + log2_n_shards - log2_alpha)
 "
@@ -1585,12 +1585,12 @@ cmd_publish_bench() {
       bash -c "set -e; \
         apt-get update >/dev/null && \
         apt-get install -y --no-install-recommends protobuf-compiler ca-certificates >/dev/null && \
-        cargo build --release -p akd $cargo_features --target x86_64-unknown-linux-gnu \
+        cargo build --release -p aegon $cargo_features --target x86_64-unknown-linux-gnu \
           --bin aegon_publish_bench"
     remote_bin_dir="$REPO_ROOT/target/x86_64-unknown-linux-gnu/release"
   else
     log "building aegon_publish_bench (release)"
-    (cd "$REPO_ROOT" && cargo build --release -p akd $cargo_features --bin aegon_publish_bench) >/dev/null
+    (cd "$REPO_ROOT" && cargo build --release -p aegon $cargo_features --bin aegon_publish_bench) >/dev/null
   fi
   [[ -x "$remote_bin_dir/aegon_publish_bench" ]] || die "aegon_publish_bench missing"
 
@@ -1830,12 +1830,12 @@ cmd_migration_bench() {
       bash -c "set -e; \
         apt-get update >/dev/null && \
         apt-get install -y --no-install-recommends protobuf-compiler ca-certificates >/dev/null && \
-        cargo build --release -p akd $cargo_features --target x86_64-unknown-linux-gnu \
+        cargo build --release -p aegon $cargo_features --target x86_64-unknown-linux-gnu \
           --bin aegon_migration_bench"
     remote_bin_dir="$REPO_ROOT/target/x86_64-unknown-linux-gnu/release"
   else
     log "building aegon_migration_bench (release)"
-    (cd "$REPO_ROOT" && cargo build --release -p akd $cargo_features --bin aegon_migration_bench) >/dev/null
+    (cd "$REPO_ROOT" && cargo build --release -p aegon $cargo_features --bin aegon_migration_bench) >/dev/null
   fi
   [[ -x "$remote_bin_dir/aegon_migration_bench" ]] || die "aegon_migration_bench missing"
 
@@ -2173,12 +2173,12 @@ cmd_lookup_bench() {
       bash -c "set -e; \
         apt-get update >/dev/null && \
         apt-get install -y --no-install-recommends protobuf-compiler ca-certificates >/dev/null && \
-        cargo build --release -p akd $cargo_features --target x86_64-unknown-linux-gnu \
+        cargo build --release -p aegon $cargo_features --target x86_64-unknown-linux-gnu \
           --bin aegon_lookup_bench"
     remote_bin_dir="$REPO_ROOT/target/x86_64-unknown-linux-gnu/release"
   else
     log "building aegon_lookup_bench (release)"
-    (cd "$REPO_ROOT" && cargo build --release -p akd $cargo_features --bin aegon_lookup_bench) >/dev/null
+    (cd "$REPO_ROOT" && cargo build --release -p aegon $cargo_features --bin aegon_lookup_bench) >/dev/null
   fi
   [[ -x "$remote_bin_dir/aegon_lookup_bench" ]] || die "aegon_lookup_bench missing"
 

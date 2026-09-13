@@ -15,7 +15,7 @@
 # Regime sizing matches `setup-bench.sh` and the publish bench. All
 # regimes use 4× over-provisioning (load factor 0.25 at peak fill),
 # computed via `shard_log_capacity_for_two_layer(true_log_cap,
-# log_n_shards)` in `akd/src/aegon/config.rs`:
+# log_n_shards)` in `aegon/src/config.rs`:
 #
 #   regime  | shard_log_cap | true_log_cap | n_shards | K sweep
 #   --------|---------------|--------------|----------|-------------------------
@@ -63,7 +63,7 @@ mkdir -p "$OUT_DIR"
 log() { echo "[$(date +%H:%M:%S)] $*"; }
 
 log "building aegon_migration_bench (release)"
-(cd "$REPO_ROOT" && cargo build --release -p akd --bin aegon_migration_bench) >/dev/null
+(cd "$REPO_ROOT" && cargo build --release -p aegon --bin aegon_migration_bench) >/dev/null
 MB="$REPO_ROOT/target/release/aegon_migration_bench"
 [[ -x "$MB" ]] || { echo "binary missing: $MB" >&2; exit 1; }
 

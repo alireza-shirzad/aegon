@@ -24,9 +24,9 @@ present it as such will not be merged.
    cargo fmt --all -- --check
    cargo clippy --workspace --all-targets
    cargo clippy --workspace --all-targets --features ivc_audit
-   cargo test -p akd
-   cargo test -p akd --features ivc_audit
-   cargo test -p akd_core
+   cargo test -p aegon
+   cargo test -p aegon --features ivc_audit
+   cargo test -p aegon_crypto
    ```
 
    Test the two crates in separate invocations — see "Test status" in the
@@ -39,12 +39,10 @@ present it as such will not be merged.
 
 ## Known gaps
 
-The upstream SEEMless/Merkle suites sit behind the off-by-default
-`upstream_tests` feature; they exercise a backend Aegon replaced and do not
-pass. Everything else is green, and `missing_docs` is denied crate-wide, so
-new public API needs documenting.
+The test suite is green, and `missing_docs` is denied in the `aegon` crate,
+so new public API there needs documenting.
 
-`akd_core`'s own tests cannot run with the `parallel` feature — nested rayon
+`aegon_crypto`'s own tests cannot run with the `parallel` feature — nested rayon
 pools inside arkworks' MSM exhaust the thread limit — which is why the two
 crates are tested separately. Fixing that would be a useful contribution.
 
@@ -54,9 +52,9 @@ Use GitHub issues. For anything that looks like a vulnerability, see
 `SECURITY.md` — but note that this software is not deployed anywhere, so
 there is no embargo process.
 
-## Relationship to upstream AKD
+## Third-party code
 
-This repository is a fork of [facebook/akd](https://github.com/facebook/akd)
-with the append-only-tree backend replaced. Bugs that also affect upstream
-should go to Meta through their process rather than here; `NOTICE` describes
-the split.
+The ECVRF implementation in `aegon_crypto::ecvrf` comes from
+[facebook/akd](https://github.com/facebook/akd). Bugs in it that also affect
+upstream should go to Meta through their process rather than here; `NOTICE`
+lists everything this repository derives from.

@@ -34,7 +34,7 @@
 #                    cluster path) and falls back to 16384 if absent.
 #
 # True capacity for any regime is the shard polynomial size divided
-# by `OVER_PROVISIONING_FACTOR` (= 4); see `akd/src/aegon/config.rs`.
+# by `OVER_PROVISIONING_FACTOR` (= 4); see `aegon/src/config.rs`.
 
 set -euo pipefail
 
@@ -72,7 +72,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 log() { echo "[$(date +%H:%M:%S)] $*"; }
 
 log "building aegon_publish_bench (release)"
-(cd "$REPO_ROOT" && cargo build --release -p akd --bin aegon_publish_bench) >/dev/null
+(cd "$REPO_ROOT" && cargo build --release -p aegon --bin aegon_publish_bench) >/dev/null
 PB="$REPO_ROOT/target/release/aegon_publish_bench"
 [[ -x "$PB" ]] || { echo "binary missing: $PB" >&2; exit 1; }
 
