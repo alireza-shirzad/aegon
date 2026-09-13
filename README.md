@@ -70,232 +70,155 @@ dependency graph moves them.
 
 ---
 
-## Run a dictionary on your laptop
+## Using Aegon
 
-The quickest way to see Aegon work is a single-shard dictionary in one
-process: no cluster, no network, nothing to configure. One command runs a
-short story across three epochs:
+Add the crates to your project:
 
-```bash
-# Build and run the example. `ivc_audit` enables the recursive (IVC) audit
-# used in epoch 3. The first build takes a few minutes; the run takes seconds.
-cargo run --release -p aegon --features ivc_audit --example laptop_dictionary
+```toml
+[dependencies]
+aegon        = { git = "https://github.com/alireza-shirzad/aegon" }
+aegon_crypto = { git = "https://github.com/alireza-shirzad/aegon" }
+ark-bn254    = "0.5"
+ark-std      = "0.5"
+rand_chacha  = "0.3"
+
+# Also copy the [patch.crates-io] block from this repository's Cargo.toml
+# into your workspace root. Cargo only reads it there, and without it the
+# arkworks crates resolve to incompatible versions.
 ```
 
-```text
-Computing SRS
-epoch 0: empty dictionary
-
-epoch 1: alice and bob join
-  client looks up alice -> "alice-key-1", proof verifies: true
-
-epoch 2: bob changes his key
-  auditor checks epoch 0 -> 1: true
-  auditor checks epoch 1 -> 2: true
-
-epoch 3: alice changes her key
-  prover folds all 3 transitions into one proof
-  offline auditor verifies one proof covering 3 epochs: true
-```
-
-The whole program is [`aegon/examples/laptop_dictionary.rs`](aegon/examples/laptop_dictionary.rs).
-Here it is step by step.
-
-### Setup
+Then start from this template. Every setting is at the top, with its
+options in the comments; the rest of the program runs one of each
+operation.
 
 ```rust
-// One shard with 1,024 slots, backed by a RocksDB store.
-let cfg = ShardedAegonConfig::<Bn254, Pcs>::builder()
-    .shard_log_capacity(10)                  // 2^10 = 1,024 slots
-    .log_n_shards(0)                         // 2^0 = one shard
-    .private(true)                           // hide values from auditors; needed for IVC (set before kzh_k)
-    .kzh_k(optimal_kzh_k(10))                // commitment-scheme parameter for this size
-    .audit_fs(hooks_for(AuditFs::Poseidon))  // the hash auditors recompute; IVC needs Poseidon
-    .db(DbSource::Rocks(db_path))            // where the server stores users' values
-    .build()?;
+use aegon::audit_fs::AuditFs;
+use aegon::ivc::adapter::hooks_for;
+use aegon::{
+    optimal_kzh_k, shard_log_capacity_for_two_layer, verify_lookup_history,
+    verify_sharded_consistency_two_layer, verify_sharded_invariance,
+    verify_sharded_lookup_two_layer, DbSource, ShardTransport, ShardedAegon, ShardedAegonConfig,
+    ShardedAuditState, SrsSource,
+};
+use aegon_crypto::pcs::kzhk::KZHK;
+use ark_bn254::{Bn254, Fr};
+use ark_std::rand::SeedableRng;
+use rand_chacha::ChaCha20Rng;
 
-// Start the server. The seed generates a throwaway trusted setup,
-// fine for a demo; a real deployment loads one from a setup ceremony.
-let mut rng = ChaCha20Rng::seed_from_u64(42);
-let mut server = Server::setup(&mut rng, &cfg)?;
+// ============================== Settings ==============================
 
-// All a client or auditor ever holds: the public verification context,
-// plus the commitment the server publishes at each epoch.
-let ctx = server.sharded_verifier_context();
-let mut published = vec![server.epoch_commitment(0).ok_or("no epoch 0")?];
-```
+/// log2 of how many users the dictionary holds: 10 means 1,024 users.
+const TRUE_LOG_CAPACITY: usize = 10;
 
-### Epoch 1: Alice and Bob join, and a client looks Alice up
+/// log2 of the shard count: 2 means 4 shards. Capacity is split evenly
+/// across them, so more shards means smaller, faster shards.
+const LOG_N_SHARDS: usize = 2;
 
-```rust
-// The server publishes a batch of (user, key) pairs. That starts epoch 1
-// and returns the commitment it publishes for it.
-let epoch_1 = server.publish_two_layer(&[
-    (b"alice".to_vec(), b"alice-key-1".to_vec()),
-    (b"bob".to_vec(), b"bob-key-1".to_vec()),
-])?;
-published.push(epoch_1.clone());
+/// Private mode hides users' values from auditors. Required for IVC
+/// (fast-forward) auditing.
+const PRIVATE: bool = false;
 
-// The client asks for Alice. The server returns her key and a proof.
-let (value, proof) = server.lookup_two_layer(&b"alice".to_vec())?;
+/// The hash auditors recompute: `Poseidon` (supports IVC auditing) or
+/// `Sha256`. Servers and auditors must agree, and it can't change later.
+const AUDIT_FS: AuditFs = AuditFs::Poseidon;
 
-// The client checks the proof against epoch 1's published commitment.
-// If the server returned the wrong key, this would fail.
-let ok = verify_sharded_lookup_two_layer::<Bn254, Pcs, Sha256Hash>(
-    &ctx, &epoch_1, &b"alice".to_vec(), &value, &proof,
-)?;
-```
+/// How many independent audit chains to split the shards into. Must divide
+/// the shard count. More groups let an IVC audit fold in parallel.
+const CHAIN_GROUPS: usize = 1;
 
-### Epoch 2: Bob changes his key, and an auditor checks each epoch
+/// How users are assigned to slots. `aegon::Sha256Hash` can be computed by
+/// anyone; `aegon::EcVrfHash` hides assignments behind a VRF key (then also
+/// call `set_vrf_prover`, below).
+type Hash = aegon::Sha256Hash;
 
-```rust
-// Publishing Bob's new key starts epoch 2.
-published.push(server.publish_two_layer(&[(b"bob".to_vec(), b"bob-key-2".to_vec())])?);
+/// The polynomial commitment scheme: KZH-k over BN254.
+type Pcs = KZHK<Bn254>;
 
-// The classic audit checks one epoch transition at a time, using only the
-// published commitments. It carries a small state from each check to the
-// next, so the auditor starts at epoch 0 and must see every transition.
-let mut audit_state = ShardedAuditState::<Fr>::default();
-for pair in published.windows(2) {
-    let ok = verify_sharded_invariance::<Bn254, Pcs>(&ctx, &mut audit_state, &pair[0], &pair[1])?;
+// ======================================================================
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Each shard's size, including Aegon's 4x headroom for placing users.
+    let shard_log_capacity = shard_log_capacity_for_two_layer(TRUE_LOG_CAPACITY, LOG_N_SHARDS);
+
+    // Local storage for this demo, wiped so every run starts fresh.
+    let db = std::env::temp_dir().join("aegon-template");
+    let _ = std::fs::remove_dir_all(&db);
+    let _ = std::fs::remove_dir_all(db.with_extension("shards"));
+
+    let cfg = ShardedAegonConfig::<Bn254, Pcs>::builder()
+        .shard_log_capacity(shard_log_capacity)
+        .log_n_shards(LOG_N_SHARDS)
+        .private(PRIVATE) // must come before `kzh_k`
+        .kzh_k(optimal_kzh_k(shard_log_capacity))
+        .audit_fs(hooks_for(AUDIT_FS))
+        .chain_groups(CHAIN_GROUPS)
+        // Where the shards run:
+        //   ShardTransport::InProcess                   all in this process
+        //   ShardTransport::Remote { endpoints: urls }  one aegon_shard_server per
+        //                                               shard, 2^LOG_N_SHARDS URLs
+        .shards(ShardTransport::InProcess)
+        // The trusted setup (SRS):
+        //   SrsSource::DangerouslyGenerate  throwaway, made from the rng below; testing only
+        //   SrsSource::Path(file)           load one produced by a setup ceremony
+        .srs(SrsSource::DangerouslyGenerate)
+        // Where users' values and history are stored:
+        //   DbSource::None        memory only: lookups return no value bytes, no history
+        //   DbSource::Rocks(dir)  a local RocksDB
+        //   DbSource::Redis(url)  a shared Redis (with remote shards only)
+        .db(DbSource::Rocks(db))
+        // In private mode, in-process shards mask their proofs themselves. To
+        // use separate aegon_masking_server processes instead:
+        //   .masking_addrs(vec!["http://127.0.0.1:50061".into()])
+        .build()?;
+
+    let mut rng = ChaCha20Rng::seed_from_u64(42);
+    let mut server = ShardedAegon::<Bn254, Pcs, Hash>::setup(&mut rng, &cfg)?;
+
+    // With `type Hash = aegon::EcVrfHash`, give the server its VRF key, from
+    // AEGON_VRF_SEED or AEGON_VRF_KEY_PATH:
+    //   server.set_vrf_prover(aegon::VrfProver::from_env());
+
+    // What clients and auditors hold: the public verification context (take it
+    // after setting a VRF key) and the commitment published at each epoch.
+    let ctx = server.sharded_verifier_context();
+    let epoch_0 = server.current_commitment();
+
+    // ---- Server: publish a batch. Each publish starts a new epoch. ----
+    let alice = b"alice".to_vec();
+    let epoch_1 = server.publish_two_layer(&[(alice.clone(), b"alice-key-1".to_vec())])?;
+
+    // ---- Client: look Alice up and check the proof against epoch 1. ----
+    let (value, proof) = server.lookup_two_layer(&alice)?;
+    assert!(verify_sharded_lookup_two_layer::<Bn254, Pcs, Hash>(
+        &ctx, &epoch_1, &alice, &value, &proof
+    )?);
+
+    // ---- Client: every change to Alice's value (needs a DbSource). ----
+    let history = server.lookup_history(&alice)?;
+    verify_lookup_history::<Bn254, Pcs, Hash>(&ctx, &history)?;
+
+    // ---- Client: prove Alice's entry hasn't changed since epoch 1. ----
+    let epoch_2 = server.publish_two_layer(&[(b"bob".to_vec(), b"bob-key-1".to_vec())])?;
+    let proof = server.consistency_proof_two_layer(&alice, epoch_1.epoch)?;
+    assert!(verify_sharded_consistency_two_layer::<Bn254, Pcs, Hash>(
+        &ctx, &epoch_1, &epoch_2, &alice, &proof
+    )?);
+
+    // ---- Auditor: check every epoch transition, in order, from epoch 0. ----
+    // The audit state tracks one running value per chain group.
+    let mut audit = ShardedAuditState::<Fr>::with_groups(CHAIN_GROUPS);
+    for (prev, next) in [(&epoch_0, &epoch_1), (&epoch_1, &epoch_2)] {
+        assert!(verify_sharded_invariance::<Bn254, Pcs>(&ctx, &mut audit, prev, next)?);
+    }
+
+    println!("every check passed");
+    Ok(())
 }
 ```
 
-### Epoch 3: Alice changes her key, and an offline auditor catches up at once
-
-```rust
-// Publishing Alice's new key starts epoch 3.
-published.push(server.publish_two_layer(&[(b"alice".to_vec(), b"alice-key-2".to_vec())])?);
-
-// An auditor who missed all three epochs would normally replay them one by
-// one. Instead, a prover folds every transition into a single recursive
-// proof. It needs only the published commitments, so anyone can run it.
-let h = ctx.inner.verifier_param.get_h();                      // a public parameter
-let ivc = Arc::new(IvcAuditParams::setup(fs_params_from_epoch(&published[1])?, h)?);
-let mut prover = IvcAuditProver::new(ivc.clone(), &epoch_commitments(&published[0]))?;
-for epoch in &published[1..] {
-    // Each fold absorbs one epoch's commitments and its blinding proof.
-    prover.fold_epoch(&epoch_commitments(epoch), &epoch_sigma_witnesses(epoch)?)?;
-}
-
-// The offline auditor makes one call: verify the proof, and confirm it ends
-// at the commitment the server published for epoch 3.
-let latest = published.last().unwrap();
-let verified = verify_against_merkle_root(
-    &ivc,
-    prover.proof().ok_or("nothing folded")?,
-    prover.num_steps(),                  // how many transitions the proof covers
-    prover.z0(),                         // the proof's starting state (epoch 0)
-    &epoch_commitments(latest),          // epoch 3's published commitments
-    latest.merkle_root,                  // and their published root
-    || merkle_root(&latest.per_shard),
-)?;
-```
-
-### Make it your own
-
-Edit the users and keys in the example, add more epochs, or look someone up
-at a different epoch, then rerun the same command. A few things worth knowing:
-
-- **Size.** `SHARD_LOG_CAPACITY = 10` gives 1,024 slots. Each step up
-  doubles the slots, and setup time and memory grow with them.
-- **Setup is cached.** The first run generates the trusted setup (the SRS)
-  and saves it to `../artifacts/srs/`, relative to the directory you run
-  from; later runs print `Loading SRS`. This setup comes from a fixed seed
-  and is **for testing only**.
-- **Each run starts fresh.** The example wipes its store at the start and
-  end. Remove those lines to keep state between runs.
-
----
-
-## Run it as servers
-
-The same kind of single-shard dictionary, split into the processes a real
-deployment uses: a shard server, a coordinator, and a client, talking gRPC
-on localhost.
-
-```bash
-# Build the three binaries once.
-cargo build --release -p aegon --bin aegon_shard_server --bin aegon_coordinator_server --bin aegon_client
-```
-
-Then open three terminals. All three processes must use the same
-`--shard-log-capacity`, `--kzh-k`, and `--setup-seed`; the shared seed is
-what gives them the same test setup.
-
-**Terminal 1: the shard.**
-
-```bash
-# The shard holds the dictionary's data and computes proofs.
-#   --bind                where it listens
-#   --shard-log-capacity  log2 of its slot count (10 = 1,024 slots)
-#   --kzh-k               commitment-scheme parameter for that size
-#   --setup-seed          generates the test setup (every process must match)
-./target/release/aegon_shard_server \
-  --bind 127.0.0.1:50051 \
-  --shard-log-capacity 10 --kzh-k 3 --setup-seed 42
-```
-
-Wait for `aegon_shard_server listening on 127.0.0.1:50051`.
-
-**Terminal 2: the coordinator**, preloaded with 100 users.
-
-```bash
-# The coordinator is what clients talk to. It routes each request to the shard.
-#   --listen           where clients connect
-#   --endpoints        the shard(s) to use: one shard here
-#   --seed-batch-size  publish 100 test users at startup
-./target/release/aegon_coordinator_server \
-  --listen 127.0.0.1:50100 \
-  --endpoints http://127.0.0.1:50051 \
-  --shard-log-capacity 10 --kzh-k 3 --setup-seed 42 \
-  --seed-batch-size 100
-```
-
-Wait for `coordinator: serving on 127.0.0.1:50100`. The preloaded users are
-`b100-s0-u0` through `b100-s0-u99`, with values `v-0` through `v-99`.
-
-**Terminal 3: look someone up.**
-
-```bash
-# The client fetches the current commitment, looks the user up, and verifies
-# both proofs itself.
-#   --log-n-shards    log2 of the shard count (0 = one shard)
-#   --label           the user to look up
-#   --expected-value  the value the proof must match
-./target/release/aegon_client \
-  --coordinator http://127.0.0.1:50100 \
-  --shard-log-capacity 10 --log-n-shards 0 --kzh-k 3 --setup-seed 42 \
-  --label b100-s0-u0 --expected-value v-0
-```
-
-```text
-client: connecting to http://127.0.0.1:50100 ...
-client: current commitment OK
-client: lookup_label OK in 4.7 ms → shard 0, slot len 10
-client: lookup_value OK in 4.1 ms → eval matches H_F(value), proof verified
-client: done.
-```
-
-The client doesn't take the server's word for anything. Ask it to verify a
-value the server never published, and it refuses:
-
-```bash
-# Same user, wrong value: verification must fail.
-./target/release/aegon_client \
-  --coordinator http://127.0.0.1:50100 \
-  --shard-log-capacity 10 --log-n-shards 0 --kzh-k 3 --setup-seed 42 \
-  --label b100-s0-u0 --expected-value not-the-value
-```
-
-```text
-error: lookup_value_with_bytes: proof verification failed: value opening does not match H_F(value)
-```
-
-Stop the servers with Ctrl-C. They keep state in memory, so each start is a
-fresh dictionary. `aegon_client` only looks users up; to publish your own
-entries to a running coordinator, use `CoordinatorClient::publish_two_layer`
-from the `aegon` crate.
+For a complete, runnable walkthrough — including fast-forward (IVC)
+auditing and running the shard, coordinator, and client as separate
+processes — see [`aegon/examples`](aegon/examples/README.md).
 
 ---
 

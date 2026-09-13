@@ -84,11 +84,9 @@ fn shard_fanout_pool() -> &'static rayon::ThreadPool {
 /// `InProcess` is today's behaviour: each shard is an in-memory
 /// `Aegon` owned by the `ShardedAegon`. `Remote` is the gRPC-backed
 /// deployment story — the coordinator holds client handles to
-/// shards running on `endpoints[i]`. `Remote` is parsed and
-/// validated by [`ShardedAegonConfigBuilder::build`] but is not yet
-/// honoured at setup time; calling `ShardedAegon::setup` with a
-/// `Remote` transport returns an `unimplemented!()`-style error
-/// until the gRPC layer lands.
+/// shards running on `endpoints[i]`. With `Remote`, setup
+/// connects to each shard over gRPC; run one `aegon_shard_server` per
+/// endpoint first.
 #[derive(Clone, Debug, Default)]
 pub enum ShardTransport {
     /// Single-process: shards co-located in the same address space.
@@ -117,7 +115,7 @@ pub enum SrsSource {
     DangerouslyGenerate,
     /// Load `(prover_param, verifier_param)` from a previously-
     /// serialized file (canonical SRS, typically a trusted-setup
-    /// ceremony output). Not yet implemented.
+    /// ceremony output).
     Path(std::path::PathBuf),
 }
 
