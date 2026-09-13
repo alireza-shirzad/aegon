@@ -70,476 +70,176 @@ dependency graph moves them.
 
 ---
 
-## Quick start (single process, in-memory shards)
+## Run a dictionary on your laptop
+
+The quickest way to see Aegon work is a single-shard dictionary in one
+process. No cluster, no network, and nothing to configure.
+
+```bash
+cargo run --release -p aegon --example laptop_dictionary
+```
+
+The first build takes a few minutes. After that the program finishes in
+seconds:
+
+```text
+Computing SRS
+dictionary ready at epoch 0
+published 3 users -> epoch 1
+lookup alice = "alice-key-v1", proof verifies: true
+alice rotated her key -> epoch 2
+lookup alice = "alice-key-v2", proof verifies: true
+alice's history verifies:
+  epoch 2: "alice-key-v2"
+  epoch 1: "alice-key-v1"
+bob unchanged since epoch 1: true
+alice unchanged since epoch 1: false
+audit epoch 0 -> 1: true
+audit epoch 1 -> 2: true
+```
+
+### What it just did
+
+The whole program is [`aegon/examples/laptop_dictionary.rs`](aegon/examples/laptop_dictionary.rs),
+about 140 lines. Open it and follow along:
+
+1. **Set up** a dictionary with one shard and 1,024 slots, backed by a
+   RocksDB store in your temp directory.
+2. **Publish** keys for alice, bob, and carol. Each publish creates a new
+   epoch with a commitment that clients and auditors check against.
+3. **Look up** alice's key and verify the proof against epoch 1.
+4. **Update** alice's key, then look it up again under epoch 2.
+5. **Read alice's history**: every epoch in which her key changed, verified.
+6. **Check consistency.** Bob can prove his key hasn't changed since epoch 1;
+   the same check for alice returns `false`, because hers did.
+7. **Audit** every epoch transition using nothing but the published
+   commitments.
+
+### Make it your own
+
+Edit the labels and values, add more publishes, or look up a label from an
+older epoch, then rerun the same command. The core calls are:
 
 ```rust
-use aegon::ivc::adapter::hooks_for;
-use aegon::{verify_sharded_lookup_two_layer, Sha256Hash, ShardedAegon, ShardedAegonConfig};
-use aegon_crypto::pcs::kzhk::KZHK;
-use ark_bn254::Bn254;
-use ark_std::rand::SeedableRng;
-use rand_chacha::ChaCha20Rng;
+let commit = dict.publish_two_layer(&[(label.clone(), value.clone())])?;
 
-type Pcs = KZHK<Bn254>;
-
-let cfg = ShardedAegonConfig::<Bn254, Pcs>::builder()
-    .shard_log_capacity(8)        // 256 slots per shard
-    .log_n_shards(2)              // 4 shards
-    .private(false)
-    .kzh_k(2)
-    // The Poseidon audit transcript, as the binaries use by default.
-    .audit_fs(hooks_for(Default::default()))
-    .build()?;
-
-let mut rng = ChaCha20Rng::seed_from_u64(0);
-let mut server = ShardedAegon::<Bn254, Pcs, Sha256Hash>::setup(&mut rng, &cfg)?;
-
-let commit = server.publish_two_layer(&[
-    (b"alice".to_vec(), b"alice-v1".to_vec()),
-    (b"bob".to_vec(), b"bob-v1".to_vec()),
-])?;
-
-let (_value, proof) = server.lookup_two_layer(&b"alice".to_vec())?;
-let ctx = server.sharded_verifier_context();
+let (value, proof) = dict.lookup_two_layer(&label)?;
 let ok = verify_sharded_lookup_two_layer::<Bn254, Pcs, Sha256Hash>(
-    &ctx, &commit, &b"alice".to_vec(), &b"alice-v1".to_vec(), &proof,
+    &ctx, &commit, &label, &value, &proof,
 )?;
-assert!(ok);
+
+let history = dict.lookup_history(&label)?;
+verify_lookup_history::<Bn254, Pcs, Sha256Hash>(&ctx, &history)?;
 ```
+
+A few things worth knowing:
+
+- **Size.** `SHARD_LOG_CAPACITY = 10` gives 1,024 slots. Each step up
+  doubles the slots, and setup time and memory grow with them.
+- **Setup is cached.** The first run generates the structured reference
+  string (SRS) and saves it to `../artifacts/srs/`, relative to the
+  directory you run from. Later runs print `Loading SRS` instead. This SRS
+  comes from a fixed seed and is **for testing only**.
+- **Each run starts fresh.** The store is wiped at the start and end.
+  Remove those lines to keep state between runs.
 
 ---
 
-## Cluster deployment (N machines + 1 coordinator)
+## Run it as servers
 
-The system splits cleanly along four roles:
-
-1. **Setup machine** — runs once, produces the SRS file.
-2. **Shard machines** (×N) — each runs `aegon_shard_server` over gRPC.
-3. **Coordinator machine** — runs the calling application, holds a
-   `ShardedAegon` configured with `ShardTransport::Remote { endpoints }`.
-4. **DB machine** — runs Redis. The coordinator writes the raw
-   `(label, value)` bytes here on publish and reads them back on
-   lookup so it can return the value alongside the proof. The
-   polynomial commitments only bind hashes of `(label, value)`; the
-   DB is a side-channel for retrieval, and the verifier re-hashes
-   the bytes itself.
-
-### Automated: one script
-
-For prototyping on GCE, [`scripts/cluster.sh`](scripts/cluster.sh) does
-the whole flow:
+The same single-shard dictionary, split into the processes a real
+deployment uses: a shard server, a coordinator, and a client, talking gRPC
+on localhost. Build the binaries once:
 
 ```bash
-export PROJECT=your-gcp-project-id
-
-./scripts/cluster.sh up      # VPC + 4 shards + 1 coordinator + 1 db
-./scripts/cluster.sh deploy  # build, generate SRS, ship, start servers, install redis
-./scripts/cluster.sh smoke   # publish + lookup + verify (queries redis)
-./scripts/cluster.sh down    # delete everything
+cargo build --release -p aegon --bin aegon_shard_server --bin aegon_coordinator_server --bin aegon_client
 ```
 
-End-to-end runtime is under five minutes for the default 4-shard
-config. See [`scripts/README.md`](scripts/README.md) for tuning knobs
-(`N_SHARDS`, `SHARD_LOG_CAPACITY`, machine types).
+Then use three terminals. All three must agree on `--shard-log-capacity`,
+`--kzh-k`, and `--setup-seed`; the shared seed is what gives them the same
+test SRS.
 
-The rest of this section walks through the same flow manually if you
-want to understand or customize each step.
-
-### Picking parameters
-
-For a target user count `N_users`, pick:
-
-```
-log_capacity = ceil(log2(N_users * 4))   # 4× slack → ≤25% load factor
-log_n_shards = pick_so_that_shard_log_capacity_fits_one_machine
-shard_log_capacity = log_capacity - log_n_shards
-kzh_k             = optimal_kzh_k(shard_log_capacity)
-```
-
-The `optimal_kzh_k` function (in `aegon::presets`) minimizes the
-aux-precomputation cost `f(k) = k(k − 1) · 2^(N/k)` and is tabulated
-for `N ∈ [20, 35]`. For production at `shard_log_capacity = 29`, it
-returns `k = 10`. Validated on a 16 vCPU / 64 GB box: setup ≈ 12 min,
-peak RSS ≈ 37 GB (with `gen_srs_for_testing`; load-from-file is much
-faster).
-
-Example: 4B users × 4× slack ≈ 2³⁴ slots. Split as 2⁵ shards × 2²⁹
-slots each → 32 machines, each at `shard_log_capacity = 29, kzh_k = 10`.
-
-### Step 1: Generate the SRS, once
-
-Run this on **one** machine (any machine with enough RAM to do an SRS
-gen at `shard_log_capacity`). The output is one file you'll copy to
-every shard + the coordinator.
-
-```bash
-cargo build --release -p aegon --bin aegon_srs_gen
-./target/release/aegon_srs_gen \
-  --shard-log-capacity 29 \
-  --kzh-k 10 \
-  --seed 42 \
-  --out /tmp/shard.srs
-```
-
-> ⚠️ `aegon_srs_gen` calls `gen_srs_for_testing` under the hood,
-> which is **not** a trusted setup. For real deployment, replace
-> this binary with one that loads a ceremony output. The on-wire
-> shape (file containing
-> `serialize_compressed(prover_param) || serialize_compressed(verifier_param)`)
-> stays the same — only the source of the SRS changes.
-
-Distribute the file to every shard machine + the coordinator:
-
-```bash
-gsutil cp /tmp/shard.srs gs://your-aegon-srs/shard.srs
-# on each shard + coordinator:
-sudo mkdir -p /etc/aegon && gsutil cp gs://your-aegon-srs/shard.srs /etc/aegon/
-```
-
-### Step 2: Run a shard server on every shard machine
-
-Build the binary:
-
-```bash
-cargo build --release -p aegon --bin aegon_shard_server
-```
-
-Run one per machine:
+**Terminal 1: the shard.**
 
 ```bash
 ./target/release/aegon_shard_server \
-  --bind 0.0.0.0:50051 \
-  --shard-log-capacity 29 \
-  --kzh-k 10 \
-  --srs-path /etc/aegon/shard.srs
+  --bind 127.0.0.1:50051 \
+  --shard-log-capacity 10 --kzh-k 3 --setup-seed 42
 ```
 
-Optional flags:
+Wait for `aegon_shard_server listening on 127.0.0.1:50051`.
 
-| flag | purpose |
-|---|---|
-| `--private` | enable zk mode (`KZH-k zk=true`) |
-| `--tls-cert <pem>` + `--tls-key <pem>` | enable TLS (the coordinator must point at the matching CA, see below) |
-| `--setup-seed <u64>` | **test only:** generate the SRS in-process instead of loading from disk |
-
-For systemd, a minimal unit looks like:
-
-```ini
-# /etc/systemd/system/aegon-shard.service
-[Unit]
-Description=Aegon Shard
-After=network.target
-
-[Service]
-ExecStart=/opt/aegon/bin/aegon_shard_server \
-  --bind 0.0.0.0:50051 \
-  --shard-log-capacity 29 \
-  --kzh-k 10 \
-  --srs-path /etc/aegon/shard.srs
-Restart=on-failure
-LimitNOFILE=65536
-
-[Install]
-WantedBy=multi-user.target
-```
-
-### Step 3: Wire the coordinator up
-
-```rust
-use aegon::ivc::adapter::hooks_for;
-use aegon::{DbSource, Sha256Hash, ShardTransport, ShardedAegon, ShardedAegonConfig, SrsSource};
-use aegon_crypto::pcs::kzhk::KZHK;
-use ark_bn254::Bn254;
-use ark_std::rand::SeedableRng;
-use rand_chacha::ChaCha20Rng;
-
-let cfg = ShardedAegonConfig::<Bn254, KZHK<Bn254>>::builder()
-    .shard_log_capacity(29)
-    .log_n_shards(5)
-    .kzh_k(10)
-    // Must match the transcript the shard servers run (`--audit-fs`,
-    // Poseidon by default) or every audit is rejected.
-    .audit_fs(hooks_for(Default::default()))
-    .shards(ShardTransport::Remote {
-        endpoints: (0..32)
-            .map(|i| format!("http://aegon-shard-{i}.internal:50051"))
-            .collect(),
-    })
-    // Coordinator still needs the verifier_param to build its
-    // VerifierContext; the prover_param is large and lives on the
-    // shard machines.
-    .srs(SrsSource::Path("/etc/aegon/shard.srs".into()))
-    // Coordinator-side label→value KV store. Omit (or pass
-    // DbSource::None) for single-process tests; for cluster
-    // deployments, point at the Redis VM.
-    .db(DbSource::Redis("redis://aegon-db.internal:6379".into()))
-    .build()?;
-
-let mut rng = ChaCha20Rng::seed_from_u64(0);
-let mut server = ShardedAegon::<Bn254, KZHK<Bn254>, Sha256Hash>::setup(&mut rng, &cfg)?;
-```
-
-`setup` here is the only point where the coordinator talks to all 32
-shards — it does the gRPC handshake and reads each shard's initial
-commitment. After that, every `publish` / `lookup` /
-`consistency_proof` call does whatever subset of gRPC calls the
-protocol requires.
-
-### Step 4: Smoke-test the cluster
-
-After every shard is up, run the smoke client on the coordinator
-machine:
+**Terminal 2: the coordinator**, preloaded with 100 users.
 
 ```bash
-cargo build --release -p aegon --bin aegon_coordinator_smoke
-./target/release/aegon_coordinator_smoke \
-  --shard-log-capacity 29 --kzh-k 10 \
-  --srs-path /etc/aegon/shard.srs \
-  --endpoints http://aegon-shard-0:50051,http://aegon-shard-1:50051,...,http://aegon-shard-31:50051 \
-  --db-url redis://aegon-db.internal:6379 \
-  --n-users 1024
+./target/release/aegon_coordinator_server \
+  --listen 127.0.0.1:50100 \
+  --endpoints http://127.0.0.1:50051 \
+  --shard-log-capacity 10 --kzh-k 3 --setup-seed 42 \
+  --seed-batch-size 100
 ```
 
-The binary brings up a `ShardedAegon` against the live cluster,
-publishes `--n-users` deterministic users, looks each one up, and
-verifies the proof. When `--db-url` is passed, every lookup
-additionally cross-checks that the value Redis returns matches what
-was published. The binary prints setup/publish/lookup wall-clock
-timings plus a pass/fail summary. Exit code 0 = healthy cluster.
+Wait for `coordinator: serving on 127.0.0.1:50100`. The preloaded users are
+labeled `b100-s0-u0` through `b100-s0-u99`, with values `v-0` through `v-99`.
 
-`--db-url` is optional: omitting it falls back to the single-process
-mode where the smoke client trusts the values it just published and
-the coordinator's `lookup` returns an empty value vector.
-
-### TLS
-
-Server side:
+**Terminal 3: look someone up.**
 
 ```bash
-aegon_shard_server \
-  --bind 0.0.0.0:50051 \
-  --shard-log-capacity 29 --kzh-k 10 --srs-path /etc/aegon/shard.srs \
-  --tls-cert /etc/aegon/server.crt \
-  --tls-key  /etc/aegon/server.key
+./target/release/aegon_client \
+  --coordinator http://127.0.0.1:50100 \
+  --shard-log-capacity 10 --log-n-shards 0 --kzh-k 3 --setup-seed 42 \
+  --label b100-s0-u0 --expected-value v-0
 ```
 
-Coordinator side — use `GrpcShardClientConfig` directly instead of the
-`.shards(...)` builder shortcut:
-
-```rust
-use aegon::shard_grpc::{GrpcShardClientConfig, GrpcShardClient};
-
-let ca_pem = std::fs::read("/etc/aegon/ca.crt")?;
-let cfg = GrpcShardClientConfig::new(
-    "https://aegon-shard-7.internal:50051".into(),
-    verifier_context,
-    29,
-)
-.with_tls_ca(ca_pem)
-.with_tls_domain("aegon-shard-7.internal");
-let client = GrpcShardClient::<Bn254, KZHK<Bn254>>::connect_with(cfg)?;
+```text
+client: connecting to http://127.0.0.1:50100 ...
+client: current commitment OK
+client: lookup_label OK in 4.7 ms → shard 0, slot len 10
+client: lookup_value OK in 4.1 ms → eval matches H_F(value), proof verified
+client: done.
 ```
 
-If you want the same TLS config applied to all 32 shards via
-`ShardTransport::Remote`, today you build the clients manually and
-swap them into `ShardedAegon` — the `.shards(ShardTransport::Remote {
-endpoints })` shortcut does plaintext only. A future iteration will
-add a TLS-aware variant.
+The client verifies both proofs itself; it doesn't take the server's word.
+Pass a value the server never published and verification fails:
 
-### Retry policy
+```bash
+./target/release/aegon_client \
+  --coordinator http://127.0.0.1:50100 \
+  --shard-log-capacity 10 --log-n-shards 0 --kzh-k 3 --setup-seed 42 \
+  --label b100-s0-u0 --expected-value not-the-value
+```
 
-Reads (`open_*`, `is_index_slot_occupied`, `current_commitment`)
-retry on transport-level failures (server `Unavailable`/`Unknown`)
-using exponential backoff. Writes (`publish_phase_1` /
-`publish_phase_2`) do **not** auto-retry — those aren't idempotent
-and need protocol-level coordination (out of scope for v1).
+```text
+error: lookup_value_with_bytes: proof verification failed: value opening does not match H_F(value)
+```
 
-Default policy is `max_attempts = 5, initial_backoff = 50ms,
-max_backoff = 2s`. Override via `GrpcShardClientConfig::with_retry`.
+Stop the servers with Ctrl-C. They keep state in memory, so each start is a
+fresh dictionary. `aegon_client` only looks up; to publish your own entries
+against a running coordinator, use `CoordinatorClient::publish_two_layer`
+from the `aegon` crate.
 
 ---
 
-## Architecture summary
+## Going further
 
-```
-                  ┌─────────────────┐         ┌──────────┐
-                  │  Coordinator    │ ──TCP─▶ │  Redis   │
-                  │ (your app +     │         │ (label → │
-                  │  ShardedAegon)  │ ◀──TCP─ │  value)  │
-                  └────────┬────────┘         └──────────┘
-                           │ gRPC × N (publish / lookup / consistency / audit)
-        ┌──────────────────┼──────────────────┐
-        │                  │                  │
-   ┌────▼─────┐       ┌────▼─────┐       ┌────▼─────┐
-   │ shard 0  │       │ shard 1  │  ...  │ shard N-1│
-   │ Aegon    │       │ Aegon    │       │ Aegon    │
-   │  - SRS   │       │  - SRS   │       │  - SRS   │
-   │  - polys │       │  - polys │       │  - polys │
-   └──────────┘       └──────────┘       └──────────┘
-```
+- [`docs/deployment.md`](docs/deployment.md): running across many machines
+  (SRS generation, one shard server per machine, the coordinator, TLS, and
+  retries), plus an architecture overview.
+- [`docs/development.md`](docs/development.md): building, testing, known
+  test limitations, and fast-forward (IVC) auditing.
+- [`SECURITY.md`](SECURITY.md): what this software does not protect against.
+  Read it before deploying anything.
 
-- Each shard owns four polynomials (`index`, `value`, `rand_index`,
-  `rand_value`) and the matching commitments + KZH-k auxiliary state.
-  The polynomials are over `H_F(label)` / `H_F(value)`; the raw bytes
-  never touch a shard machine.
-- The coordinator owns the routing table (label → cross-shard probe
-  trail), the FS chain scalars, the running Merkle root, and the
-  Redis client. On publish it writes `(label, value)` to Redis; on
-  lookup it reads the value back so it can return it to the caller
-  alongside the proof.
-- The verifier never trusts what Redis returns — it re-hashes the
-  bytes and checks the proof binds to that hash. Redis is a
-  retrieval side-channel, not part of the soundness argument.
-- Open addressing trails are derived from `H(ctr, label) → (shard_id,
-  slot)`, deterministic from the public hash + config. Sub-millisecond
-  lookups in the common case (`ctr0 = 0`, one shard, one PCS opening +
-  one Merkle path).
+## Repository layout
 
-For more depth see the per-module docs:
-
-- [`aegon::sharded`](aegon/src/sharded.rs) — coordinator + sharded proof types
-- [`aegon::shard_grpc`](aegon/src/shard_grpc.rs) — `ShardHandle` trait, server/client adapters
-- [`aegon::server`](aegon/src/server.rs) — single-shard `Aegon`
-- [`aegon::verify`](aegon/src/verify.rs), [`audit`](aegon/src/audit.rs), [`consistency`](aegon/src/consistency.rs) — verifier paths
-
----
-
-## Build & test
-
-```bash
-cargo build --release -p aegon
-cargo test  --release -p aegon --tests
-```
-
-There are two `#[ignore]`'d benchmarks worth running before sizing:
-
-```bash
-# 32-shard publish + lookup at log_capacity=15 per shard
-cargo test --release -p aegon --test sharded_aegon -- \
-  --ignored bench_setup_and_publish --nocapture
-
-# One shard at production size (log_capacity=29, k=10). ~12 min, ~37 GB RSS.
-cargo test --release -p aegon --test sharded_aegon -- \
-  --ignored bench_production_shard_scale --nocapture
-```
-
-### Test status
-
-`cargo test -p aegon` and `cargo test -p aegon_crypto` are both green, and CI
-keeps them that way. Test the two crates in **separate** invocations: a combined
-`-p aegon -p aegon_crypto` unifies features, which switches `aegon_crypto` to
-`parallel` and runs its SRS-heavy unit tests under nested rayon pools,
-exhausting the thread limit inside arkworks' MSM.
-
-A few tests are `#[ignore]`d, all of them slow benchmarks rather than known
-failures; each carries its reason in the attribute, and `--ignored` runs them.
-
-#### Known limitation: `aegon_crypto` alone, with `parallel`
-
-`cargo test -p aegon_crypto --features parallel` fails, and the cause is upstream.
-The pinned arkworks revision builds a **fresh rayon `ThreadPool` per chunk, on
-every MSM call**, and unwraps the result:
-
-```rust
-// algebra @ 598a5fb, ec/src/scalar_mul/variable_base/mod.rs:546
-let result = rayon::ThreadPoolBuilder::new()
-    .num_threads(THREADS_PER_CHUNK.min(rayon::current_num_threads()))
-    .build()
-    .unwrap()
-    .install(|| msm_bigint_wnaf_parallel::<V>(bases, scalars));
-```
-
-`msm_unchecked` → `msm_bigint` → `msm_bigint_wnaf` is the path BN254 G1 takes
-(`NEGATION_IS_CHEAP`), and `num_chunks` is `current_num_threads() / 2`, so each
-MSM spawns and tears down roughly one thread per core.
-
-Two ways that surfaces, both in debug builds:
-
-* At the default stack, `test_dense_boolean_k4` overflows a worker's stack --
-  alone, at `--test-threads=1`, so it is depth and not contention.
-* Raise `RUST_MIN_STACK` enough to clear that and the four `k5` tests fail
-  instead, because spawning those per-chunk pools with large stacks returns
-  `EAGAIN`: `ThreadPoolBuildError { IOError(Os { code: 35, WouldBlock }) }`.
-
-`aegon` depends on `aegon_crypto` with `parallel` enabled and exercises the same code
-through its own suite, which passes -- its MSMs are smaller, so it does not
-reach either edge. That is why the two crates are tested separately.
-
-Worth knowing beyond the test failure: this per-call pool construction is on
-the hot path for every commit and opening, release builds included. Whether a
-newer arkworks revision avoids it is untested here; the revisions are pinned
-deliberately, and changing them moves the published measurements.
-
-#### In-process shards now carry their own store
-
-Until recently an in-process shard had no storage: its publish write-sink
-discarded every chunk and its reads returned empty, so `ShardTransport::InProcess`
-served empty values and empty history at *any* `DbSource` -- silently, as `Ok`.
-`DbSource` configured only the coordinator. Two things changed:
-
-* `Aegon` now holds an optional `Box<dyn Db>`. `ShardedAegon::setup` opens one
-  RocksDB per in-process shard under `<db-path>.shards/<i>`, mirroring the
-  per-shard store a gRPC deployment gets. Each shard needs its own, because
-  `key_history_openings_local(epoch)` carries no shard discriminator --
-  shards sharing a keyspace would overwrite each other every epoch. For that
-  reason `DbSource::Redis` combined with `ShardTransport::InProcess` is now a
-  setup-time error rather than silent corruption.
-* A history entry's `prev_shard_commit` is read from the epoch snapshot rather
-  than the live commitment fields. By the time it was captured, phase 1 had
-  already overwritten those with the *new* epoch's values while `self.epoch`
-  was still the old number, so entries anchored their `rand_value_pre_proof`
-  against the wrong commitment. The genesis publish was also skipped entirely,
-  so a label's placement never appeared in its own history.
-
-### Fast-forward (IVC) auditing
-
-Behind the off-by-default `ivc_audit` feature. An auditor that has been
-offline verifies one recursive proof instead of replaying every missed
-epoch, at a cost independent of how many it missed.
-
-```bash
-cargo test -p aegon --features ivc_audit
-cargo run --release -p aegon --features ivc_audit --bin aegon_ivc_bench -- --help
-cargo run --release -p aegon --features ivc_audit --example ivc_audit_grouped_e2e
-```
-
-The feature gates the folding circuit and prover only. The Poseidon audit
-transcript they depend on is the **default** and is always compiled in, so a
-directory started today can be fast-forward audited later without having been
-built with `ivc_audit` — which matters, because the transcript is fixed from a
-chain's first epoch and cannot be changed later.
-
-Every server, client, and benchmark binary takes `--audit-fs poseidon`
-(default) or `--audit-fs sha256`. In library code, install the hooks on the
-config builder:
-
-```rust
-use aegon::{audit_fs::AuditFs, ivc::adapter::hooks_for};
-let cfg = ShardedAegonConfig::<Bn254, KZHK<Bn254>>::builder()
-    .audit_fs(hooks_for(AuditFs::Poseidon))   // or AuditFs::Sha256
-    // ...
-    .build()?;
-```
-
-Note that the builder itself is generic over the curve and so defaults to
-SHA-256: Poseidon hashes into BN254's base field and is undefined elsewhere.
-Library code that wants the Poseidon default has to ask for it, as above.
-
-Servers and auditors must agree: a mismatch rejects every epoch. The Merkle
-commitment, lookup, consistency, and history paths are unaffected and stay on
-SHA-256 either way. See `SECURITY.md`.
-
----
-
-## Top-level directory organization
-
-| Subfolder    | Description |
-| :---         | :---        |
-| `aegon`         | Main library. Sharded coordinator, single-shard engine, gRPC layer, IVC auditing, and the server, client, and benchmark binaries. |
-| `aegon_crypto`  | Cryptographic primitives — KZH-k PCS, multilinear arithmetic, transcripts, MSM, ECVRF. |
-| `scripts`       | Cluster bring-up and benchmark drivers (GCP). |
+| Path            | Contents |
+| :---            | :---     |
+| `aegon`         | The engine, gRPC layer, IVC auditing, and every server, client, and benchmark binary. |
+| `aegon_crypto`  | KZH-k polynomial commitments, multilinear arithmetic, transcripts, MSM, ECVRF. |
+| `docs`          | Deployment and development guides. |
+| `scripts`       | Cluster bring-up and benchmark drivers (Google Cloud). |
 | `bench-results` | Benchmark outputs and the plotting scripts behind the paper's figures. |
-| `xtask`         | Workspace-wide tooling (code coverage). |
+| `xtask`         | Code-coverage tooling. |
 
 ---
 

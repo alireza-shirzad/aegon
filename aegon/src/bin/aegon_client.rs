@@ -117,7 +117,6 @@ fn main() -> ExitCode {
     // we only need verifier_param. The setup_seed path mirrors what
     // each shard does in-process so a test deployment can be probed
     // without an out-of-band SRS file.
-    let per_shard_size: usize = 1 << args.shard_log_capacity;
     let pcs_config = KZHKConfig::new(args.kzh_k, args.private);
     let verifier_param = if let Some(path) = &args.srs_path {
         // Read the SRS file once and trim the verifier param.
@@ -143,7 +142,9 @@ fn main() -> ExitCode {
         match <Pcs as PolynomialCommitmentScheme<Bn254>>::gen_srs_for_testing(
             pcs_config,
             &mut rng,
-            per_shard_size,
+            // The SRS size is given in variables (log2 of the slot
+            // count), as `ShardedAegon::setup` passes it -- not in slots.
+            args.shard_log_capacity,
         ) {
             Ok(srs) => srs.extract_verifier_param(args.shard_log_capacity),
             Err(e) => {
