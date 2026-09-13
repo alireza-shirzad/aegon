@@ -3,37 +3,53 @@
 // This source code is licensed under the MIT license found in the
 // LICENSE file in the root directory of this source tree.
 
-//! A small Aegon dictionary on one machine: one shard, 1,024 slots, a
-//! local RocksDB store. Walks through every operation once.
+//! A small Aegon dictionary on one machine, followed across three epochs:
+//!
+//! * **Epoch 1.** Alice and Bob join. A client looks Alice up and checks
+//!   the proof.
+//! * **Epoch 2.** Bob changes his key. An auditor who has been watching
+//!   checks the chain one epoch at a time (the classic audit).
+//! * **Epoch 3.** Alice changes her key. An auditor who was offline the
+//!   whole time checks every epoch at once, with a single recursive proof
+//!   (the IVC audit).
 //!
 //! ```text
-//! cargo run --release -p aegon --example laptop_dictionary
+//! cargo run --release -p aegon --features ivc_audit --example laptop_dictionary
 //! ```
-//!
-//! Edit the labels and values below to experiment.
 
-use aegon::ivc::adapter::hooks_for;
+use std::sync::Arc;
+
+use aegon::audit_fs::AuditFs;
+use aegon::ivc::adapter::{
+    epoch_commitments, epoch_sigma_witnesses, fs_params_from_epoch, hooks_for,
+};
+use aegon::ivc::prover::{IvcAuditParams, IvcAuditProver};
+use aegon::ivc::verifier::verify_against_merkle_root;
 use aegon::{
-    optimal_kzh_k, verify_lookup_history, verify_sharded_consistency_two_layer,
-    verify_sharded_invariance, verify_sharded_lookup_two_layer, DbSource, Sha256Hash, ShardedAegon,
-    ShardedAegonConfig, ShardedAuditState,
+    merkle_root, optimal_kzh_k, verify_sharded_invariance, verify_sharded_lookup_two_layer,
+    DbSource, Sha256Hash, ShardedAegon, ShardedAegonConfig, ShardedAuditState,
 };
 use aegon_crypto::pcs::kzhk::KZHK;
 use ark_bn254::{Bn254, Fr};
 use ark_std::rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 
+/// The polynomial commitment scheme: KZH-k over the BN254 curve.
 type Pcs = KZHK<Bn254>;
-type Dictionary = ShardedAegon<Bn254, Pcs, Sha256Hash>;
+/// The server. `Sha256Hash` decides which slot each user lands in.
+type Server = ShardedAegon<Bn254, Pcs, Sha256Hash>;
 
-/// log2 of the slot count. 10 means 1,024 slots, enough for ~256 users
-/// at Aegon's 4x over-provisioning.
+/// log2 of the slot count: 10 means 1,024 slots, enough for ~256 users,
+/// since Aegon keeps the table at most a quarter full.
 const SHARD_LOG_CAPACITY: usize = 10;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // ---- 1. Set up -------------------------------------------------------
-    // A fresh store for each run. In-process shards keep their own
-    // RocksDB next to it, under `<path>.shards/`.
+    // =====================================================================
+    // Setup
+    // =====================================================================
+
+    // Start from an empty store on every run. The server keeps users'
+    // values here; its shard keeps its own store next to it.
     let db_path = std::env::temp_dir().join("aegon-laptop-dictionary");
     let shard_db_path = db_path.with_extension("shards");
     let _ = std::fs::remove_dir_all(&db_path);
@@ -41,100 +57,128 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let cfg = ShardedAegonConfig::<Bn254, Pcs>::builder()
         .shard_log_capacity(SHARD_LOG_CAPACITY)
-        .log_n_shards(0) // 2^0 = 1 shard
-        .private(false)
+        // 2^0 = one shard.
+        .log_n_shards(0)
+        // Private mode hides users' values from auditors, and gives every
+        // epoch the proof the IVC audit folds. Set it before `kzh_k`.
+        .private(true)
         .kzh_k(optimal_kzh_k(SHARD_LOG_CAPACITY))
-        .audit_fs(hooks_for(Default::default())) // Poseidon transcript
-        .db(DbSource::Rocks(db_path.clone())) // needed for history
+        // The hash auditors recompute. IVC auditing requires Poseidon, and
+        // the choice is fixed for the life of the dictionary.
+        .audit_fs(hooks_for(AuditFs::Poseidon))
+        .db(DbSource::Rocks(db_path.clone()))
         .build()?;
 
-    // Generates a throwaway SRS from this seed. Fine on a laptop; a real
-    // deployment loads one from a trusted-setup ceremony instead.
+    // Generates a throwaway trusted setup from this seed. Fine for a demo;
+    // a real deployment loads one produced by a setup ceremony.
     let mut rng = ChaCha20Rng::seed_from_u64(42);
-    let mut dict = Dictionary::setup(&mut rng, &cfg)?;
-    let ctx = dict.sharded_verifier_context();
-    println!(
-        "dictionary ready at epoch {}",
-        dict.current_commitment().epoch
-    );
+    let mut server = Server::setup(&mut rng, &cfg)?;
 
-    // Everything a client or auditor checks is anchored to a published
-    // epoch commitment. Keep each one, as a bulletin board would.
-    let mut commitments = vec![dict.current_commitment()];
+    // Everything a client or auditor needs: the public verification
+    // context, and the commitment the server publishes at each epoch.
+    // Nobody but the server ever touches `server`.
+    let ctx = server.sharded_verifier_context();
+    let mut published = vec![server.epoch_commitment(0).ok_or("no epoch 0")?];
+    println!("epoch 0: empty dictionary");
 
-    // ---- 2. Publish ------------------------------------------------------
-    let epoch_1 = dict.publish_two_layer(&[
-        (b"alice".to_vec(), b"alice-key-v1".to_vec()),
-        (b"bob".to_vec(), b"bob-key-v1".to_vec()),
-        (b"carol".to_vec(), b"carol-key-v1".to_vec()),
+    // =====================================================================
+    // Epoch 1: Alice and Bob join; a client looks Alice up
+    // =====================================================================
+
+    let epoch_1 = server.publish_two_layer(&[
+        (b"alice".to_vec(), b"alice-key-1".to_vec()),
+        (b"bob".to_vec(), b"bob-key-1".to_vec()),
     ])?;
-    println!("published 3 users -> epoch {}", epoch_1.epoch);
-    commitments.push(epoch_1.clone());
+    published.push(epoch_1.clone());
+    println!("\nepoch 1: alice and bob join");
 
-    // ---- 3. Look up and verify -------------------------------------------
+    // The server answers with Alice's value and a proof...
     let alice = b"alice".to_vec();
-    let (value, proof) = dict.lookup_two_layer(&alice)?;
+    let (value, proof) = server.lookup_two_layer(&alice)?;
+
+    // ...and the client checks that proof against epoch 1's published
+    // commitment. If the server lied about the value, this fails.
     let ok = verify_sharded_lookup_two_layer::<Bn254, Pcs, Sha256Hash>(
         &ctx, &epoch_1, &alice, &value, &proof,
     )?;
     println!(
-        "lookup alice = {:?}, proof verifies: {ok}",
+        "  client looks up alice -> {:?}, proof verifies: {ok}",
         String::from_utf8_lossy(&value)
     );
 
-    // ---- 4. Update a value -----------------------------------------------
-    let epoch_2 = dict.publish_two_layer(&[(alice.clone(), b"alice-key-v2".to_vec())])?;
-    println!("alice rotated her key -> epoch {}", epoch_2.epoch);
-    commitments.push(epoch_2.clone());
+    // =====================================================================
+    // Epoch 2: Bob changes his key; the classic audit
+    // =====================================================================
 
-    let (value, proof) = dict.lookup_two_layer(&alice)?;
-    let ok = verify_sharded_lookup_two_layer::<Bn254, Pcs, Sha256Hash>(
-        &ctx, &epoch_2, &alice, &value, &proof,
-    )?;
-    println!(
-        "lookup alice = {:?}, proof verifies: {ok}",
-        String::from_utf8_lossy(&value)
-    );
+    let epoch_2 = server.publish_two_layer(&[(b"bob".to_vec(), b"bob-key-2".to_vec())])?;
+    published.push(epoch_2);
+    println!("\nepoch 2: bob changes his key");
 
-    // ---- 5. Value history ------------------------------------------------
-    // Every epoch in which alice's value changed, newest first.
-    let history = dict.lookup_history(&alice)?;
-    verify_lookup_history::<Bn254, Pcs, Sha256Hash>(&ctx, &history)?;
-    println!("alice's history verifies:");
-    for entry in &history.entries {
+    // The classic auditor checks one transition at a time, reading only
+    // the published commitments. It carries a small running state from
+    // each check to the next, so it has to start at epoch 0 and see
+    // every transition in order.
+    let mut audit_state = ShardedAuditState::<Fr>::default();
+    for pair in published.windows(2) {
+        let ok =
+            verify_sharded_invariance::<Bn254, Pcs>(&ctx, &mut audit_state, &pair[0], &pair[1])?;
         println!(
-            "  epoch {}: {:?}",
-            entry.epoch,
-            String::from_utf8_lossy(&entry.value_bytes)
+            "  auditor checks epoch {} -> {}: {ok}",
+            pair[0].epoch, pair[1].epoch
         );
     }
 
-    // ---- 6. Consistency: "has my entry changed since epoch N?" ----------
-    // Bob has not touched his key since epoch 1, so this accepts.
-    let bob = b"bob".to_vec();
-    let proof = dict.consistency_proof_two_layer(&bob, epoch_1.epoch)?;
-    let unchanged = verify_sharded_consistency_two_layer::<Bn254, Pcs, Sha256Hash>(
-        &ctx, &epoch_1, &epoch_2, &bob, &proof,
-    )?;
-    println!("bob unchanged since epoch 1: {unchanged}");
+    // =====================================================================
+    // Epoch 3: Alice changes her key; the IVC audit
+    // =====================================================================
 
-    // Alice changed hers, so the same check comes back false.
-    let proof = dict.consistency_proof_two_layer(&alice, epoch_1.epoch)?;
-    let unchanged = verify_sharded_consistency_two_layer::<Bn254, Pcs, Sha256Hash>(
-        &ctx, &epoch_1, &epoch_2, &alice, &proof,
-    )?;
-    println!("alice unchanged since epoch 1: {unchanged}");
+    let epoch_3 = server.publish_two_layer(&[(alice.clone(), b"alice-key-2".to_vec())])?;
+    published.push(epoch_3);
+    println!("\nepoch 3: alice changes her key");
 
-    // ---- 7. Audit --------------------------------------------------------
-    // An auditor checks each transition from the published commitments
-    // alone, carrying a small running state from one epoch to the next.
-    let mut audit = ShardedAuditState::<Fr>::default();
-    for pair in commitments.windows(2) {
-        let ok = verify_sharded_invariance::<Bn254, Pcs>(&ctx, &mut audit, &pair[0], &pair[1])?;
-        println!("audit epoch {} -> {}: {ok}", pair[0].epoch, pair[1].epoch);
+    // An auditor who missed all three epochs would normally have to
+    // replay them one by one. Instead, a prover folds every transition
+    // into one recursive proof. The prover needs no secrets, only the
+    // published commitments, so anyone can run it.
+    let genesis = &published[0];
+    let latest = published.last().ok_or("nothing published")?;
+
+    // One-time setup of the recursive proof system for this dictionary's
+    // shape. `h` comes from the public verification context.
+    let h = ctx.inner.verifier_param.get_h();
+    let ivc = Arc::new(IvcAuditParams::setup(
+        fs_params_from_epoch(&published[1])?,
+        h,
+    )?);
+
+    let mut prover = IvcAuditProver::new(ivc.clone(), &epoch_commitments(genesis))?;
+    for epoch in &published[1..] {
+        // Each fold absorbs one epoch's commitments and its blinding proof.
+        prover.fold_epoch(&epoch_commitments(epoch), &epoch_sigma_witnesses(epoch)?)?;
     }
+    println!(
+        "  prover folds all {} transitions into one proof",
+        prover.num_steps()
+    );
 
-    drop(dict);
+    // The offline auditor makes one call. It checks the proof, then that
+    // the proof ends at the commitment the server published for epoch 3.
+    let verified = verify_against_merkle_root(
+        &ivc,
+        prover.proof().ok_or("nothing folded")?,
+        prover.num_steps(),
+        prover.z0(),
+        &epoch_commitments(latest),
+        latest.merkle_root,
+        || merkle_root(&latest.per_shard),
+    )?;
+    println!(
+        "  offline auditor verifies one proof covering {} epochs: true",
+        verified.epochs
+    );
+
+    // Clean up the store.
+    drop(server);
     let _ = std::fs::remove_dir_all(&db_path);
     let _ = std::fs::remove_dir_all(&shard_db_path);
     Ok(())

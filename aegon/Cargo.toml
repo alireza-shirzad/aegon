@@ -103,6 +103,10 @@ required-features = ["ivc_audit"]
 name = "ivc_audit_grouped_e2e"
 required-features = ["ivc_audit"]
 
+[[example]]
+name = "laptop_dictionary"
+required-features = ["ivc_audit"]
+
 # Gated so a plain `cargo check --workspace` does not try to build the
 # IVC bench without the Nova stack. Other binaries stay auto-discovered.
 [[bin]]
