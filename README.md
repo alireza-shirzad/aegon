@@ -232,23 +232,6 @@ processes — see [`aegon/examples`](aegon/examples/README.md).
 - [`SECURITY.md`](SECURITY.md): what this software does not protect against.
   Read it before deploying anything.
 
-## Repository layout
-
-| Path            | Contents |
-| :---            | :---     |
-| `aegon`         | The engine, gRPC layer, IVC auditing, and every server, client, and benchmark binary. |
-| `aegon_crypto`  | KZH-k polynomial commitments, multilinear arithmetic, transcripts, MSM, ECVRF. |
-| `docs`          | Deployment and development guides. |
-| `scripts`       | Cluster bring-up and benchmark drivers (Google Cloud). |
-| `bench-results` | Benchmark outputs and the plotting scripts behind the paper's figures. |
-| `xtask`         | Code-coverage tooling. |
-
----
-
-## Status
-
-This is research-grade software. It has not been independently audited.
-
 ---
 
 ## Citing
