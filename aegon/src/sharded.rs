@@ -105,18 +105,30 @@ pub enum ShardTransport {
 /// Where the SRS / (prover_param, verifier_param) come from.
 ///
 /// `DangerouslyGenerate` calls `P::gen_srs_for_testing` and is **not**
-/// suitable for production — every `ShardedAegon` instance gets a fresh
-/// (un-ceremonial) SRS. `Path` reads a previously-serialized SRS
-/// from disk (the natural output of a trusted-setup ceremony).
-#[derive(Clone, Debug, Default)]
+/// suitable for production — anyone who knows the seed knows the
+/// trapdoor. `Path` reads a previously-serialized SRS from disk (the
+/// natural output of a trusted-setup ceremony).
+#[derive(Clone, Debug)]
 pub enum SrsSource {
-    /// Generate a fresh SRS from `P::gen_srs_for_testing`. Test-only.
-    #[default]
-    DangerouslyGenerate,
+    /// Generate an SRS with `P::gen_srs_for_testing`, drawing the
+    /// trapdoor from a ChaCha20 RNG seeded with `seed`. Test-only.
+    /// KZH-k caches generated SRSs on disk by size, so a cached SRS is
+    /// reused whatever the seed.
+    DangerouslyGenerate {
+        /// Seed for the trapdoor RNG.
+        seed: u64,
+    },
     /// Load `(prover_param, verifier_param)` from a previously-
     /// serialized file (canonical SRS, typically a trusted-setup
     /// ceremony output).
     Path(std::path::PathBuf),
+}
+
+impl Default for SrsSource {
+    /// `DangerouslyGenerate { seed: 0 }`.
+    fn default() -> Self {
+        Self::DangerouslyGenerate { seed: 0 }
+    }
 }
 
 /// Configuration for a [`ShardedAegon`] deployment.
@@ -185,14 +197,25 @@ pub struct ShardedAegonConfig<E: Pairing, P: AegonPcs<E>> {
     /// Every verifier in the deployment must be configured with the
     /// same value; a mismatch makes every audit fail.
     pub chain_groups: usize,
+    /// VRF key for slot assignment. When set, the coordinator and every
+    /// in-process shard derive shard and slot positions with this key,
+    /// and [`ShardedAegon::sharded_verifier_context`] carries the
+    /// matching public key. When unset, positions come from the hash
+    /// suite `H` (for [`EcVrfHash`](super::hash::EcVrfHash), its
+    /// process-wide key from `AEGON_VRF_SEED` / `AEGON_VRF_KEY_PATH`).
+    ///
+    /// **In-process shards only.** Each `aegon_shard_server` loads its
+    /// key from its own environment, which must hold the same key.
+    pub vrf_prover: Option<super::hash::VrfProver>,
     /// Ties the config to its pairing without storing one.
     pub _e: PhantomData<E>,
 }
 
 impl<E: Pairing, P: AegonPcs<E>> ShardedAegonConfig<E, P> {
-    /// Start a fluent builder. Required fields are
-    /// `shard_log_capacity`, `log_n_shards`, and either `pcs_config`
-    /// (generic) or — for the KZH-k backend — `kzh_k`.
+    /// Start a fluent builder. Required: `log_n_shards`, and the size as
+    /// either `log_capacity` (users in the whole dictionary) or
+    /// `shard_log_capacity` (slots per shard). Everything else has a
+    /// default.
     pub fn builder() -> ShardedAegonConfigBuilder<E, P> {
         ShardedAegonConfigBuilder::new()
     }
@@ -301,20 +324,26 @@ where
 /// All required fields are checked at [`Self::build`] time and
 /// reported with a clear error message rather than a panic. The
 /// builder also validates:
+///   * exactly one of `log_capacity` and `shard_log_capacity` is set,
 ///   * `shard_log_capacity ≥ 1`,
 ///   * for `ShardTransport::Remote`, `endpoints.len() ==
 ///     1 << log_n_shards`,
 pub struct ShardedAegonConfigBuilder<E: Pairing, P: AegonPcs<E>> {
     shard_log_capacity: Option<usize>,
+    log_capacity: Option<usize>,
     log_n_shards: Option<usize>,
     private: bool,
     pcs_config: Option<P::Config>,
+    /// KZH-k `k` and the constructor for its config, applied in `build`
+    /// once `private` is final.
+    kzh_k: Option<(usize, fn(usize, bool) -> P::Config)>,
     shards: ShardTransport,
     srs: SrsSource,
     db: DbSource,
     masking_addrs: Vec<String>,
     audit_fs: super::audit_fs::AuditFsHooks<E, P>,
     chain_groups: usize,
+    vrf_prover: Option<super::hash::VrfProver>,
     _e: PhantomData<E>,
 }
 
@@ -329,15 +358,18 @@ impl<E: Pairing, P: AegonPcs<E>> ShardedAegonConfigBuilder<E, P> {
     pub fn new() -> Self {
         Self {
             shard_log_capacity: None,
+            log_capacity: None,
             log_n_shards: None,
             private: false,
             pcs_config: None,
+            kzh_k: None,
             shards: ShardTransport::default(),
             srs: SrsSource::default(),
             db: DbSource::default(),
             masking_addrs: Vec::new(),
             audit_fs: super::audit_fs::AuditFsHooks::sha256(),
             chain_groups: 1,
+            vrf_prover: None,
             _e: PhantomData,
         }
     }
@@ -357,9 +389,20 @@ impl<E: Pairing, P: AegonPcs<E>> ShardedAegonConfigBuilder<E, P> {
         self
     }
 
-    /// log-capacity of each shard's polynomial. **Required.**
+    /// log2 of the slot count of each shard's polynomial. Set this or
+    /// [`Self::log_capacity`], not both.
     pub fn shard_log_capacity(mut self, v: usize) -> Self {
         self.shard_log_capacity = Some(v);
+        self
+    }
+
+    /// log2 of how many users the whole dictionary holds. `build` sizes
+    /// each shard from it with
+    /// [`shard_log_capacity_for_two_layer`](super::config::shard_log_capacity_for_two_layer),
+    /// which adds the headroom open-addressing placement needs. Set
+    /// this or [`Self::shard_log_capacity`], not both.
+    pub fn log_capacity(mut self, v: usize) -> Self {
+        self.log_capacity = Some(v);
         self
     }
 
@@ -370,20 +413,18 @@ impl<E: Pairing, P: AegonPcs<E>> ShardedAegonConfigBuilder<E, P> {
     }
 
     /// Whether to run in privacy-preserving mode (`zk = true` at the
-    /// PCS layer). Defaults to `false`.
-    ///
-    /// For the KZH-k backend, call [`Self::private`] *before*
-    /// [`ShardedAegonConfigBuilder::kzh_k`] so the `KZHKConfig.zk`
-    /// flag agrees with this choice; otherwise `setup` will reject
-    /// the mismatch.
+    /// PCS layer). Defaults to `false`. Applied to the PCS config in
+    /// `build`, so call order does not matter — except with an explicit
+    /// [`Self::pcs_config`], which carries its own `zk` flag.
     pub fn private(mut self, v: bool) -> Self {
         self.private = v;
         self
     }
 
-    /// Provide the PCS-specific config directly. Mutually exclusive
-    /// with backend-specific convenience methods like
-    /// [`ShardedAegonConfigBuilder::kzh_k`].
+    /// Provide the PCS-specific config directly. Takes precedence over
+    /// backend-specific conveniences like
+    /// [`ShardedAegonConfigBuilder::kzh_k`] and over the backend's
+    /// default for the shard size.
     pub fn pcs_config(mut self, v: P::Config) -> Self {
         self.pcs_config = Some(v);
         self
@@ -418,7 +459,7 @@ impl<E: Pairing, P: AegonPcs<E>> ShardedAegonConfigBuilder<E, P> {
         self
     }
 
-    /// SRS source. Defaults to `SrsSource::DangerouslyGenerate`
+    /// SRS source. Defaults to `SrsSource::DangerouslyGenerate { seed: 0 }`
     /// (suitable for tests; **never** production).
     pub fn srs(mut self, v: SrsSource) -> Self {
         self.srs = v;
@@ -434,24 +475,44 @@ impl<E: Pairing, P: AegonPcs<E>> ShardedAegonConfigBuilder<E, P> {
         self
     }
 
+    /// VRF key for slot assignment; see [`ShardedAegonConfig::vrf_prover`].
+    /// Defaults to none.
+    pub fn vrf_prover(mut self, v: super::hash::VrfProver) -> Self {
+        self.vrf_prover = Some(v);
+        self
+    }
+
     /// Validate and finalize. Errors when a required field is missing
     /// or when `chain_groups` does not divide the shard count exactly.
     pub fn build(self) -> Result<ShardedAegonConfig<E, P>, AegonError> {
-        let shard_log_capacity = self.shard_log_capacity.ok_or_else(|| {
-            AegonError::Config("ShardedAegonConfig: shard_log_capacity is required".into())
-        })?;
         let log_n_shards = self.log_n_shards.ok_or_else(|| {
             AegonError::Config("ShardedAegonConfig: log_n_shards is required".into())
         })?;
+        let shard_log_capacity = match (self.shard_log_capacity, self.log_capacity) {
+            (Some(v), None) => v,
+            (None, Some(total)) => {
+                super::config::shard_log_capacity_for_two_layer(total, log_n_shards)
+            }
+            (None, None) => {
+                return Err(AegonError::Config(
+                    "ShardedAegonConfig: set log_capacity or shard_log_capacity".into(),
+                ))
+            }
+            (Some(_), Some(_)) => {
+                return Err(AegonError::Config(
+                    "ShardedAegonConfig: set log_capacity or shard_log_capacity, not both".into(),
+                ))
+            }
+        };
         // Reject an unusable partition here rather than at the first
         // publish: an audit that derives per-group scalars the
         // verifier cannot reconstruct fails silently and late.
         super::chain_groups::GroupPlan::new(1usize << log_n_shards, self.chain_groups)?;
-        let pcs_config = self.pcs_config.ok_or_else(|| {
-            AegonError::Config(
-                "ShardedAegonConfig: pcs_config is required (for the KZH-k backend, call .kzh_k(k) instead)".into(),
-            )
-        })?;
+        let pcs_config = match (self.pcs_config, self.kzh_k) {
+            (Some(config), _) => config,
+            (None, Some((k, make))) => make(k, self.private),
+            (None, None) => P::default_config(shard_log_capacity, self.private),
+        };
         if shard_log_capacity == 0 {
             return Err(AegonError::Config(
                 "shard_log_capacity must be at least 1".into(),
@@ -478,6 +539,7 @@ impl<E: Pairing, P: AegonPcs<E>> ShardedAegonConfigBuilder<E, P> {
             masking_addrs: self.masking_addrs,
             audit_fs: self.audit_fs,
             chain_groups: self.chain_groups,
+            vrf_prover: self.vrf_prover,
             _e: PhantomData,
         })
     }
@@ -485,12 +547,12 @@ impl<E: Pairing, P: AegonPcs<E>> ShardedAegonConfigBuilder<E, P> {
 
 // KZH-k-specific convenience on the builder.
 impl<E: Pairing> ShardedAegonConfigBuilder<E, aegon_crypto::pcs::kzhk::KZHK<E>> {
-    /// Set the KZH-k `k` parameter; the `zk` flag of `KZHKConfig` is
-    /// taken from `self.private` at the time of this call. Call
-    /// [`Self::private`] *before* this method.
+    /// Set the KZH-k `k` parameter. Defaults to
+    /// [`optimal_kzh_k`](super::presets::optimal_kzh_k) of the shard
+    /// size. The `zk` flag comes from [`Self::private`] when `build` runs.
     pub fn kzh_k(mut self, k: usize) -> Self {
         use aegon_crypto::pcs::kzhk::structs::KZHKConfig;
-        self.pcs_config = Some(KZHKConfig::new(k, self.private));
+        self.kzh_k = Some((k, KZHKConfig::new));
         self
     }
 }
@@ -1471,8 +1533,9 @@ where
     /// shard's [`Aegon::init`]. All shards share the same param set,
     /// which is sound because each one commits to a distinct
     /// polynomial — and avoids 32× redundant SRS generation, which
-    /// dominates setup cost at production scale.
-    pub fn setup<R: Rng>(rng: &mut R, config: &ShardedAegonConfig<E, P>) -> Result<Self, AegonError>
+    /// dominates setup cost at production scale. The SRS comes from
+    /// `config.srs`.
+    pub fn setup(config: &ShardedAegonConfig<E, P>) -> Result<Self, AegonError>
     where
         P::VerifierParam: Clone,
         // Bounds for boxing Aegon as a ShardHandle (in-process).
@@ -1502,10 +1565,14 @@ where
                 // flow where one setup machine generates the ceremony
                 // output once and distributes it.
                 let (prover_param, verifier_param) = match &config.srs {
-                    SrsSource::DangerouslyGenerate => {
+                    SrsSource::DangerouslyGenerate { seed } => {
+                        let mut rng =
+                            <rand_chacha::ChaCha20Rng as ark_std::rand::SeedableRng>::seed_from_u64(
+                                *seed,
+                            );
                         let srs = P::gen_srs_for_testing(
                             shard_config.pcs_config.clone(),
-                            rng,
+                            &mut rng,
                             shard_config.log_capacity,
                         )?;
                         P::trim(&srs, None, Some(shard_config.log_capacity))?
@@ -1550,6 +1617,11 @@ where
                     )?;
                     if let Some(src) = &masking_source {
                         aegon.set_masking_source(std::sync::Arc::clone(src));
+                    }
+                    // Shards place labels with the same key the
+                    // coordinator routes and proves with.
+                    if let Some(prover) = &config.vrf_prover {
+                        aegon.set_vrf_prover(prover.clone());
                     }
                     // Give each in-process shard its own store, so an
                     // in-process deployment persists what a gRPC one does
@@ -1705,7 +1777,7 @@ where
                 chain_groups,
                 epoch_commits: rec.epoch_commits,
                 db,
-                vrf_prover: None,
+                vrf_prover: config.vrf_prover.clone(),
                 shard_full_proofs,
             })
         } else {
@@ -1721,7 +1793,7 @@ where
                 chain_groups,
                 epoch_commits: vec![initial_commit],
                 db,
-                vrf_prover: None,
+                vrf_prover: config.vrf_prover.clone(),
                 shard_full_proofs,
             })
         }
@@ -1739,6 +1811,11 @@ where
     /// `AEGON_VRF_SEED` / `AEGON_VRF_KEY_PATH` environment variables
     /// — see `aegon::hash::vrf_key_source`). Tests and microbenches
     /// can use `VrfProver::from_seed(&BENCH_VRF_SEED)`.
+    ///
+    /// Only the coordinator gets this key; in-process shards keep
+    /// placing labels with theirs. Prefer
+    /// [`ShardedAegonConfigBuilder::vrf_prover`], which gives the same
+    /// key to every in-process shard.
     pub fn set_vrf_prover(&mut self, prover: super::hash::VrfProver) {
         self.vrf_prover = Some(prover);
     }

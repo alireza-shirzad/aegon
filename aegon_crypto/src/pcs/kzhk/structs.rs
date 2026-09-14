@@ -41,6 +41,26 @@ impl KZHKConfig {
     pub fn new(k: usize, zk: bool) -> Self {
         Self { k, zk }
     }
+
+    /// The `k` minimizing KZH-k's aux-precomputation cost
+    /// `k(k − 1) · 2^(N/k)` for `num_vars = N`, clamped to `1 ≤ k ≤ N`.
+    /// The table behind it is documented on `aegon::presets::optimal_kzh_k`.
+    pub fn optimal_k(num_vars: usize) -> usize {
+        let k = match num_vars {
+            0 => 1,
+            1..=5 => 2,
+            6..=14 => 3,
+            15..=19 => 5,
+            20 => 6,
+            21..=23 => 7,
+            24..=26 => 8, // n=26 is tied between 8 and 9; pick 8
+            27..=28 => 9,
+            29..=31 => 10,
+            32..=34 => 11,
+            _ => 12,
+        };
+        k.min(num_vars.max(1))
+    }
 }
 
 ///////////////// Commitment //////////////////////

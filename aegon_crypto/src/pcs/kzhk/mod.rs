@@ -114,6 +114,11 @@ where
     type MaskingPackage = crate::pcs::kzhk::structs::KZHKMaskingPackage<E>;
     type HidingScalar = E::ScalarField;
 
+    /// `k` from [`KZHKConfig::optimal_k`].
+    fn default_config(num_vars: usize, zk: bool) -> Self::Config {
+        KZHKConfig::new(KZHKConfig::optimal_k(num_vars), zk)
+    }
+
     /// Generates (or loads) a KZH-k SRS for testing.
     ///
     /// The SRS samples trapdoors `{mu_{b,j}}` for each of the `k` blocks and

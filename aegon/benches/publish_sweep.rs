@@ -64,8 +64,6 @@ use std::sync::OnceLock;
 
 use aegon::{optimal_kzh_k, Sha256Hash, ShardedAegon, ShardedAegonConfig};
 use ark_bn254::Bn254;
-use ark_std::rand::SeedableRng;
-use rand_chacha::ChaCha20Rng;
 
 type Pcs = aegon_crypto::pcs::kzhk::KZHK<Bn254>;
 type Sharded = ShardedAegon<Bn254, Pcs, Sha256Hash>;
@@ -134,8 +132,7 @@ fn build_server() -> Sharded {
         .kzh_k(p.kzh_k)
         .build()
         .expect("config builds");
-    let mut rng = ChaCha20Rng::seed_from_u64(0xA56_5);
-    let mut server = Sharded::setup(&mut rng, &cfg).expect("setup");
+    let mut server = Sharded::setup(&cfg).expect("setup");
     if p.preload_users > 0 {
         let preload: Vec<(Vec<u8>, Vec<u8>)> = (0..p.preload_users as u32)
             .map(|i| {

@@ -716,9 +716,8 @@ fn main() -> ExitCode {
             k,
             log_n_shards
         );
-        let mut rng = ChaCha20Rng::seed_from_u64(args.setup_seed.unwrap_or(0));
         let t_setup = Instant::now();
-        let mut state = match Sharded::setup(&mut rng, &cfg) {
+        let mut state = match Sharded::setup(&cfg) {
             Ok(s) => s,
             Err(e) => {
                 eprintln!("error: setup failed: {e}");

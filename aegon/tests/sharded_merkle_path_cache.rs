@@ -15,8 +15,6 @@ use aegon::{
 };
 use ark_bn254::Bn254;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
-use ark_std::rand::SeedableRng;
-use rand_chacha::ChaCha20Rng;
 
 type Pcs = aegon_crypto::pcs::kzhk::KZHK<Bn254>;
 type Sharded = ShardedAegon<Bn254, Pcs, Sha256Hash>;
@@ -32,8 +30,7 @@ fn config(log_capacity: usize, log_n_shards: usize) -> ShardedAegonConfig<Bn254,
 }
 
 fn fresh(log_capacity: usize, log_n_shards: usize) -> Sharded {
-    let mut rng = ChaCha20Rng::seed_from_u64(0x9001);
-    Sharded::setup(&mut rng, &config(log_capacity, log_n_shards)).expect("setup")
+    Sharded::setup(&config(log_capacity, log_n_shards)).expect("setup")
 }
 
 /// At genesis (epoch 0, empty per-shard polynomials) the cached paths

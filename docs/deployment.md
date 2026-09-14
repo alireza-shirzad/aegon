@@ -139,8 +139,6 @@ use aegon::ivc::adapter::hooks_for;
 use aegon::{DbSource, Sha256Hash, ShardTransport, ShardedAegon, ShardedAegonConfig, SrsSource};
 use aegon_crypto::pcs::kzhk::KZHK;
 use ark_bn254::Bn254;
-use ark_std::rand::SeedableRng;
-use rand_chacha::ChaCha20Rng;
 
 let cfg = ShardedAegonConfig::<Bn254, KZHK<Bn254>>::builder()
     .shard_log_capacity(29)
@@ -164,8 +162,7 @@ let cfg = ShardedAegonConfig::<Bn254, KZHK<Bn254>>::builder()
     .db(DbSource::Redis("redis://aegon-db.internal:6379".into()))
     .build()?;
 
-let mut rng = ChaCha20Rng::seed_from_u64(0);
-let mut server = ShardedAegon::<Bn254, KZHK<Bn254>, Sha256Hash>::setup(&mut rng, &cfg)?;
+let mut server = ShardedAegon::<Bn254, KZHK<Bn254>, Sha256Hash>::setup(&cfg)?;
 ```
 
 `setup` here is the only point where the coordinator talks to all 32

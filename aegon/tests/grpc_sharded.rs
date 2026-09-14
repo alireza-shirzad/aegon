@@ -132,17 +132,15 @@ async fn grpc_sharded_publish_lookup_verify_roundtrip() {
         .build()
         .expect("config builds");
 
-    let mut rng = ChaCha20Rng::seed_from_u64(0xAEC0_A);
     // setup() does the gRPC connect handshake to both shard
     // servers. tokio::spawn_blocking moves this off the multi-
     // thread runtime since GrpcShardClient owns its own internal
     // runtime + blocks on it.
-    let coordinator: Arc<tokio::sync::Mutex<Sharded>> = tokio::task::spawn_blocking(move || {
-        Sharded::setup(&mut rng, &cfg).expect("Sharded::setup via gRPC")
-    })
-    .await
-    .map(|server| Arc::new(tokio::sync::Mutex::new(server)))
-    .expect("setup join");
+    let coordinator: Arc<tokio::sync::Mutex<Sharded>> =
+        tokio::task::spawn_blocking(move || Sharded::setup(&cfg).expect("Sharded::setup via gRPC"))
+            .await
+            .map(|server| Arc::new(tokio::sync::Mutex::new(server)))
+            .expect("setup join");
 
     // Publish a small batch.
     let updates = vec![
@@ -228,9 +226,8 @@ async fn grpc_sharded_two_layer_publish_lookup_verify_roundtrip() {
         .build()
         .expect("config builds (two-layer)");
 
-    let mut rng = ChaCha20Rng::seed_from_u64(0xAEC0_A);
     let coordinator: Arc<tokio::sync::Mutex<Sharded>> = tokio::task::spawn_blocking(move || {
-        Sharded::setup(&mut rng, &cfg).expect("Sharded::setup via gRPC (two-layer)")
+        Sharded::setup(&cfg).expect("Sharded::setup via gRPC (two-layer)")
     })
     .await
     .map(|server| Arc::new(tokio::sync::Mutex::new(server)))
@@ -352,9 +349,8 @@ async fn grpc_sharded_publish_lookup_verify_roundtrip_ecvrf() {
         .build()
         .expect("config builds");
 
-    let mut rng = ChaCha20Rng::seed_from_u64(0xAEC0_A);
     let coordinator: Arc<tokio::sync::Mutex<ShardedVrf>> = tokio::task::spawn_blocking(move || {
-        let mut s = ShardedVrf::setup(&mut rng, &cfg).expect("ShardedVrf::setup via gRPC");
+        let mut s = ShardedVrf::setup(&cfg).expect("ShardedVrf::setup via gRPC");
         // Attach the prover before any publish/lookup happens. The
         // bench seed is deterministic, matching the shard processes'
         // global `OnceLock` key in EcVrfHash::h_bits — so probe_at

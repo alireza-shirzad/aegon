@@ -502,15 +502,16 @@ fn build_server(args: &Args, k: usize, log_n_shards: usize) -> Result<Sharded, A
     // exposed on this bench to keep the CLI tight. If a deployer ever
     // wants a ceremony-SRS run, swap `SrsSource::DangerouslyGenerate`
     // for `Path(path)` below — same shape.
-    builder = builder.srs(SrsSource::DangerouslyGenerate);
+    builder = builder.srs(SrsSource::DangerouslyGenerate {
+        seed: args.setup_seed,
+    });
     if let Some(url) = &args.db_url {
         builder = builder.db(DbSource::Redis(url.clone()));
     } else if let Some(path) = &args.db_path {
         builder = builder.db(DbSource::Rocks(path.clone()));
     }
     let cfg = builder.build()?;
-    let mut rng = ChaCha20Rng::seed_from_u64(args.setup_seed);
-    Sharded::setup(&mut rng, &cfg)
+    Sharded::setup(&cfg)
 }
 
 /// Hand-rolled JSON. Hand-roll for the same reason every other Aegon

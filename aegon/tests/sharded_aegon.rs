@@ -33,8 +33,7 @@ fn config(log_capacity: usize, log_n_shards: usize) -> ShardedAegonConfig<Bn254,
 }
 
 fn fresh(log_capacity: usize, log_n_shards: usize) -> Sharded {
-    let mut rng = ChaCha20Rng::seed_from_u64(0xA56_5);
-    Sharded::setup(&mut rng, &config(log_capacity, log_n_shards)).expect("setup")
+    Sharded::setup(&config(log_capacity, log_n_shards)).expect("setup")
 }
 
 fn assert_lookup_verifies(
@@ -167,8 +166,7 @@ fn two_layer_publish_lookup_history_round_trip() {
         .db(DbSource::Rocks(db_path.clone()))
         .build()
         .expect("config builds (two-layer history)");
-    let mut rng = ChaCha20Rng::seed_from_u64(0xA56_5);
-    let mut server = Sharded::setup(&mut rng, &cfg).expect("setup");
+    let mut server = Sharded::setup(&cfg).expect("setup");
 
     // Publish 1: introduce three labels (placement events).
     let updates_v1: Vec<(Vec<u8>, Vec<u8>)> = vec![
@@ -323,9 +321,8 @@ fn two_layer_publish_lookup_round_trip_ecvrf() {
         .kzh_k(2)
         .build()
         .expect("ecvrf cfg builds");
-    let mut rng = ChaCha20Rng::seed_from_u64(0xA56_5);
     let mut server: ShardedG<Bn254, Pcs, EcVrfHash> =
-        ShardedG::<Bn254, Pcs, EcVrfHash>::setup(&mut rng, &cfg).expect("setup ecvrf");
+        ShardedG::<Bn254, Pcs, EcVrfHash>::setup(&cfg).expect("setup ecvrf");
     server.set_vrf_prover(VrfProver::from_seed(&BENCH_VRF_SEED));
 
     let updates: Vec<(Vec<u8>, Vec<u8>)> = (0..12u32)
@@ -377,6 +374,50 @@ fn two_layer_publish_lookup_round_trip_ecvrf() {
 }
 
 #[test]
+fn builder_vrf_key_reaches_in_process_shards() {
+    // A key set on the builder must be the one in-process shards place
+    // labels with. With a key other than the process-wide EcVrfHash
+    // key, shards used to place with the process key while the
+    // coordinator proved with the builder's, and no lookup verified.
+    use aegon::{verify_sharded_lookup_two_layer, EcVrfHash, ShardedAegon, VrfProver};
+    let cfg = ShardedAegonConfig::<Bn254, Pcs>::builder()
+        .shard_log_capacity(4)
+        .log_n_shards(2)
+        .kzh_k(2)
+        .vrf_prover(VrfProver::from_seed(&[7u8; 32]))
+        .build()
+        .expect("cfg builds");
+    let mut server =
+        ShardedAegon::<Bn254, Pcs, EcVrfHash>::setup(&cfg).expect("setup with builder VRF key");
+
+    let updates: Vec<(Vec<u8>, Vec<u8>)> = (0..12u32)
+        .map(|i| {
+            (
+                format!("user-{i}").into_bytes(),
+                format!("v{i}").into_bytes(),
+            )
+        })
+        .collect();
+    let commit = server.publish_two_layer(&updates).expect("publish");
+    let ctx = server.sharded_verifier_context();
+    for (label, expected_value) in &updates {
+        let (_db_value, proof) = server.lookup_two_layer(label).expect("lookup");
+        let ok = verify_sharded_lookup_two_layer::<Bn254, Pcs, EcVrfHash>(
+            &ctx,
+            &commit,
+            label,
+            expected_value,
+            &proof,
+        )
+        .expect("verify");
+        assert!(
+            ok,
+            "lookup must verify under the builder's VRF key for {label:?}"
+        );
+    }
+}
+
+#[test]
 fn srs_path_round_trip() {
     use aegon::SrsSource;
 
@@ -415,8 +456,7 @@ fn srs_path_round_trip() {
         .srs(SrsSource::Path(tmp.clone()))
         .build()
         .expect("shard config builds");
-    let mut rng = ChaCha20Rng::seed_from_u64(0xDEAD_BEEF);
-    let mut server = Sharded::setup(&mut rng, &shard_cfg).expect("setup from path");
+    let mut server = Sharded::setup(&shard_cfg).expect("setup from path");
 
     // 3. End-to-end: publish + lookup + verify must work against
     //    SRS-from-disk just as against gen-on-the-fly.
@@ -462,8 +502,7 @@ fn private_mode_publish_lookup_round_trip() {
         .kzh_k(2)
         .build()
         .expect("private=true config builds");
-    let mut rng = ChaCha20Rng::seed_from_u64(0xA56_5);
-    let mut server = Sharded::setup(&mut rng, &cfg).expect("setup with hiding SRS");
+    let mut server = Sharded::setup(&cfg).expect("setup with hiding SRS");
 
     // Publish twice so the test hits both new-placement and value-only
     // update paths in publish_phase_2 (different opening loops in the
@@ -533,8 +572,7 @@ fn private_mode_lookup_history_round_trip() {
         .db(DbSource::Rocks(db_path.clone()))
         .build()
         .expect("private=true rocks config builds");
-    let mut rng = ChaCha20Rng::seed_from_u64(0xA56_5);
-    let mut server = Sharded::setup(&mut rng, &cfg).expect("setup with hiding SRS");
+    let mut server = Sharded::setup(&cfg).expect("setup with hiding SRS");
 
     let updates_v1 = vec![
         (b"alice".to_vec(), b"alice-v1".to_vec()),
@@ -629,14 +667,44 @@ fn builder_validation_rejects_bad_configs() {
         "missing log_n_shards",
     );
 
-    // Missing pcs_config (no .kzh_k call) → error.
+    // No .kzh_k call → k defaults to optimal_kzh_k of the shard size.
+    let cfg = ShardedAegonConfig::<Bn254, Pcs>::builder()
+        .shard_log_capacity(8)
+        .log_n_shards(2)
+        .build()
+        .expect("default pcs_config builds");
+    assert_eq!(cfg.pcs_config.k, aegon::optimal_kzh_k(8));
+
+    // `private` reaches the PCS config whatever the call order.
+    let cfg = ShardedAegonConfig::<Bn254, Pcs>::builder()
+        .shard_log_capacity(8)
+        .log_n_shards(2)
+        .kzh_k(2)
+        .private(true)
+        .build()
+        .expect("kzh_k before private builds");
+    assert_eq!((cfg.pcs_config.k, cfg.pcs_config.zk), (2, true));
+
+    // log_capacity sizes each shard with the over-provisioning headroom.
+    let cfg = ShardedAegonConfig::<Bn254, Pcs>::builder()
+        .log_capacity(10)
+        .log_n_shards(2)
+        .build()
+        .expect("log_capacity builds");
+    assert_eq!(
+        cfg.shard_log_capacity,
+        aegon::shard_log_capacity_for_two_layer(10, 2)
+    );
+
+    // log_capacity and shard_log_capacity together → error.
     must_err(
         ShardedAegonConfig::<Bn254, Pcs>::builder()
+            .log_capacity(10)
             .shard_log_capacity(8)
             .log_n_shards(2)
             .build(),
-        "pcs_config",
-        "missing pcs_config",
+        "not both",
+        "both capacities",
     );
 
     // Remote endpoints with wrong count → error.
@@ -666,8 +734,7 @@ fn builder_validation_rejects_bad_configs() {
         })
         .build()
         .expect("remote with correct count builds");
-    let mut rng = ChaCha20Rng::seed_from_u64(0xA56_5);
-    match Sharded::setup(&mut rng, &cfg) {
+    match Sharded::setup(&cfg) {
         Err(e) => assert!(
             format!("{e}").contains("connect"),
             "expected connect-failure error, got: {e}"
@@ -685,7 +752,7 @@ fn builder_validation_rejects_bad_configs() {
         .srs(SrsSource::Path("/nonexistent/aegon.srs".into()))
         .build()
         .expect("path-srs builds");
-    match Sharded::setup(&mut rng, &cfg) {
+    match Sharded::setup(&cfg) {
         Err(e) => assert!(
             format!("{e}").contains("open srs file"),
             "expected open-srs-file error, got: {e}"
@@ -843,8 +910,7 @@ fn rocks_backend_publish_lookup_history_round_trip() {
         .build()
         .expect("config builds");
 
-    let mut rng = ChaCha20Rng::seed_from_u64(0xA56_5);
-    let mut server = Sharded::setup(&mut rng, &cfg).expect("setup");
+    let mut server = Sharded::setup(&cfg).expect("setup");
 
     // Publish 1: introduce three labels (placement events).
     let updates_v1: Vec<(Vec<u8>, Vec<u8>)> = vec![
@@ -1037,10 +1103,9 @@ fn bench_production_shard_scale() {
         .build()
         .expect("config builds");
 
-    let mut rng = ChaCha20Rng::seed_from_u64(0xA56_5);
     print_rss("baseline");
     let t0 = std::time::Instant::now();
-    let mut server = Sharded::setup(&mut rng, &cfg).expect("setup");
+    let mut server = Sharded::setup(&cfg).expect("setup");
     let setup_ms = t0.elapsed().as_millis();
     println!("SETUP: {setup_ms} ms ({:.2} s)", setup_ms as f64 / 1000.0);
     print_rss("setup");
@@ -1196,8 +1261,7 @@ fn poseidon_transcript_publishes_and_audits() {
         .audit_fs(hooks_for(AuditFs::Poseidon))
         .build()
         .expect("poseidon config builds");
-    let mut rng = ChaCha20Rng::seed_from_u64(0xA56_5);
-    let mut server = Sharded::setup(&mut rng, &cfg).expect("setup");
+    let mut server = Sharded::setup(&cfg).expect("setup");
 
     let mut commits = Vec::new();
     commits.push(server.current_commitment());
@@ -1240,8 +1304,7 @@ fn transcript_mismatch_is_rejected() {
         .audit_fs(hooks_for(AuditFs::Poseidon))
         .build()
         .expect("poseidon config builds");
-    let mut rng = ChaCha20Rng::seed_from_u64(0xA56_5);
-    let mut server = Sharded::setup(&mut rng, &cfg).expect("setup");
+    let mut server = Sharded::setup(&cfg).expect("setup");
 
     let prev = server.current_commitment();
     let next = server

@@ -26,13 +26,11 @@ use aegon::ivc::adapter::{
 use aegon::ivc::prover::{IvcAuditParams, IvcAuditProver};
 use aegon::ivc::verifier::verify_against_merkle_root;
 use aegon::{
-    merkle_root, optimal_kzh_k, verify_sharded_invariance, verify_sharded_lookup_two_layer,
-    DbSource, Sha256Hash, ShardedAegon, ShardedAegonConfig, ShardedAuditState,
+    merkle_root, verify_sharded_invariance, verify_sharded_lookup_two_layer, DbSource, Sha256Hash,
+    ShardedAegon, ShardedAegonConfig, ShardedAuditState, SrsSource,
 };
 use aegon_crypto::pcs::kzhk::KZHK;
 use ark_bn254::{Bn254, Fr};
-use ark_std::rand::SeedableRng;
-use rand_chacha::ChaCha20Rng;
 
 /// The polynomial commitment scheme: KZH-k over the BN254 curve.
 type Pcs = KZHK<Bn254>;
@@ -60,19 +58,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // 2^0 = one shard.
         .log_n_shards(0)
         // Private mode hides users' values from auditors, and gives every
-        // epoch the proof the IVC audit folds. Set it before `kzh_k`.
+        // epoch the proof the IVC audit folds.
         .private(true)
-        .kzh_k(optimal_kzh_k(SHARD_LOG_CAPACITY))
         // The hash auditors recompute. IVC auditing requires Poseidon, and
         // the choice is fixed for the life of the dictionary.
         .audit_fs(hooks_for(AuditFs::Poseidon))
         .db(DbSource::Rocks(db_path.clone()))
+        // A throwaway trusted setup generated from this seed. Fine for a
+        // demo; a real deployment loads one produced by a setup ceremony.
+        .srs(SrsSource::DangerouslyGenerate { seed: 42 })
         .build()?;
 
-    // Generates a throwaway trusted setup from this seed. Fine for a demo;
-    // a real deployment loads one produced by a setup ceremony.
-    let mut rng = ChaCha20Rng::seed_from_u64(42);
-    let mut server = Server::setup(&mut rng, &cfg)?;
+    let mut server = Server::setup(&cfg)?;
 
     // Everything a client or auditor needs: the public verification
     // context, and the commitment the server publishes at each epoch.

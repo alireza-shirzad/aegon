@@ -48,8 +48,6 @@ use aegon::{
 };
 use aegon_crypto::pcs::kzhk::KZHK;
 use ark_bn254::{Bn254, Fr};
-use ark_std::rand::SeedableRng;
-use rand_chacha::ChaCha20Rng;
 
 type Pcs = KZHK<Bn254>;
 
@@ -75,9 +73,8 @@ fn main() {
         .build()
         .expect("config builds");
 
-    let mut rng = ChaCha20Rng::seed_from_u64(0x1_5C_1);
     let mut server: ShardedAegon<Bn254, Pcs, EcVrfHash> =
-        ShardedAegon::<Bn254, Pcs, EcVrfHash>::setup(&mut rng, &cfg).expect("setup");
+        ShardedAegon::<Bn254, Pcs, EcVrfHash>::setup(&cfg).expect("setup");
     server.set_vrf_prover(VrfProver::from_seed(&BENCH_VRF_SEED));
 
     let ctx = server.sharded_verifier_context();

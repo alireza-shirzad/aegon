@@ -29,8 +29,6 @@ use aegon::{
 };
 use aegon_crypto::pcs::kzhk::KZHK;
 use ark_bn254::Bn254;
-use ark_std::rand::SeedableRng;
-use rand_chacha::ChaCha20Rng;
 
 type Pcs = KZHK<Bn254>;
 
@@ -48,10 +46,9 @@ fn build_cfg(log_capacity: usize, log_n_shards: usize) -> ShardedAegonConfig<Bn2
 
 fn run_ecvrf_path() {
     println!("\n── ECVRF path ──");
-    let mut rng = ChaCha20Rng::seed_from_u64(0xA5A5);
     let cfg = build_cfg(12, 1);
     let mut server: ShardedAegon<Bn254, Pcs, EcVrfHash> =
-        ShardedAegon::<Bn254, Pcs, EcVrfHash>::setup(&mut rng, &cfg)
+        ShardedAegon::<Bn254, Pcs, EcVrfHash>::setup(&cfg)
             .expect("ShardedAegon::setup with EcVrfHash");
 
     // Wire the prover. Use the deterministic bench seed so the
@@ -161,10 +158,9 @@ fn run_ecvrf_path() {
 
 fn run_sha256_path() {
     println!("\n── SHA-256 path ──");
-    let mut rng = ChaCha20Rng::seed_from_u64(0xA5A5);
     let cfg = build_cfg(12, 1);
     let mut server: ShardedAegon<Bn254, Pcs, Sha256Hash> =
-        ShardedAegon::<Bn254, Pcs, Sha256Hash>::setup(&mut rng, &cfg).expect("setup");
+        ShardedAegon::<Bn254, Pcs, Sha256Hash>::setup(&cfg).expect("setup");
 
     let updates: Vec<(Vec<u8>, Vec<u8>)> = (0..6)
         .map(|i| {

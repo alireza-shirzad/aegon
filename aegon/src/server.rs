@@ -751,6 +751,15 @@ where
         self.vrf_prover = Some(prover);
     }
 
+    /// Slot bits for probe `ctr` of `label`: from this shard's VRF key
+    /// when one is attached, otherwise from the hash suite `H`.
+    pub(crate) fn slot_bits(&self, ctr: u64, label: &[u8]) -> Vec<bool> {
+        match &self.vrf_prover {
+            Some(prover) => prover.evaluate_h_slot(ctr, label, self.log_capacity),
+            None => H::h_slot(ctr, label, self.log_capacity),
+        }
+    }
+
     /// Read back a label's precomputed VRF proofs, populated by
     /// [`Self::publish_batch`]. Returns `None` when no proofs were
     /// cached (either the label is unknown or the shard is running
@@ -1745,7 +1754,7 @@ where
             // so at fill 25% expect ~1.33 probes per label.
             let mut placed_record: Option<ShardPlacement> = None;
             for ctr in 0u64.. {
-                let slot_bits = H::h_slot(ctr, label, self.log_capacity);
+                let slot_bits = self.slot_bits(ctr, label);
                 let slot_idx = bool_index_to_usize(&slot_bits, &self.dims);
                 if let Some(existing_h_label) = self.index_poly.evaluations.get(&slot_idx) {
                     if *existing_h_label == h_label {
@@ -2741,7 +2750,7 @@ where
     pub fn find_label_slot(&self, label: &Label) -> Option<(Vec<bool>, u64)> {
         let h_label = H::h_f(label);
         for ctr in 0u64.. {
-            let slot_bits = H::h_slot(ctr, label, self.log_capacity);
+            let slot_bits = self.slot_bits(ctr, label);
             let slot_idx = bool_index_to_usize(&slot_bits, &self.dims);
             match self.index_poly.evaluations.get(&slot_idx) {
                 Some(stored) if *stored == h_label => return Some((slot_bits, ctr)),

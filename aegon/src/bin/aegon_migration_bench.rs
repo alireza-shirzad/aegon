@@ -202,15 +202,16 @@ fn build_server(args: &Args, k: usize, log_n_shards: usize) -> Result<Sharded, A
             endpoints: args.endpoints.clone(),
         });
     }
-    builder = builder.srs(SrsSource::DangerouslyGenerate);
+    builder = builder.srs(SrsSource::DangerouslyGenerate {
+        seed: args.setup_seed,
+    });
     if let Some(url) = &args.db_url {
         builder = builder.db(DbSource::Redis(url.clone()));
     } else if let Some(path) = &args.db_path {
         builder = builder.db(DbSource::Rocks(path.clone()));
     }
     let cfg = builder.build()?;
-    let mut rng = ChaCha20Rng::seed_from_u64(args.setup_seed);
-    Sharded::setup(&mut rng, &cfg)
+    Sharded::setup(&cfg)
 }
 
 fn render_output_path(template: &Path, k: u64) -> Result<PathBuf, String> {

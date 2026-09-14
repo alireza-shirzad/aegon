@@ -65,6 +65,14 @@ pub trait PolynomialCommitmentScheme<E: Pairing> {
     /// the non-ZK opening was produced.
     type HidingScalar: Clone + CanonicalSerialize + CanonicalDeserialize + Debug + Send + Sync;
 
+    /// A configuration suited to `num_vars`-variate polynomials with the
+    /// given hiding flag, for callers that don't pick one. Backends
+    /// whose config depends on the size or on `zk` override this.
+    fn default_config(num_vars: usize, zk: bool) -> Self::Config {
+        let _ = (num_vars, zk);
+        Self::Config::default()
+    }
+
     fn gen_srs_for_testing<R: Rng>(
         conf: Self::Config,
         rng: &mut R,

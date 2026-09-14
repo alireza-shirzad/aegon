@@ -42,9 +42,7 @@ use aegon::{
 };
 use aegon_crypto::pcs::kzhk::KZHK;
 use ark_bn254::Bn254;
-use ark_std::rand::SeedableRng;
 use clap::Parser;
-use rand_chacha::ChaCha20Rng;
 use tokio::sync::RwLock as AsyncRwLock;
 
 type Pcs = KZHK<Bn254>;
@@ -210,9 +208,8 @@ fn main() -> ExitCode {
         args.kzh_k,
         log_n_shards
     );
-    let mut rng = ChaCha20Rng::seed_from_u64(args.setup_seed.unwrap_or(0));
     let t_setup = Instant::now();
-    let mut state = match Sharded::setup(&mut rng, &cfg) {
+    let mut state = match Sharded::setup(&cfg) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("error: setup failed: {e}");

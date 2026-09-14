@@ -26,8 +26,6 @@ use aegon::{
 };
 use aegon_crypto::pcs::kzhk::KZHK;
 use ark_bn254::{Bn254, Fr};
-use ark_std::rand::SeedableRng;
-use rand_chacha::ChaCha20Rng;
 
 type Pcs = KZHK<Bn254>;
 
@@ -45,10 +43,9 @@ fn build_cfg(log_capacity: usize, log_n_shards: usize, zk: bool) -> ShardedAegon
 
 fn run_zk_path() {
     println!("\n── zk SRS path ──");
-    let mut rng = ChaCha20Rng::seed_from_u64(0xAEC0);
     let cfg = build_cfg(12, 1, true);
     let mut server: ShardedAegon<Bn254, Pcs, EcVrfHash> =
-        ShardedAegon::<Bn254, Pcs, EcVrfHash>::setup(&mut rng, &cfg).expect("setup zk");
+        ShardedAegon::<Bn254, Pcs, EcVrfHash>::setup(&cfg).expect("setup zk");
     server.set_vrf_prover(VrfProver::from_seed(&BENCH_VRF_SEED));
 
     let ctx = server.sharded_verifier_context();
@@ -121,10 +118,9 @@ fn run_zk_path() {
 
 fn run_non_zk_path() {
     println!("\n── non-zk SRS path ──");
-    let mut rng = ChaCha20Rng::seed_from_u64(0xAEC1);
     let cfg = build_cfg(12, 1, false);
     let mut server: ShardedAegon<Bn254, Pcs, EcVrfHash> =
-        ShardedAegon::<Bn254, Pcs, EcVrfHash>::setup(&mut rng, &cfg).expect("setup non-zk");
+        ShardedAegon::<Bn254, Pcs, EcVrfHash>::setup(&cfg).expect("setup non-zk");
     server.set_vrf_prover(VrfProver::from_seed(&BENCH_VRF_SEED));
 
     let ctx = server.sharded_verifier_context();

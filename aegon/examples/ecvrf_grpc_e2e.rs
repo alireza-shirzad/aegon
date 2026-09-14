@@ -28,8 +28,6 @@ use aegon::{
 };
 use aegon_crypto::pcs::kzhk::KZHK;
 use ark_bn254::Bn254;
-use ark_std::rand::SeedableRng;
-use rand_chacha::ChaCha20Rng;
 use tokio::sync::RwLock as AsyncRwLock;
 
 type Pcs = KZHK<Bn254>;
@@ -64,9 +62,8 @@ async fn main() {
     let log_n_shards = 1usize;
     let cfg = build_cfg(shard_log_capacity, log_n_shards);
 
-    let mut rng = ChaCha20Rng::seed_from_u64(0xAEC0_E2E);
     let mut state = tokio::task::spawn_blocking(move || {
-        Sharded::setup(&mut rng, &cfg).expect("Sharded::setup with EcVrfHash")
+        Sharded::setup(&cfg).expect("Sharded::setup with EcVrfHash")
     })
     .await
     .expect("setup join");

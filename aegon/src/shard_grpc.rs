@@ -304,10 +304,9 @@ where
         let log_capacity = self.log_capacity();
         for ctr in 0..=slot_ctr0 {
             // Re-derive slot_bits via the same H_slot the shard used.
-            // We don't have a `&self.vrf_prover` here on the trait, so
-            // use the static H::h_slot path — this default is the
-            // in-process Aegon-backed `ShardHandle`, which also uses
-            // the static path internally for `H::h_slot` evaluations.
+            // The trait has no access to a VRF key, so this default
+            // uses the static H::h_slot path. Handles that hold a key
+            // override this method (the in-process `Aegon` does).
             let slot_bits = if ctr == slot_ctr0 {
                 final_slot_bits.clone()
             } else {
@@ -789,14 +788,13 @@ where
         let Some((final_slot_bits, slot_ctr0)) = Aegon::find_label_slot(self, label) else {
             return Ok(None);
         };
-        let log_capacity = Aegon::log_capacity(self);
         let mut entries: Vec<super::sharded::LabelProofTrailEntry<E, P>> =
             Vec::with_capacity((slot_ctr0 as usize) + 1);
         for ctr in 0..=slot_ctr0 {
             let slot_bits = if ctr == slot_ctr0 {
                 final_slot_bits.clone()
             } else {
-                H::h_slot(ctr, label, log_capacity)
+                Aegon::slot_bits(self, ctr, label)
             };
             let (evaluation, proof) = Aegon::open_index_at_slot(self, &slot_bits)?;
             entries.push(super::sharded::LabelProofTrailEntry {

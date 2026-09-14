@@ -27,8 +27,6 @@ use aegon::{
 };
 use ark_bn254::Bn254;
 use ark_ec::pairing::Pairing;
-use ark_std::rand::SeedableRng;
-use rand_chacha::ChaCha20Rng;
 
 type Pcs = aegon_crypto::pcs::kzhk::KZHK<Bn254>;
 type Sharded = ShardedAegon<Bn254, Pcs, Sha256Hash>;
@@ -54,8 +52,7 @@ fn fresh(log_capacity: usize, log_n_shards: usize) -> Sharded {
         .kzh_k(2)
         .build()
         .expect("config builds");
-    let mut rng = ChaCha20Rng::seed_from_u64(0xA56_5);
-    Sharded::setup(&mut rng, &cfg).expect("setup")
+    Sharded::setup(&cfg).expect("setup")
 }
 
 /// Auditor: verify the single new transition `prev -> next_commit`,

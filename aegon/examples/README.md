@@ -55,16 +55,16 @@ Here it is step by step.
 let cfg = ShardedAegonConfig::<Bn254, Pcs>::builder()
     .shard_log_capacity(10)                  // 2^10 = 1,024 slots
     .log_n_shards(0)                         // 2^0 = one shard
-    .private(true)                           // hide values from auditors; needed for IVC (set before kzh_k)
-    .kzh_k(optimal_kzh_k(10))                // commitment-scheme parameter for this size
+    .private(true)                           // hide values from auditors; needed for IVC
     .audit_fs(hooks_for(AuditFs::Poseidon))  // the hash auditors recompute; IVC needs Poseidon
     .db(DbSource::Rocks(db_path))            // where the server stores users' values
+    // A throwaway trusted setup made from this seed, fine for a demo; a
+    // real deployment loads one from a setup ceremony.
+    .srs(SrsSource::DangerouslyGenerate { seed: 42 })
     .build()?;
 
-// Start the server. The seed generates a throwaway trusted setup,
-// fine for a demo; a real deployment loads one from a setup ceremony.
-let mut rng = ChaCha20Rng::seed_from_u64(42);
-let mut server = Server::setup(&mut rng, &cfg)?;
+// Start the server.
+let mut server = Server::setup(&cfg)?;
 
 // All a client or auditor ever holds: the public verification context,
 // plus the commitment the server publishes at each epoch.

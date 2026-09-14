@@ -45,21 +45,7 @@ use super::config::AegonConfig;
 /// rather than minimum prover work) should set `.kzh_k(...)` on the
 /// builder explicitly rather than relying on this helper.
 pub fn optimal_kzh_k(log_capacity: usize) -> usize {
-    let k = match log_capacity {
-        0 => 1,
-        1..=5 => 2,
-        6..=14 => 3,
-        15..=19 => 5,
-        20 => 6,
-        21..=23 => 7,
-        24..=26 => 8, // n=26 is tied between 8 and 9; pick 8
-        27..=28 => 9,
-        29..=31 => 10,
-        32..=34 => 11,
-        _ => 12,
-    };
-    // KZHKConfig enforces 1 ≤ k ≤ log_capacity; clamp for safety.
-    k.min(log_capacity.max(1))
+    KZHKConfig::optimal_k(log_capacity)
 }
 
 /// Build an `AegonConfig` for KZH-k. Sets `log_capacity` plus the
