@@ -87,99 +87,156 @@ rand_chacha  = "0.3"
 # arkworks crates resolve to incompatible versions.
 ```
 
-Then start from this template. Every setting is at the top, with its
-options in the comments; the rest of the program runs one of each
-operation.
+Then start from this template. Every knob lives in a `Settings` struct
+that you fill in at runtime (from code, command-line flags, or a config
+file), with the options documented on each field. `main` overrides a few
+defaults, and `run` stands up the dictionary and runs one of each operation.
 
 ```rust
-use aegon::audit_fs::AuditFs;
 use aegon::ivc::adapter::hooks_for;
 use aegon::{
     optimal_kzh_k, shard_log_capacity_for_two_layer, verify_lookup_history,
     verify_sharded_consistency_two_layer, verify_sharded_invariance,
-    verify_sharded_lookup_two_layer, DbSource, ShardTransport, ShardedAegon, ShardedAegonConfig,
-    ShardedAuditState, SrsSource,
+    verify_sharded_lookup_two_layer, AegonError, AuditFs, DbSource, EcVrfHash, HashSuite,
+    Sha256Hash, ShardTransport, ShardedAegon, ShardedAegonConfig, ShardedAuditState, SrsSource,
+    VrfProver,
 };
 use aegon_crypto::pcs::kzhk::KZHK;
 use ark_bn254::{Bn254, Fr};
 use ark_std::rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 
-// ============================== Settings ==============================
-
-/// log2 of how many users the dictionary holds: 10 means 1,024 users.
-const TRUE_LOG_CAPACITY: usize = 10;
-
-/// log2 of the shard count: 2 means 4 shards. Capacity is split evenly
-/// across them, so more shards means smaller, faster shards.
-const LOG_N_SHARDS: usize = 2;
-
-/// Private mode hides users' values from auditors. Required for IVC
-/// (fast-forward) auditing.
-const PRIVATE: bool = false;
-
-/// The hash auditors recompute: `Poseidon` (supports IVC auditing) or
-/// `Sha256`. Servers and auditors must agree, and it can't change later.
-const AUDIT_FS: AuditFs = AuditFs::Poseidon;
-
-/// How many independent audit chains to split the shards into. Must divide
-/// the shard count. More groups let an IVC audit fold in parallel.
-const CHAIN_GROUPS: usize = 1;
-
-/// How users are assigned to slots. `aegon::Sha256Hash` can be computed by
-/// anyone; `aegon::EcVrfHash` hides assignments behind a VRF key (then also
-/// call `set_vrf_prover`, below).
-type Hash = aegon::Sha256Hash;
-
 /// The polynomial commitment scheme: KZH-k over BN254.
 type Pcs = KZHK<Bn254>;
 
-// ======================================================================
+/// How users are assigned to slots.
+#[derive(Clone)]
+pub enum SlotHash {
+    /// SHA-256: anyone can compute which slot a user lands in.
+    Sha256,
+    /// ECVRF: slot assignments are hidden behind the server's VRF key. The
+    /// key is read once per process from `AEGON_VRF_SEED` (64 hex chars) or
+    /// `AEGON_VRF_KEY_PATH`, so set one of those before starting.
+    EcVrf,
+}
+
+/// Everything that shapes a deployment. Fill it in from code, a CLI, or a
+/// config file, then call `build`.
+#[derive(Clone)]
+pub struct Settings {
+    /// log2 of how many users the dictionary holds: 10 means 1,024 users.
+    pub log_capacity: usize,
+    /// log2 of the shard count: 2 means 4 shards. Capacity is split evenly
+    /// across them, so more shards means smaller, faster shards.
+    pub log_n_shards: usize,
+    /// Hide users' values from auditors. Required for IVC (fast-forward)
+    /// auditing.
+    pub private: bool,
+    /// The hash auditors recompute: `Poseidon` (supports IVC auditing) or
+    /// `Sha256`. Servers and auditors must agree, and it can't change later.
+    pub audit_fs: AuditFs,
+    /// How many independent audit chains the shards are split into. Must
+    /// divide the shard count. More groups let an IVC audit fold in parallel.
+    pub chain_groups: usize,
+    /// How users are assigned to slots.
+    pub slot_hash: SlotHash,
+    /// Where the shards run:
+    ///   `InProcess`               all in this process
+    ///   `Remote { endpoints }`    one aegon_shard_server per shard, one URL each
+    pub shards: ShardTransport,
+    /// The trusted setup (SRS):
+    ///   `DangerouslyGenerate`     throwaway, made from the rng; testing only
+    ///   `Path(file)`              load one produced by a setup ceremony
+    pub srs: SrsSource,
+    /// Where users' values and history are stored:
+    ///   `None`                    nothing stored: lookups return no value bytes,
+    ///                             so clients can't verify them
+    ///   `Rocks(dir)`              a local RocksDB
+    ///   `Redis(url)`              a shared Redis (remote shards only)
+    pub db: DbSource,
+    /// Private mode only. Empty means in-process shards mask their own proofs;
+    /// otherwise, the URLs of separate aegon_masking_server processes.
+    pub masking_addrs: Vec<String>,
+}
+
+impl Default for Settings {
+    /// One in-process shard holding 1,024 users, public, stored in a RocksDB
+    /// under the system temp directory.
+    fn default() -> Self {
+        Self {
+            log_capacity: 10,
+            log_n_shards: 0,
+            private: false,
+            audit_fs: AuditFs::Poseidon,
+            chain_groups: 1,
+            slot_hash: SlotHash::Sha256,
+            shards: ShardTransport::InProcess,
+            srs: SrsSource::DangerouslyGenerate,
+            db: DbSource::Rocks(std::env::temp_dir().join("aegon")),
+            masking_addrs: Vec::new(),
+        }
+    }
+}
+
+impl Settings {
+    /// Translate the settings into the library's configuration.
+    pub fn build(&self) -> Result<ShardedAegonConfig<Bn254, Pcs>, AegonError> {
+        // Each shard's size, including Aegon's 4x headroom for placing users.
+        let shard_log_capacity =
+            shard_log_capacity_for_two_layer(self.log_capacity, self.log_n_shards);
+
+        let mut builder = ShardedAegonConfig::<Bn254, Pcs>::builder()
+            .shard_log_capacity(shard_log_capacity)
+            .log_n_shards(self.log_n_shards)
+            .private(self.private) // must come before `kzh_k`
+            .kzh_k(optimal_kzh_k(shard_log_capacity))
+            .audit_fs(hooks_for(self.audit_fs))
+            .chain_groups(self.chain_groups)
+            .shards(self.shards.clone())
+            .srs(self.srs.clone())
+            .db(self.db.clone());
+        if !self.masking_addrs.is_empty() {
+            builder = builder.masking_addrs(self.masking_addrs.clone());
+        }
+        builder.build()
+    }
+}
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Each shard's size, including Aegon's 4x headroom for placing users.
-    let shard_log_capacity = shard_log_capacity_for_two_layer(TRUE_LOG_CAPACITY, LOG_N_SHARDS);
-
     // Local storage for this demo, wiped so every run starts fresh.
     let db = std::env::temp_dir().join("aegon-template");
     let _ = std::fs::remove_dir_all(&db);
     let _ = std::fs::remove_dir_all(db.with_extension("shards"));
 
-    let cfg = ShardedAegonConfig::<Bn254, Pcs>::builder()
-        .shard_log_capacity(shard_log_capacity)
-        .log_n_shards(LOG_N_SHARDS)
-        .private(PRIVATE) // must come before `kzh_k`
-        .kzh_k(optimal_kzh_k(shard_log_capacity))
-        .audit_fs(hooks_for(AUDIT_FS))
-        .chain_groups(CHAIN_GROUPS)
-        // Where the shards run:
-        //   ShardTransport::InProcess                   all in this process
-        //   ShardTransport::Remote { endpoints: urls }  one aegon_shard_server per
-        //                                               shard, 2^LOG_N_SHARDS URLs
-        .shards(ShardTransport::InProcess)
-        // The trusted setup (SRS):
-        //   SrsSource::DangerouslyGenerate  throwaway, made from the rng below; testing only
-        //   SrsSource::Path(file)           load one produced by a setup ceremony
-        .srs(SrsSource::DangerouslyGenerate)
-        // Where users' values and history are stored:
-        //   DbSource::None        memory only: lookups return no value bytes, no history
-        //   DbSource::Rocks(dir)  a local RocksDB
-        //   DbSource::Redis(url)  a shared Redis (with remote shards only)
-        .db(DbSource::Rocks(db))
-        // In private mode, in-process shards mask their proofs themselves. To
-        // use separate aegon_masking_server processes instead:
-        //   .masking_addrs(vec!["http://127.0.0.1:50061".into()])
-        .build()?;
+    // Start from the defaults and override what you need.
+    let settings = Settings {
+        log_capacity: 10,
+        log_n_shards: 2,
+        db: DbSource::Rocks(db),
+        ..Settings::default()
+    };
 
+    // The slot hash is a type parameter of the server, so pick it here.
+    match settings.slot_hash {
+        SlotHash::Sha256 => run::<Sha256Hash>(&settings),
+        SlotHash::EcVrf => run::<EcVrfHash>(&settings),
+    }
+}
+
+/// Stand up a dictionary from `settings` and run one of each operation.
+fn run<H>(settings: &Settings) -> Result<(), Box<dyn std::error::Error>>
+where
+    H: HashSuite<Fr> + Send + Sync + 'static,
+{
+    let cfg = settings.build()?;
     let mut rng = ChaCha20Rng::seed_from_u64(42);
-    let mut server = ShardedAegon::<Bn254, Pcs, Hash>::setup(&mut rng, &cfg)?;
+    let mut server = ShardedAegon::<Bn254, Pcs, H>::setup(&mut rng, &cfg)?;
+    if let SlotHash::EcVrf = settings.slot_hash {
+        server.set_vrf_prover(VrfProver::from_env());
+    }
 
-    // With `type Hash = aegon::EcVrfHash`, give the server its VRF key, from
-    // AEGON_VRF_SEED or AEGON_VRF_KEY_PATH:
-    //   server.set_vrf_prover(aegon::VrfProver::from_env());
-
-    // What clients and auditors hold: the public verification context (take it
-    // after setting a VRF key) and the commitment published at each epoch.
+    // What clients and auditors hold: the public verification context (taken
+    // after the VRF key is set) and the commitment published at each epoch.
     let ctx = server.sharded_verifier_context();
     let epoch_0 = server.current_commitment();
 
@@ -189,26 +246,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ---- Client: look Alice up and check the proof against epoch 1. ----
     let (value, proof) = server.lookup_two_layer(&alice)?;
-    assert!(verify_sharded_lookup_two_layer::<Bn254, Pcs, Hash>(
+    assert!(verify_sharded_lookup_two_layer::<Bn254, Pcs, H>(
         &ctx, &epoch_1, &alice, &value, &proof
     )?);
 
     // ---- Client: every change to Alice's value (needs a DbSource). ----
     let history = server.lookup_history(&alice)?;
-    verify_lookup_history::<Bn254, Pcs, Hash>(&ctx, &history)?;
+    verify_lookup_history::<Bn254, Pcs, H>(&ctx, &history)?;
 
     // ---- Client: prove Alice's entry hasn't changed since epoch 1. ----
     let epoch_2 = server.publish_two_layer(&[(b"bob".to_vec(), b"bob-key-1".to_vec())])?;
     let proof = server.consistency_proof_two_layer(&alice, epoch_1.epoch)?;
-    assert!(verify_sharded_consistency_two_layer::<Bn254, Pcs, Hash>(
+    assert!(verify_sharded_consistency_two_layer::<Bn254, Pcs, H>(
         &ctx, &epoch_1, &epoch_2, &alice, &proof
     )?);
 
     // ---- Auditor: check every epoch transition, in order, from epoch 0. ----
     // The audit state tracks one running value per chain group.
-    let mut audit = ShardedAuditState::<Fr>::with_groups(CHAIN_GROUPS);
+    let mut audit = ShardedAuditState::<Fr>::with_groups(settings.chain_groups);
     for (prev, next) in [(&epoch_0, &epoch_1), (&epoch_1, &epoch_2)] {
-        assert!(verify_sharded_invariance::<Bn254, Pcs>(&ctx, &mut audit, prev, next)?);
+        assert!(verify_sharded_invariance::<Bn254, Pcs>(
+            &ctx, &mut audit, prev, next
+        )?);
     }
 
     println!("every check passed");
