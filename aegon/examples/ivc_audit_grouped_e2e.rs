@@ -91,7 +91,8 @@ fn main() {
     // re-randomisation proof per shard -- the case the circuit's
     // sigma block exists for.
     let cfg: ShardedAegonConfig<Bn254, Pcs> = ShardedAegonConfig::<Bn254, Pcs>::builder()
-        .shard_log_capacity(shard_log_capacity)
+        .log_capacity(shard_log_capacity + log_n_shards)
+        .over_provisioning_factor(1)
         .log_n_shards(log_n_shards)
         .private(true)
         .kzh_k(2)

@@ -37,9 +37,9 @@ type Pcs = KZHK<Bn254>;
 /// The server. `Sha256Hash` decides which slot each user lands in.
 type Server = ShardedAegon<Bn254, Pcs, Sha256Hash>;
 
-/// log2 of the slot count: 10 means 1,024 slots, enough for ~256 users,
-/// since Aegon keeps the table at most a quarter full.
-const SHARD_LOG_CAPACITY: usize = 10;
+/// log2 of how many users the dictionary holds: 8 means 256 users. The
+/// shard gets 4x as many slots (1,024), which keeps placement cheap.
+const LOG_CAPACITY: usize = 8;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // =====================================================================
@@ -54,7 +54,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = std::fs::remove_dir_all(&shard_db_path);
 
     let cfg = ShardedAegonConfig::<Bn254, Pcs>::builder()
-        .shard_log_capacity(SHARD_LOG_CAPACITY)
+        .log_capacity(LOG_CAPACITY)
         // 2^0 = one shard.
         .log_n_shards(0)
         // Private mode hides users' values from auditors, and gives every

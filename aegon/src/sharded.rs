@@ -136,13 +136,18 @@ impl Default for SrsSource {
 /// Construct via [`ShardedAegonConfig::builder`]. The fields are
 /// `pub` so downstream code can inspect them, but the only correct
 /// way to build a config is the builder, which enforces the
-/// invariants (`log_n_shards` ≤ `shard_log_capacity` + headroom,
+/// invariants (a power-of-two `over_provisioning_factor`, at least two
+/// slots per shard,
 /// `endpoints.len() == 1 << log_n_shards` for remote transport, etc.).
 #[derive(Clone)]
 pub struct ShardedAegonConfig<E: Pairing, P: AegonPcs<E>> {
-    /// Log capacity of *each shard*'s polynomial. Total dictionary
-    /// capacity is `2^(shard_log_capacity + log_n_shards)`.
-    pub shard_log_capacity: usize,
+    /// log2 of how many users the whole dictionary holds.
+    pub log_capacity: usize,
+    /// Slots per unit of capacity, a power of two. Open-addressing
+    /// placement needs the headroom: with factor `f` the dictionary is
+    /// at most `1/f` full. Each shard's size is derived from this, the
+    /// capacity, and the shard count; see [`Self::shard_log_capacity`].
+    pub over_provisioning_factor: usize,
     /// `n_shards = 2^log_n_shards`.
     pub log_n_shards: usize,
     /// Privacy flag — propagates to the PCS's `zk` parameter.
@@ -212,10 +217,8 @@ pub struct ShardedAegonConfig<E: Pairing, P: AegonPcs<E>> {
 }
 
 impl<E: Pairing, P: AegonPcs<E>> ShardedAegonConfig<E, P> {
-    /// Start a fluent builder. Required: `log_n_shards`, and the size as
-    /// either `log_capacity` (users in the whole dictionary) or
-    /// `shard_log_capacity` (slots per shard). Everything else has a
-    /// default.
+    /// Start a fluent builder. Required: `log_capacity` and
+    /// `log_n_shards`. Everything else has a default.
     pub fn builder() -> ShardedAegonConfigBuilder<E, P> {
         ShardedAegonConfigBuilder::new()
     }
@@ -225,9 +228,11 @@ impl<E: Pairing, P: AegonPcs<E>> ShardedAegonConfig<E, P> {
         1usize << self.log_n_shards
     }
 
-    /// Total log capacity across all shards.
-    pub fn log_capacity(&self) -> usize {
-        self.shard_log_capacity + self.log_n_shards
+    /// log2 of each shard's slot count:
+    /// `log_capacity + log2(over_provisioning_factor) − log_n_shards`.
+    pub fn shard_log_capacity(&self) -> usize {
+        (self.log_capacity + self.over_provisioning_factor.trailing_zeros() as usize)
+            .saturating_sub(self.log_n_shards)
     }
 
     /// One-shot SRS generation + serialization. Run this once on a
@@ -236,7 +241,7 @@ impl<E: Pairing, P: AegonPcs<E>> ShardedAegonConfig<E, P> {
     ///
     /// The file layout is `prover_param || verifier_param`, both
     /// canonically-serialized via arkworks `CanonicalSerialize`. The
-    /// SRS is sized for *one shard* (`self.shard_log_capacity`),
+    /// SRS is sized for *one shard* (`self.shard_log_capacity()`),
     /// since every shard's polynomial is identically-shaped.
     ///
     /// **Security note.** `gen_srs_for_testing` is, as the name
@@ -253,8 +258,9 @@ impl<E: Pairing, P: AegonPcs<E>> ShardedAegonConfig<E, P> {
         P::ProverParam: CanonicalSerialize,
         P::VerifierParam: CanonicalSerialize,
     {
-        let srs = P::gen_srs_for_testing(self.pcs_config.clone(), rng, self.shard_log_capacity)?;
-        let (pk, vk) = P::trim(&srs, None, Some(self.shard_log_capacity))?;
+        let shard_log_capacity = self.shard_log_capacity();
+        let srs = P::gen_srs_for_testing(self.pcs_config.clone(), rng, shard_log_capacity)?;
+        let (pk, vk) = P::trim(&srs, None, Some(shard_log_capacity))?;
 
         let file = std::fs::File::create(path).map_err(|e| {
             AegonError::Config(format!("create srs file '{}': {e}", path.display()))
@@ -324,13 +330,13 @@ where
 /// All required fields are checked at [`Self::build`] time and
 /// reported with a clear error message rather than a panic. The
 /// builder also validates:
-///   * exactly one of `log_capacity` and `shard_log_capacity` is set,
-///   * `shard_log_capacity ≥ 1`,
+///   * `over_provisioning_factor` is a power of two,
+///   * every shard gets at least two slots,
 ///   * for `ShardTransport::Remote`, `endpoints.len() ==
 ///     1 << log_n_shards`,
 pub struct ShardedAegonConfigBuilder<E: Pairing, P: AegonPcs<E>> {
-    shard_log_capacity: Option<usize>,
     log_capacity: Option<usize>,
+    over_provisioning_factor: usize,
     log_n_shards: Option<usize>,
     private: bool,
     pcs_config: Option<P::Config>,
@@ -357,8 +363,8 @@ impl<E: Pairing, P: AegonPcs<E>> ShardedAegonConfigBuilder<E, P> {
     /// An empty builder with every field unset.
     pub fn new() -> Self {
         Self {
-            shard_log_capacity: None,
             log_capacity: None,
+            over_provisioning_factor: super::config::OVER_PROVISIONING_FACTOR,
             log_n_shards: None,
             private: false,
             pcs_config: None,
@@ -389,20 +395,20 @@ impl<E: Pairing, P: AegonPcs<E>> ShardedAegonConfigBuilder<E, P> {
         self
     }
 
-    /// log2 of the slot count of each shard's polynomial. Set this or
-    /// [`Self::log_capacity`], not both.
-    pub fn shard_log_capacity(mut self, v: usize) -> Self {
-        self.shard_log_capacity = Some(v);
+    /// log2 of how many users the whole dictionary holds. **Required.**
+    /// Each shard's size is derived from it; see
+    /// [`ShardedAegonConfig::shard_log_capacity`].
+    pub fn log_capacity(mut self, v: usize) -> Self {
+        self.log_capacity = Some(v);
         self
     }
 
-    /// log2 of how many users the whole dictionary holds. `build` sizes
-    /// each shard from it with
-    /// [`shard_log_capacity_for_two_layer`](super::config::shard_log_capacity_for_two_layer),
-    /// which adds the headroom open-addressing placement needs. Set
-    /// this or [`Self::shard_log_capacity`], not both.
-    pub fn log_capacity(mut self, v: usize) -> Self {
-        self.log_capacity = Some(v);
+    /// Slots per unit of capacity, a power of two. Open-addressing
+    /// placement needs the headroom: with factor `f` the dictionary is
+    /// at most `1/f` full. Defaults to
+    /// [`OVER_PROVISIONING_FACTOR`](super::config::OVER_PROVISIONING_FACTOR) (4).
+    pub fn over_provisioning_factor(mut self, f: usize) -> Self {
+        self.over_provisioning_factor = f;
         self
     }
 
@@ -488,22 +494,23 @@ impl<E: Pairing, P: AegonPcs<E>> ShardedAegonConfigBuilder<E, P> {
         let log_n_shards = self.log_n_shards.ok_or_else(|| {
             AegonError::Config("ShardedAegonConfig: log_n_shards is required".into())
         })?;
-        let shard_log_capacity = match (self.shard_log_capacity, self.log_capacity) {
-            (Some(v), None) => v,
-            (None, Some(total)) => {
-                super::config::shard_log_capacity_for_two_layer(total, log_n_shards)
-            }
-            (None, None) => {
-                return Err(AegonError::Config(
-                    "ShardedAegonConfig: set log_capacity or shard_log_capacity".into(),
-                ))
-            }
-            (Some(_), Some(_)) => {
-                return Err(AegonError::Config(
-                    "ShardedAegonConfig: set log_capacity or shard_log_capacity, not both".into(),
-                ))
-            }
-        };
+        let log_capacity = self.log_capacity.ok_or_else(|| {
+            AegonError::Config("ShardedAegonConfig: log_capacity is required".into())
+        })?;
+        let factor = self.over_provisioning_factor;
+        if !factor.is_power_of_two() {
+            return Err(AegonError::Config(format!(
+                "ShardedAegonConfig: over_provisioning_factor must be a power of two, got {factor}"
+            )));
+        }
+        let log_slots = log_capacity + factor.trailing_zeros() as usize;
+        if log_slots <= log_n_shards {
+            return Err(AegonError::Config(format!(
+                "ShardedAegonConfig: 2^{log_slots} slots cannot be split across \
+                 2^{log_n_shards} shards with at least two slots each"
+            )));
+        }
+        let shard_log_capacity = log_slots - log_n_shards;
         // Reject an unusable partition here rather than at the first
         // publish: an audit that derives per-group scalars the
         // verifier cannot reconstruct fails silently and late.
@@ -513,11 +520,6 @@ impl<E: Pairing, P: AegonPcs<E>> ShardedAegonConfigBuilder<E, P> {
             (None, Some((k, make))) => make(k, self.private),
             (None, None) => P::default_config(shard_log_capacity, self.private),
         };
-        if shard_log_capacity == 0 {
-            return Err(AegonError::Config(
-                "shard_log_capacity must be at least 1".into(),
-            ));
-        }
         if let ShardTransport::Remote { endpoints } = &self.shards {
             let expected = 1usize << log_n_shards;
             if endpoints.len() != expected {
@@ -529,7 +531,8 @@ impl<E: Pairing, P: AegonPcs<E>> ShardedAegonConfigBuilder<E, P> {
             }
         }
         Ok(ShardedAegonConfig {
-            shard_log_capacity,
+            log_capacity,
+            over_provisioning_factor: factor,
             log_n_shards,
             private: self.private,
             pcs_config,
@@ -1543,7 +1546,7 @@ where
     {
         let n_shards = config.n_shards();
         let shard_config: AegonConfig<E, P> = AegonConfig {
-            log_capacity: config.shard_log_capacity,
+            log_capacity: config.shard_log_capacity(),
             private: config.private,
             pcs_config: config.pcs_config.clone(),
             // Every shard must derive its Schnorr challenges the same
@@ -1688,10 +1691,20 @@ where
                         "Remote shard transport requires at least one endpoint".into(),
                     ));
                 }
-                let (vctx, _fetched_log_capacity) =
+                let (vctx, fetched_log_capacity) =
                     super::shard_grpc::fetch_verifier_context_from_endpoint::<E, P>(
                         endpoints[0].clone(),
                     )?;
+                // The shard servers were started with their own size; this
+                // configuration derives one. Refuse to run if they differ.
+                if fetched_log_capacity != shard_config.log_capacity {
+                    return Err(AegonError::Config(format!(
+                        "shard at {} has shard_log_capacity {fetched_log_capacity}, but this \
+                         configuration derives {} (log_capacity + \
+                         log2(over_provisioning_factor) - log_n_shards)",
+                        endpoints[0], shard_config.log_capacity
+                    )));
+                }
                 let verifier_param = vctx.verifier_param.clone();
                 // `block_dims` for KZH-k is a pure function of
                 // `(k, log_capacity)` — we use the dummy SRS-free path

@@ -39,11 +39,20 @@ want to understand or customize each step.
 For a target user count `N_users`, pick:
 
 ```
-log_capacity = ceil(log2(N_users * 4))   # 4× slack → ≤25% load factor
-log_n_shards = pick_so_that_shard_log_capacity_fits_one_machine
-shard_log_capacity = log_capacity - log_n_shards
-kzh_k             = optimal_kzh_k(shard_log_capacity)
+log_capacity             = ceil(log2(N_users))
+over_provisioning_factor = 4                      # the default: ≤25% load factor
+log_n_shards             = pick_so_that_each_shard_fits_one_machine
 ```
+
+The builder derives each shard's size, and the default `kzh_k`, from those:
+
+```
+shard_log_capacity = log_capacity + log2(over_provisioning_factor) - log_n_shards
+kzh_k              = optimal_kzh_k(shard_log_capacity)
+```
+
+Shard servers take the derived `--shard-log-capacity` directly, and the
+coordinator refuses to start if a shard's size differs from its own.
 
 The `optimal_kzh_k` function (in `aegon::presets`) minimizes the
 aux-precomputation cost `f(k) = k(k − 1) · 2^(N/k)` and is tabulated
@@ -141,7 +150,7 @@ use aegon_crypto::pcs::kzhk::KZHK;
 use ark_bn254::Bn254;
 
 let cfg = ShardedAegonConfig::<Bn254, KZHK<Bn254>>::builder()
-    .shard_log_capacity(29)
+    .log_capacity(32) // 2^32 users; across 32 shards, each gets 2^29 slots
     .log_n_shards(5)
     .kzh_k(10)
     // Must match the transcript the shard servers run (`--audit-fs`,

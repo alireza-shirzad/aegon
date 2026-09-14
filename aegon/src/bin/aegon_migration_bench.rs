@@ -191,7 +191,9 @@ struct MilestoneRecord {
 fn build_server(args: &Args, k: usize, log_n_shards: usize) -> Result<Sharded, AegonError> {
     let mut builder = ShardedAegonConfig::<Bn254, Pcs>::builder()
         .audit_fs(aegon::ivc::adapter::hooks_for(args.audit_fs))
-        .shard_log_capacity(args.shard_log_capacity)
+        // --shard-log-capacity is the per-shard size; convert it to the
+        // dictionary capacity it implies.
+        .log_capacity(aegon::true_log_capacity_from_shard(args.shard_log_capacity) + log_n_shards)
         .log_n_shards(log_n_shards)
         .private(args.private)
         .kzh_k(k);

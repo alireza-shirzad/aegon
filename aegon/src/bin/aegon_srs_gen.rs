@@ -76,7 +76,11 @@ fn main() -> ExitCode {
     let args = Args::parse();
 
     let cfg = match ShardedAegonConfig::<Bn254, Pcs>::builder()
-        .shard_log_capacity(args.shard_log_capacity)
+        // --shard-log-capacity is the per-shard size; convert it to the
+        // dictionary capacity it implies.
+        .log_capacity(
+            aegon::true_log_capacity_from_shard(args.shard_log_capacity) + args.log_n_shards,
+        )
         .log_n_shards(args.log_n_shards)
         .private(args.private)
         .kzh_k(args.kzh_k)

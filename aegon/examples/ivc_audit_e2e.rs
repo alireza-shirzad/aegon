@@ -62,7 +62,8 @@ fn main() {
     // shift per epoch and a genuine Schnorr proof, which is the
     // interesting case for the circuit.
     let cfg: ShardedAegonConfig<Bn254, Pcs> = ShardedAegonConfig::<Bn254, Pcs>::builder()
-        .shard_log_capacity(LOG_CAPACITY - LOG_N_SHARDS)
+        .log_capacity(LOG_CAPACITY)
+        .over_provisioning_factor(1)
         .log_n_shards(LOG_N_SHARDS)
         .private(true)
         .kzh_k(2)

@@ -51,9 +51,9 @@ Here it is step by step.
 ### Setup
 
 ```rust
-// One shard with 1,024 slots, backed by a RocksDB store.
+// One shard holding 256 users (1,024 slots), backed by a RocksDB store.
 let cfg = ShardedAegonConfig::<Bn254, Pcs>::builder()
-    .shard_log_capacity(10)                  // 2^10 = 1,024 slots
+    .log_capacity(8)                         // 2^8 = 256 users; the shard gets 4x as many slots
     .log_n_shards(0)                         // 2^0 = one shard
     .private(true)                           // hide values from auditors; needed for IVC
     .audit_fs(hooks_for(AuditFs::Poseidon))  // the hash auditors recompute; IVC needs Poseidon
@@ -144,8 +144,8 @@ let verified = verify_against_merkle_root(
 Edit the users and keys in the example, add more epochs, or look someone up
 at a different epoch, then rerun the same command. A few things worth knowing:
 
-- **Size.** `SHARD_LOG_CAPACITY = 10` gives 1,024 slots. Each step up
-  doubles the slots, and setup time and memory grow with them.
+- **Size.** `LOG_CAPACITY = 8` gives room for 256 users (1,024 slots). Each
+  step up doubles both, and setup time and memory grow with them.
 - **Setup is cached.** The first run generates the trusted setup (the SRS)
   and saves it to `../artifacts/srs/`, relative to the directory you run
   from; later runs print `Loading SRS`. This setup comes from a fixed seed

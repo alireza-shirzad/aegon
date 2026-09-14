@@ -116,14 +116,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = std::fs::remove_dir_all(db.with_extension("shards"));
 
     // Every setting is a builder call taking a plain value, so it can come
-    // from code, command-line flags, or a config file. Only the two sizes
-    // are required; every other call below shows its default.
+    // from code, command-line flags, or a config file. Only `log_capacity`
+    // and `log_n_shards` are required; every other call shows its default.
     let cfg = ShardedAegonConfig::<Bn254, Pcs>::builder()
         // log2 of how many users the dictionary holds: 10 means 1,024.
         .log_capacity(10)
         // log2 of the shard count: 2 means 4 shards. Capacity is split
         // evenly across them, so more shards means smaller, faster shards.
         .log_n_shards(2)
+        // Slots per unit of capacity, a power of two. Placement needs the
+        // headroom: with factor f the dictionary is at most 1/f full.
+        // Default: 4.
+        .over_provisioning_factor(4)
         // Hide users' values from auditors. Required for IVC (fast-forward)
         // auditing. Default: false.
         .private(false)

@@ -122,7 +122,8 @@ async fn grpc_sharded_publish_lookup_verify_roundtrip() {
     // we cheat with a deterministic seed so the test stays
     // self-contained.
     let cfg = ShardedAegonConfig::<Bn254, Pcs>::builder()
-        .shard_log_capacity(shard_log_capacity)
+        .log_capacity(shard_log_capacity + log_n_shards)
+        .over_provisioning_factor(1)
         .log_n_shards(log_n_shards)
         .private(false)
         .kzh_k(2)
@@ -216,7 +217,8 @@ async fn grpc_sharded_two_layer_publish_lookup_verify_roundtrip() {
     let (addr_b, _h_b) = spawn_shard(aegon_b, "twolayer", 1).await;
 
     let cfg = ShardedAegonConfig::<Bn254, Pcs>::builder()
-        .shard_log_capacity(shard_log_capacity)
+        .log_capacity(shard_log_capacity + log_n_shards)
+        .over_provisioning_factor(1)
         .log_n_shards(log_n_shards)
         .private(false)
         .kzh_k(2)
@@ -339,7 +341,8 @@ async fn grpc_sharded_publish_lookup_verify_roundtrip_ecvrf() {
     let (addr_b, _h_b) = spawn_shard_vrf(aegon_b, "ecvrf", 1).await;
 
     let cfg = ShardedAegonConfig::<Bn254, Pcs>::builder()
-        .shard_log_capacity(shard_log_capacity)
+        .log_capacity(shard_log_capacity + log_n_shards)
+        .over_provisioning_factor(1)
         .log_n_shards(log_n_shards)
         .private(false)
         .kzh_k(2)

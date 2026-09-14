@@ -24,7 +24,8 @@ type Sharded = ShardedAegon<Bn254, Pcs, Sha256Hash>;
 
 fn config(log_capacity: usize, log_n_shards: usize) -> ShardedAegonConfig<Bn254, Pcs> {
     ShardedAegonConfig::<Bn254, Pcs>::builder()
-        .shard_log_capacity(log_capacity - log_n_shards)
+        .log_capacity(log_capacity)
+        .over_provisioning_factor(1)
         .log_n_shards(log_n_shards)
         .private(false)
         .kzh_k(2)
@@ -159,7 +160,8 @@ fn two_layer_publish_lookup_history_round_trip() {
     }
 
     let cfg = ShardedAegonConfig::<Bn254, Pcs>::builder()
-        .shard_log_capacity(8 - 1)
+        .log_capacity(8)
+        .over_provisioning_factor(1)
         .log_n_shards(1)
         .private(false)
         .kzh_k(2)
@@ -315,7 +317,8 @@ fn two_layer_publish_lookup_round_trip_ecvrf() {
     let log_capacity = 6usize;
     let log_n_shards = 2usize;
     let cfg = Cfg::<Bn254, Pcs>::builder()
-        .shard_log_capacity(log_capacity - log_n_shards)
+        .log_capacity(log_capacity)
+        .over_provisioning_factor(1)
         .log_n_shards(log_n_shards)
         .private(false)
         .kzh_k(2)
@@ -381,7 +384,8 @@ fn builder_vrf_key_reaches_in_process_shards() {
     // coordinator proved with the builder's, and no lookup verified.
     use aegon::{verify_sharded_lookup_two_layer, EcVrfHash, ShardedAegon, VrfProver};
     let cfg = ShardedAegonConfig::<Bn254, Pcs>::builder()
-        .shard_log_capacity(4)
+        .log_capacity(6)
+        .over_provisioning_factor(1)
         .log_n_shards(2)
         .kzh_k(2)
         .vrf_prover(VrfProver::from_seed(&[7u8; 32]))
@@ -433,7 +437,8 @@ fn srs_path_round_trip() {
 
     // 1. Generate SRS once and write it to the file.
     let setup_cfg = ShardedAegonConfig::<Bn254, Pcs>::builder()
-        .shard_log_capacity(log_capacity - log_n_shards)
+        .log_capacity(log_capacity)
+        .over_provisioning_factor(1)
         .log_n_shards(log_n_shards)
         .private(false)
         .kzh_k(2)
@@ -449,7 +454,8 @@ fn srs_path_round_trip() {
 
     // 2. Build the production shard config and point at that file.
     let shard_cfg = ShardedAegonConfig::<Bn254, Pcs>::builder()
-        .shard_log_capacity(log_capacity - log_n_shards)
+        .log_capacity(log_capacity)
+        .over_provisioning_factor(1)
         .log_n_shards(log_n_shards)
         .private(false)
         .kzh_k(2)
@@ -496,7 +502,8 @@ fn private_mode_publish_lookup_round_trip() {
     let log_n_shards = 1usize;
 
     let cfg = ShardedAegonConfig::<Bn254, Pcs>::builder()
-        .shard_log_capacity(log_capacity - log_n_shards)
+        .log_capacity(log_capacity)
+        .over_provisioning_factor(1)
         .log_n_shards(log_n_shards)
         .private(true)
         .kzh_k(2)
@@ -565,7 +572,8 @@ fn private_mode_lookup_history_round_trip() {
     }
 
     let cfg = ShardedAegonConfig::<Bn254, Pcs>::builder()
-        .shard_log_capacity(8 - 1)
+        .log_capacity(8)
+        .over_provisioning_factor(1)
         .log_n_shards(1)
         .private(true)
         .kzh_k(2)
@@ -647,20 +655,20 @@ fn builder_validation_rejects_bad_configs() {
         }
     }
 
-    // Missing shard_log_capacity → error.
+    // Missing log_capacity → error.
     must_err(
         ShardedAegonConfig::<Bn254, Pcs>::builder()
             .log_n_shards(2)
             .kzh_k(2)
             .build(),
-        "shard_log_capacity",
-        "missing shard_log_capacity",
+        "log_capacity",
+        "missing log_capacity",
     );
 
     // Missing log_n_shards → error.
     must_err(
         ShardedAegonConfig::<Bn254, Pcs>::builder()
-            .shard_log_capacity(8)
+            .log_capacity(10)
             .kzh_k(2)
             .build(),
         "log_n_shards",
@@ -669,7 +677,7 @@ fn builder_validation_rejects_bad_configs() {
 
     // No .kzh_k call → k defaults to optimal_kzh_k of the shard size.
     let cfg = ShardedAegonConfig::<Bn254, Pcs>::builder()
-        .shard_log_capacity(8)
+        .log_capacity(8)
         .log_n_shards(2)
         .build()
         .expect("default pcs_config builds");
@@ -677,7 +685,7 @@ fn builder_validation_rejects_bad_configs() {
 
     // `private` reaches the PCS config whatever the call order.
     let cfg = ShardedAegonConfig::<Bn254, Pcs>::builder()
-        .shard_log_capacity(8)
+        .log_capacity(8)
         .log_n_shards(2)
         .kzh_k(2)
         .private(true)
@@ -691,26 +699,43 @@ fn builder_validation_rejects_bad_configs() {
         .log_n_shards(2)
         .build()
         .expect("log_capacity builds");
-    assert_eq!(
-        cfg.shard_log_capacity,
-        aegon::shard_log_capacity_for_two_layer(10, 2)
-    );
+    assert_eq!(cfg.shard_log_capacity(), 10);
 
-    // log_capacity and shard_log_capacity together → error.
+    // A larger factor gives each shard more slots.
+    let cfg = ShardedAegonConfig::<Bn254, Pcs>::builder()
+        .log_capacity(10)
+        .over_provisioning_factor(8)
+        .log_n_shards(2)
+        .build()
+        .expect("factor 8 builds");
+    assert_eq!(cfg.shard_log_capacity(), 11);
+
+    // The factor must be a power of two.
     must_err(
         ShardedAegonConfig::<Bn254, Pcs>::builder()
             .log_capacity(10)
-            .shard_log_capacity(8)
+            .over_provisioning_factor(3)
             .log_n_shards(2)
             .build(),
-        "not both",
-        "both capacities",
+        "power of two",
+        "non-power-of-two factor",
+    );
+
+    // Too many shards for the capacity → error.
+    must_err(
+        ShardedAegonConfig::<Bn254, Pcs>::builder()
+            .log_capacity(1)
+            .over_provisioning_factor(1)
+            .log_n_shards(2)
+            .build(),
+        "cannot be split",
+        "too many shards",
     );
 
     // Remote endpoints with wrong count → error.
     must_err(
         ShardedAegonConfig::<Bn254, Pcs>::builder()
-            .shard_log_capacity(8)
+            .log_capacity(8)
             .log_n_shards(2)
             .kzh_k(2)
             .shards(ShardTransport::Remote {
@@ -726,7 +751,7 @@ fn builder_validation_rejects_bad_configs() {
     // happy-path Remote flow is covered by the localhost gRPC
     // integration test.)
     let cfg = ShardedAegonConfig::<Bn254, Pcs>::builder()
-        .shard_log_capacity(8)
+        .log_capacity(7)
         .log_n_shards(1)
         .kzh_k(2)
         .shards(ShardTransport::Remote {
@@ -746,7 +771,7 @@ fn builder_validation_rejects_bad_configs() {
     // with an informative error. (The happy-path Path round-trip is
     // exercised by `srs_path_round_trip` above.)
     let cfg = ShardedAegonConfig::<Bn254, Pcs>::builder()
-        .shard_log_capacity(8)
+        .log_capacity(7)
         .log_n_shards(1)
         .kzh_k(2)
         .srs(SrsSource::Path("/nonexistent/aegon.srs".into()))
@@ -902,7 +927,8 @@ fn rocks_backend_publish_lookup_history_round_trip() {
     // forces us onto, since RocksDB is process-local and has no
     // shard-written slot keys).
     let cfg = ShardedAegonConfig::<Bn254, Pcs>::builder()
-        .shard_log_capacity(8 - 1)
+        .log_capacity(8)
+        .over_provisioning_factor(1)
         .log_n_shards(1)
         .private(false)
         .kzh_k(2)
@@ -1096,7 +1122,8 @@ fn bench_production_shard_scale() {
 
     println!("PARAMS: shard_log_capacity={shard_log_capacity}, kzh_k={kzh_k}, n_users={n_users}");
     let cfg = ShardedAegonConfig::<Bn254, Pcs>::builder()
-        .shard_log_capacity(shard_log_capacity)
+        .log_capacity(shard_log_capacity)
+        .over_provisioning_factor(1)
         .log_n_shards(0)
         .private(false)
         .kzh_k(kzh_k)
@@ -1254,7 +1281,8 @@ fn poseidon_transcript_publishes_and_audits() {
     use aegon::verify_sharded_invariance;
 
     let cfg = ShardedAegonConfig::<Bn254, Pcs>::builder()
-        .shard_log_capacity(8 - 2)
+        .log_capacity(8)
+        .over_provisioning_factor(1)
         .log_n_shards(2)
         .private(false)
         .kzh_k(2)
@@ -1297,7 +1325,8 @@ fn transcript_mismatch_is_rejected() {
     use aegon::verify_sharded_invariance;
 
     let cfg = ShardedAegonConfig::<Bn254, Pcs>::builder()
-        .shard_log_capacity(8 - 2)
+        .log_capacity(8)
+        .over_provisioning_factor(1)
         .log_n_shards(2)
         .private(false)
         .kzh_k(2)

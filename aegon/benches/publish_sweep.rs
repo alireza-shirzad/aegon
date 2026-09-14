@@ -126,7 +126,8 @@ fn env_usize(name: &str, default: usize) -> usize {
 fn build_server() -> Sharded {
     let p = params();
     let cfg = ShardedAegonConfig::<Bn254, Pcs>::builder()
-        .shard_log_capacity(p.shard_log_capacity)
+        .log_capacity(p.shard_log_capacity + p.log_n_shards)
+        .over_provisioning_factor(1)
         .log_n_shards(p.log_n_shards)
         .private(p.private)
         .kzh_k(p.kzh_k)

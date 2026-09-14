@@ -21,7 +21,8 @@ type Sharded = ShardedAegon<Bn254, Pcs, Sha256Hash>;
 
 fn config(log_capacity: usize, log_n_shards: usize) -> ShardedAegonConfig<Bn254, Pcs> {
     ShardedAegonConfig::<Bn254, Pcs>::builder()
-        .shard_log_capacity(log_capacity - log_n_shards)
+        .log_capacity(log_capacity)
+        .over_provisioning_factor(1)
         .log_n_shards(log_n_shards)
         .private(false)
         .kzh_k(2)
