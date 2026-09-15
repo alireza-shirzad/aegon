@@ -3,6 +3,12 @@
 Runnable programs that show Aegon end to end. Run every command from the
 repository root.
 
+Everything here runs on one machine: first in a single process, then split
+into a shard server, a coordinator, and a client. For the same system as a
+real deployment runs it — four shards, two masking servers, and a
+coordinator, all separate processes — see
+[a four-shard cluster](README-cluster.md).
+
 | Example | What it shows |
 | :--- | :--- |
 | [`laptop_dictionary`](laptop_dictionary.rs) | A single-shard dictionary across three epochs: a lookup, a classic audit, and an IVC audit. Walked through below. |
@@ -243,6 +249,9 @@ Stop the servers with Ctrl-C. They keep state in memory, so each start is a
 fresh dictionary. `aegon_client` only looks users up; to publish your own
 entries to a running coordinator, use `CoordinatorClient::publish_two_layer`
 from the `aegon` crate.
+
+Next: [a four-shard cluster](README-cluster.md) runs the same kind of
+dictionary across four shards with separate masking servers.
 
 ---
 

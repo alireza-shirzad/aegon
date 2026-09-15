@@ -204,9 +204,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-For a complete, runnable walkthrough — including fast-forward (IVC)
-auditing and running the shard, coordinator, and client as separate
-processes — see [`aegon/examples`](aegon/examples/README.md).
+Two walkthroughs take it further:
+
+- [One machine](aegon/examples/README.md): a dictionary in a single
+  process, across three epochs, ending in a fast-forward (IVC) audit —
+  then the same dictionary split into a shard server, a coordinator, and
+  a client.
+- [A four-shard cluster](aegon/examples/README-cluster.md): four shards,
+  two masking servers, and a coordinator, each its own process, running in
+  private mode.
 
 ---
 
