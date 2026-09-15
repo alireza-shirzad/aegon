@@ -36,7 +36,7 @@ type Sharded = ShardedAegon<Bn254, Pcs, EcVrfHash>;
 fn build_cfg(shard_log_capacity: usize, log_n_shards: usize) -> ShardedAegonConfig<Bn254, Pcs> {
     ShardedAegonConfig::<Bn254, Pcs>::builder()
         .log_capacity(shard_log_capacity + log_n_shards)
-        .over_provisioning_factor(1)
+        .log_over_provisioning_factor(0)
         .log_n_shards(log_n_shards)
         .private(false)
         .kzh_k(2)

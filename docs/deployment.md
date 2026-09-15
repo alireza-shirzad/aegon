@@ -39,15 +39,15 @@ want to understand or customize each step.
 For a target user count `N_users`, pick:
 
 ```
-log_capacity             = ceil(log2(N_users))
-over_provisioning_factor = 4                      # the default: ≤25% load factor
-log_n_shards             = pick_so_that_each_shard_fits_one_machine
+log_capacity                 = ceil(log2(N_users))
+log_over_provisioning_factor = 2   # the default: 4 slots per user, ≤25% load
+log_n_shards                 = pick_so_that_each_shard_fits_one_machine
 ```
 
 The builder derives each shard's size, and the default `kzh_k`, from those:
 
 ```
-shard_log_capacity = log_capacity + log2(over_provisioning_factor) - log_n_shards
+shard_log_capacity = log_capacity + log_over_provisioning_factor - log_n_shards
 kzh_k              = optimal_kzh_k(shard_log_capacity)
 ```
 

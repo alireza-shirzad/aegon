@@ -127,7 +127,7 @@ fn build_server() -> Sharded {
     let p = params();
     let cfg = ShardedAegonConfig::<Bn254, Pcs>::builder()
         .log_capacity(p.shard_log_capacity + p.log_n_shards)
-        .over_provisioning_factor(1)
+        .log_over_provisioning_factor(0)
         .log_n_shards(p.log_n_shards)
         .private(p.private)
         .kzh_k(p.kzh_k)

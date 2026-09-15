@@ -63,7 +63,7 @@ fn main() {
     // interesting case for the circuit.
     let cfg: ShardedAegonConfig<Bn254, Pcs> = ShardedAegonConfig::<Bn254, Pcs>::builder()
         .log_capacity(LOG_CAPACITY)
-        .over_provisioning_factor(1)
+        .log_over_provisioning_factor(0)
         .log_n_shards(LOG_N_SHARDS)
         .private(true)
         .kzh_k(2)

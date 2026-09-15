@@ -124,10 +124,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // log2 of the shard count: 2 means 4 shards. Capacity is split
         // evenly across them, so more shards means smaller, faster shards.
         .log_n_shards(2)
-        // Slots per unit of capacity, a power of two. Placement needs the
-        // headroom: with factor f the dictionary is at most 1/f full.
-        // Default: 4.
-        .over_provisioning_factor(4)
+        // log2 of the slots per unit of capacity. Placement needs the
+        // headroom: at 2 (four slots per user) the dictionary is at most a
+        // quarter full. Default: 2.
+        .log_over_provisioning_factor(2)
         // Hide users' values from auditors. Required for IVC (fast-forward)
         // auditing. Default: false.
         .private(false)

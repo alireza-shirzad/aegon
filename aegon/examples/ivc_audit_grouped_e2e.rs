@@ -92,7 +92,7 @@ fn main() {
     // sigma block exists for.
     let cfg: ShardedAegonConfig<Bn254, Pcs> = ShardedAegonConfig::<Bn254, Pcs>::builder()
         .log_capacity(shard_log_capacity + log_n_shards)
-        .over_provisioning_factor(1)
+        .log_over_provisioning_factor(0)
         .log_n_shards(log_n_shards)
         .private(true)
         .kzh_k(2)
