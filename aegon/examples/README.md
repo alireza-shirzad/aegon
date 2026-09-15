@@ -12,6 +12,7 @@ coordinator, all separate processes — see
 | Example | What it shows |
 | :--- | :--- |
 | [`laptop_dictionary`](laptop_dictionary.rs) | A single-shard dictionary across three epochs: a lookup, a classic audit, and an IVC audit. Walked through below. |
+| [`configured_dictionary`](configured_dictionary.rs) | Every configuration setting in one place, with its default and options, then one of each operation. The starting point for your own deployment. |
 | [`ivc_audit_e2e`](ivc_audit_e2e.rs) | Fast-forward (IVC) auditing against real publishes, including rejection of tampered commitments. |
 | [`ivc_audit_grouped_e2e`](ivc_audit_grouped_e2e.rs) | The same, with the audit split into independent chain groups that fold in parallel. |
 | [`audit_sigma_e2e`](audit_sigma_e2e.rs) | The private-mode audit's blinding proof, with tampering and stripped-proof negative cases. |
