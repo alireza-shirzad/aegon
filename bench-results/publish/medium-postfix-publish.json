@@ -1,0 +1,33 @@
+{
+  "params": {
+    "shard_log_capacity": 27,
+    "true_log_capacity": 26,
+    "kzh_k": 9,
+    "n_shards": 2,
+    "log_n_shards": 1,
+    "samples_per_batch": 3,
+    "setup_seed": 1,
+    "prefill_seed": 1,
+    "endpoints": ["http://10.128.0.2:50051", "http://10.128.0.3:50051"]
+  },
+  "stages": [
+    {
+      "fill_percent": 0,
+      "prefilled_count": 0,
+      "batches": {
+      "16384": {
+        "samples_ms": [17167.4750, 17244.0972, 17184.6225],
+        "fastest_ms": 17167.4750,
+        "slowest_ms": 17244.0972,
+        "median_ms": 17184.6225,
+        "mean_ms": 17198.7316,
+        "index_commitment_bytes": 144,
+        "value_commitment_bytes": 144,
+        "rand_index_commitment_bytes": 144,
+        "rand_value_commitment_bytes": 144,
+        "total_commit_bytes": 640
+      }
+      }
+    }
+  ]
+}

@@ -1,0 +1,6 @@
+[2026-05-18T20:09:32+0000] host: instance-20260503-131121 cores=16 mem_total=65835684 KB
+[2026-05-18T20:09:32+0000] results dir: /home/alrshir/aegon/bench-results
+[2026-05-18T20:09:32+0000] ==== setup-bench START ====
+[2026-05-18T20:24:11+0000] ==== setup-bench OK in 879s ====
+[2026-05-18T20:24:11+0000] ==== publish-bench START ====
+[2026-05-18T21:45:42+0000] ==== publish-bench FAILED rc=137 after 4891s ====

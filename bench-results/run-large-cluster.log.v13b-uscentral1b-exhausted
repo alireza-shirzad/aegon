@@ -1,0 +1,559 @@
+[2026-06-23T22:55:06+0000] host: instance-20260503-131121
+[2026-06-23T22:55:06+0000] PROJECT=jbonneau-mwalfish-9a0c  N_SHARDS=128  SHARD_LOG_CAPACITY=27  KZH_K=9  ZONE=us-central1-b
+[2026-06-23T22:55:06+0000] PUBLISH_BATCH_SIZES=4096,8192,16384,32768,65536,131072
+[2026-06-23T22:55:06+0000] MIGRATION_REGIME=large
+[2026-06-23T22:55:06+0000] results dir: /home/alrshir/aegon/bench-results
+[2026-06-23T22:55:06+0000] ==== large-up START ====
+[22:55:07] PROJECT=jbonneau-mwalfish-9a0c ZONE=us-central1-b N_SHARDS=128
+[22:55:07] shard_log_capacity=27 kzh_k=9
+[22:55:07] total preload = 2^8 → 2 entries per shard
+[22:55:07] shard machine type=n2-highmem-16, coord machine type=n2-highmem-16
+[22:55:09] creating VPC aegon-bench-vpc
+Created [https://www.googleapis.com/compute/v1/projects/jbonneau-mwalfish-9a0c/global/networks/aegon-bench-vpc].
+
+Instances on this network will not be reachable until firewall rules
+are created. As an example, you can allow all internal traffic between
+instances as well as SSH, RDP, and ICMP by running:
+
+$ gcloud compute firewall-rules create <FIREWALL_NAME> --network aegon-bench-vpc --allow tcp,udp,icmp --source-ranges <IP_RANGE>
+$ gcloud compute firewall-rules create <FIREWALL_NAME> --network aegon-bench-vpc --allow tcp:22,tcp:3389,icmp
+
+[22:55:49] creating cloud router aegon-bench-router (us-central1)
+Creating router [aegon-bench-router]...
+.....done.
+[22:55:53] creating cloud nat aegon-bench-nat
+Creating NAT [aegon-bench-nat] in router [aegon-bench-router]...
+.....done.
+[22:55:58] creating firewall aegon-bench-grpc (coordinator -> shards:50051)
+Creating firewall...
+..Created [https://www.googleapis.com/compute/v1/projects/jbonneau-mwalfish-9a0c/global/firewalls/aegon-bench-grpc].
+done.
+[22:56:05] creating firewall aegon-bench-client-grpc (bench-client -> shards:50051)
+Creating firewall...
+..Created [https://www.googleapis.com/compute/v1/projects/jbonneau-mwalfish-9a0c/global/firewalls/aegon-bench-client-grpc].
+done.
+[22:56:13] creating firewall aegon-bench-client-coord (bench-client -> coord:50100)
+Creating firewall...
+..Created [https://www.googleapis.com/compute/v1/projects/jbonneau-mwalfish-9a0c/global/firewalls/aegon-bench-client-coord].
+done.
+[22:56:27] creating firewall aegon-bench-masking (shards -> masking:50061)
+Creating firewall...
+..Created [https://www.googleapis.com/compute/v1/projects/jbonneau-mwalfish-9a0c/global/firewalls/aegon-bench-masking].
+done.
+[22:56:34] creating firewall aegon-bench-ssh (IAP -> instances:22)
+Creating firewall...
+..Created [https://www.googleapis.com/compute/v1/projects/jbonneau-mwalfish-9a0c/global/firewalls/aegon-bench-ssh].
+done.
+[22:56:43] creating aegon-bench-shard-0 (n2-highmem-16, boot=500GB pd-ssd)
+Created [https://www.googleapis.com/compute/v1/projects/jbonneau-mwalfish-9a0c/zones/us-central1-b/instances/aegon-bench-shard-0].
+WARNING: Some requests generated warnings:
+ - Disk size: '500 GB' is larger than image size: '10 GB'. You might need to resize the root repartition manually if the operating system does not support automatic resizing. See https://cloud.google.com/compute/docs/disks/add-persistent-disk#resize_pd for details.
+ - You are creating a global DNS VM. VM instances using global DNS are vulnerable to cross-regional outages. To reduce the risk of widespread service disruption, use zonal DNS instead. Learn more at https://cloud.google.com/compute/docs/networking/zonal-dns?utm_id=vm-insert
+
+[22:57:03] creating aegon-bench-shard-1 (n2-highmem-16, boot=500GB pd-ssd)
+Created [https://www.googleapis.com/compute/v1/projects/jbonneau-mwalfish-9a0c/zones/us-central1-b/instances/aegon-bench-shard-1].
+WARNING: Some requests generated warnings:
+ - Disk size: '500 GB' is larger than image size: '10 GB'. You might need to resize the root repartition manually if the operating system does not support automatic resizing. See https://cloud.google.com/compute/docs/disks/add-persistent-disk#resize_pd for details.
+ - You are creating a global DNS VM. VM instances using global DNS are vulnerable to cross-regional outages. To reduce the risk of widespread service disruption, use zonal DNS instead. Learn more at https://cloud.google.com/compute/docs/networking/zonal-dns?utm_id=vm-insert
+
+[22:57:15] creating aegon-bench-shard-2 (n2-highmem-16, boot=500GB pd-ssd)
+Created [https://www.googleapis.com/compute/v1/projects/jbonneau-mwalfish-9a0c/zones/us-central1-b/instances/aegon-bench-shard-2].
+WARNING: Some requests generated warnings:
+ - Disk size: '500 GB' is larger than image size: '10 GB'. You might need to resize the root repartition manually if the operating system does not support automatic resizing. See https://cloud.google.com/compute/docs/disks/add-persistent-disk#resize_pd for details.
+ - You are creating a global DNS VM. VM instances using global DNS are vulnerable to cross-regional outages. To reduce the risk of widespread service disruption, use zonal DNS instead. Learn more at https://cloud.google.com/compute/docs/networking/zonal-dns?utm_id=vm-insert
+
+[22:57:29] creating aegon-bench-shard-3 (n2-highmem-16, boot=500GB pd-ssd)
+Created [https://www.googleapis.com/compute/v1/projects/jbonneau-mwalfish-9a0c/zones/us-central1-b/instances/aegon-bench-shard-3].
+WARNING: Some requests generated warnings:
+ - Disk size: '500 GB' is larger than image size: '10 GB'. You might need to resize the root repartition manually if the operating system does not support automatic resizing. See https://cloud.google.com/compute/docs/disks/add-persistent-disk#resize_pd for details.
+ - You are creating a global DNS VM. VM instances using global DNS are vulnerable to cross-regional outages. To reduce the risk of widespread service disruption, use zonal DNS instead. Learn more at https://cloud.google.com/compute/docs/networking/zonal-dns?utm_id=vm-insert
+
+[22:57:41] creating aegon-bench-shard-4 (n2-highmem-16, boot=500GB pd-ssd)
+Created [https://www.googleapis.com/compute/v1/projects/jbonneau-mwalfish-9a0c/zones/us-central1-b/instances/aegon-bench-shard-4].
+WARNING: Some requests generated warnings:
+ - Disk size: '500 GB' is larger than image size: '10 GB'. You might need to resize the root repartition manually if the operating system does not support automatic resizing. See https://cloud.google.com/compute/docs/disks/add-persistent-disk#resize_pd for details.
+ - You are creating a global DNS VM. VM instances using global DNS are vulnerable to cross-regional outages. To reduce the risk of widespread service disruption, use zonal DNS instead. Learn more at https://cloud.google.com/compute/docs/networking/zonal-dns?utm_id=vm-insert
+
+[22:57:53] creating aegon-bench-shard-5 (n2-highmem-16, boot=500GB pd-ssd)
+Created [https://www.googleapis.com/compute/v1/projects/jbonneau-mwalfish-9a0c/zones/us-central1-b/instances/aegon-bench-shard-5].
+WARNING: Some requests generated warnings:
+ - Disk size: '500 GB' is larger than image size: '10 GB'. You might need to resize the root repartition manually if the operating system does not support automatic resizing. See https://cloud.google.com/compute/docs/disks/add-persistent-disk#resize_pd for details.
+ - You are creating a global DNS VM. VM instances using global DNS are vulnerable to cross-regional outages. To reduce the risk of widespread service disruption, use zonal DNS instead. Learn more at https://cloud.google.com/compute/docs/networking/zonal-dns?utm_id=vm-insert
+
+[22:58:05] creating aegon-bench-shard-6 (n2-highmem-16, boot=500GB pd-ssd)
+Created [https://www.googleapis.com/compute/v1/projects/jbonneau-mwalfish-9a0c/zones/us-central1-b/instances/aegon-bench-shard-6].
+WARNING: Some requests generated warnings:
+ - Disk size: '500 GB' is larger than image size: '10 GB'. You might need to resize the root repartition manually if the operating system does not support automatic resizing. See https://cloud.google.com/compute/docs/disks/add-persistent-disk#resize_pd for details.
+ - You are creating a global DNS VM. VM instances using global DNS are vulnerable to cross-regional outages. To reduce the risk of widespread service disruption, use zonal DNS instead. Learn more at https://cloud.google.com/compute/docs/networking/zonal-dns?utm_id=vm-insert
+
+[22:58:17] creating aegon-bench-shard-7 (n2-highmem-16, boot=500GB pd-ssd)
+Created [https://www.googleapis.com/compute/v1/projects/jbonneau-mwalfish-9a0c/zones/us-central1-b/instances/aegon-bench-shard-7].
+WARNING: Some requests generated warnings:
+ - Disk size: '500 GB' is larger than image size: '10 GB'. You might need to resize the root repartition manually if the operating system does not support automatic resizing. See https://cloud.google.com/compute/docs/disks/add-persistent-disk#resize_pd for details.
+ - You are creating a global DNS VM. VM instances using global DNS are vulnerable to cross-regional outages. To reduce the risk of widespread service disruption, use zonal DNS instead. Learn more at https://cloud.google.com/compute/docs/networking/zonal-dns?utm_id=vm-insert
+
+[22:58:29] creating aegon-bench-shard-8 (n2-highmem-16, boot=500GB pd-ssd)
+Created [https://www.googleapis.com/compute/v1/projects/jbonneau-mwalfish-9a0c/zones/us-central1-b/instances/aegon-bench-shard-8].
+WARNING: Some requests generated warnings:
+ - Disk size: '500 GB' is larger than image size: '10 GB'. You might need to resize the root repartition manually if the operating system does not support automatic resizing. See https://cloud.google.com/compute/docs/disks/add-persistent-disk#resize_pd for details.
+ - You are creating a global DNS VM. VM instances using global DNS are vulnerable to cross-regional outages. To reduce the risk of widespread service disruption, use zonal DNS instead. Learn more at https://cloud.google.com/compute/docs/networking/zonal-dns?utm_id=vm-insert
+
+[22:58:43] creating aegon-bench-shard-9 (n2-highmem-16, boot=500GB pd-ssd)
+Created [https://www.googleapis.com/compute/v1/projects/jbonneau-mwalfish-9a0c/zones/us-central1-b/instances/aegon-bench-shard-9].
+WARNING: Some requests generated warnings:
+ - Disk size: '500 GB' is larger than image size: '10 GB'. You might need to resize the root repartition manually if the operating system does not support automatic resizing. See https://cloud.google.com/compute/docs/disks/add-persistent-disk#resize_pd for details.
+ - You are creating a global DNS VM. VM instances using global DNS are vulnerable to cross-regional outages. To reduce the risk of widespread service disruption, use zonal DNS instead. Learn more at https://cloud.google.com/compute/docs/networking/zonal-dns?utm_id=vm-insert
+
+[22:58:55] creating aegon-bench-shard-10 (n2-highmem-16, boot=500GB pd-ssd)
+Created [https://www.googleapis.com/compute/v1/projects/jbonneau-mwalfish-9a0c/zones/us-central1-b/instances/aegon-bench-shard-10].
+WARNING: Some requests generated warnings:
+ - Disk size: '500 GB' is larger than image size: '10 GB'. You might need to resize the root repartition manually if the operating system does not support automatic resizing. See https://cloud.google.com/compute/docs/disks/add-persistent-disk#resize_pd for details.
+ - You are creating a global DNS VM. VM instances using global DNS are vulnerable to cross-regional outages. To reduce the risk of widespread service disruption, use zonal DNS instead. Learn more at https://cloud.google.com/compute/docs/networking/zonal-dns?utm_id=vm-insert
+
+[22:59:07] creating aegon-bench-shard-11 (n2-highmem-16, boot=500GB pd-ssd)
+Created [https://www.googleapis.com/compute/v1/projects/jbonneau-mwalfish-9a0c/zones/us-central1-b/instances/aegon-bench-shard-11].
+WARNING: Some requests generated warnings:
+ - Disk size: '500 GB' is larger than image size: '10 GB'. You might need to resize the root repartition manually if the operating system does not support automatic resizing. See https://cloud.google.com/compute/docs/disks/add-persistent-disk#resize_pd for details.
+ - You are creating a global DNS VM. VM instances using global DNS are vulnerable to cross-regional outages. To reduce the risk of widespread service disruption, use zonal DNS instead. Learn more at https://cloud.google.com/compute/docs/networking/zonal-dns?utm_id=vm-insert
+
+[22:59:30] creating aegon-bench-shard-12 (n2-highmem-16, boot=500GB pd-ssd)
+Created [https://www.googleapis.com/compute/v1/projects/jbonneau-mwalfish-9a0c/zones/us-central1-b/instances/aegon-bench-shard-12].
+WARNING: Some requests generated warnings:
+ - Disk size: '500 GB' is larger than image size: '10 GB'. You might need to resize the root repartition manually if the operating system does not support automatic resizing. See https://cloud.google.com/compute/docs/disks/add-persistent-disk#resize_pd for details.
+ - You are creating a global DNS VM. VM instances using global DNS are vulnerable to cross-regional outages. To reduce the risk of widespread service disruption, use zonal DNS instead. Learn more at https://cloud.google.com/compute/docs/networking/zonal-dns?utm_id=vm-insert
+
+[22:59:46] creating aegon-bench-shard-13 (n2-highmem-16, boot=500GB pd-ssd)
+Created [https://www.googleapis.com/compute/v1/projects/jbonneau-mwalfish-9a0c/zones/us-central1-b/instances/aegon-bench-shard-13].
+WARNING: Some requests generated warnings:
+ - Disk size: '500 GB' is larger than image size: '10 GB'. You might need to resize the root repartition manually if the operating system does not support automatic resizing. See https://cloud.google.com/compute/docs/disks/add-persistent-disk#resize_pd for details.
+ - You are creating a global DNS VM. VM instances using global DNS are vulnerable to cross-regional outages. To reduce the risk of widespread service disruption, use zonal DNS instead. Learn more at https://cloud.google.com/compute/docs/networking/zonal-dns?utm_id=vm-insert
+
+[23:00:01] creating aegon-bench-shard-14 (n2-highmem-16, boot=500GB pd-ssd)
+Created [https://www.googleapis.com/compute/v1/projects/jbonneau-mwalfish-9a0c/zones/us-central1-b/instances/aegon-bench-shard-14].
+WARNING: Some requests generated warnings:
+ - Disk size: '500 GB' is larger than image size: '10 GB'. You might need to resize the root repartition manually if the operating system does not support automatic resizing. See https://cloud.google.com/compute/docs/disks/add-persistent-disk#resize_pd for details.
+ - You are creating a global DNS VM. VM instances using global DNS are vulnerable to cross-regional outages. To reduce the risk of widespread service disruption, use zonal DNS instead. Learn more at https://cloud.google.com/compute/docs/networking/zonal-dns?utm_id=vm-insert
+
+[23:00:17] creating aegon-bench-shard-15 (n2-highmem-16, boot=500GB pd-ssd)
+Created [https://www.googleapis.com/compute/v1/projects/jbonneau-mwalfish-9a0c/zones/us-central1-b/instances/aegon-bench-shard-15].
+WARNING: Some requests generated warnings:
+ - Disk size: '500 GB' is larger than image size: '10 GB'. You might need to resize the root repartition manually if the operating system does not support automatic resizing. See https://cloud.google.com/compute/docs/disks/add-persistent-disk#resize_pd for details.
+ - You are creating a global DNS VM. VM instances using global DNS are vulnerable to cross-regional outages. To reduce the risk of widespread service disruption, use zonal DNS instead. Learn more at https://cloud.google.com/compute/docs/networking/zonal-dns?utm_id=vm-insert
+
+[23:00:32] creating aegon-bench-shard-16 (n2-highmem-16, boot=500GB pd-ssd)
+Created [https://www.googleapis.com/compute/v1/projects/jbonneau-mwalfish-9a0c/zones/us-central1-b/instances/aegon-bench-shard-16].
+WARNING: Some requests generated warnings:
+ - Disk size: '500 GB' is larger than image size: '10 GB'. You might need to resize the root repartition manually if the operating system does not support automatic resizing. See https://cloud.google.com/compute/docs/disks/add-persistent-disk#resize_pd for details.
+ - You are creating a global DNS VM. VM instances using global DNS are vulnerable to cross-regional outages. To reduce the risk of widespread service disruption, use zonal DNS instead. Learn more at https://cloud.google.com/compute/docs/networking/zonal-dns?utm_id=vm-insert
+
+[23:00:49] creating aegon-bench-shard-17 (n2-highmem-16, boot=500GB pd-ssd)
+Created [https://www.googleapis.com/compute/v1/projects/jbonneau-mwalfish-9a0c/zones/us-central1-b/instances/aegon-bench-shard-17].
+WARNING: Some requests generated warnings:
+ - Disk size: '500 GB' is larger than image size: '10 GB'. You might need to resize the root repartition manually if the operating system does not support automatic resizing. See https://cloud.google.com/compute/docs/disks/add-persistent-disk#resize_pd for details.
+ - You are creating a global DNS VM. VM instances using global DNS are vulnerable to cross-regional outages. To reduce the risk of widespread service disruption, use zonal DNS instead. Learn more at https://cloud.google.com/compute/docs/networking/zonal-dns?utm_id=vm-insert
+
+[23:01:15] creating aegon-bench-shard-18 (n2-highmem-16, boot=500GB pd-ssd)
+Created [https://www.googleapis.com/compute/v1/projects/jbonneau-mwalfish-9a0c/zones/us-central1-b/instances/aegon-bench-shard-18].
+WARNING: Some requests generated warnings:
+ - Disk size: '500 GB' is larger than image size: '10 GB'. You might need to resize the root repartition manually if the operating system does not support automatic resizing. See https://cloud.google.com/compute/docs/disks/add-persistent-disk#resize_pd for details.
+ - You are creating a global DNS VM. VM instances using global DNS are vulnerable to cross-regional outages. To reduce the risk of widespread service disruption, use zonal DNS instead. Learn more at https://cloud.google.com/compute/docs/networking/zonal-dns?utm_id=vm-insert
+
+[23:01:28] creating aegon-bench-shard-19 (n2-highmem-16, boot=500GB pd-ssd)
+Created [https://www.googleapis.com/compute/v1/projects/jbonneau-mwalfish-9a0c/zones/us-central1-b/instances/aegon-bench-shard-19].
+WARNING: Some requests generated warnings:
+ - Disk size: '500 GB' is larger than image size: '10 GB'. You might need to resize the root repartition manually if the operating system does not support automatic resizing. See https://cloud.google.com/compute/docs/disks/add-persistent-disk#resize_pd for details.
+ - You are creating a global DNS VM. VM instances using global DNS are vulnerable to cross-regional outages. To reduce the risk of widespread service disruption, use zonal DNS instead. Learn more at https://cloud.google.com/compute/docs/networking/zonal-dns?utm_id=vm-insert
+
+[23:01:43] creating aegon-bench-shard-20 (n2-highmem-16, boot=500GB pd-ssd)
+Created [https://www.googleapis.com/compute/v1/projects/jbonneau-mwalfish-9a0c/zones/us-central1-b/instances/aegon-bench-shard-20].
+WARNING: Some requests generated warnings:
+ - Disk size: '500 GB' is larger than image size: '10 GB'. You might need to resize the root repartition manually if the operating system does not support automatic resizing. See https://cloud.google.com/compute/docs/disks/add-persistent-disk#resize_pd for details.
+ - You are creating a global DNS VM. VM instances using global DNS are vulnerable to cross-regional outages. To reduce the risk of widespread service disruption, use zonal DNS instead. Learn more at https://cloud.google.com/compute/docs/networking/zonal-dns?utm_id=vm-insert
+
+[23:01:55] creating aegon-bench-shard-21 (n2-highmem-16, boot=500GB pd-ssd)
+Created [https://www.googleapis.com/compute/v1/projects/jbonneau-mwalfish-9a0c/zones/us-central1-b/instances/aegon-bench-shard-21].
+WARNING: Some requests generated warnings:
+ - Disk size: '500 GB' is larger than image size: '10 GB'. You might need to resize the root repartition manually if the operating system does not support automatic resizing. See https://cloud.google.com/compute/docs/disks/add-persistent-disk#resize_pd for details.
+ - You are creating a global DNS VM. VM instances using global DNS are vulnerable to cross-regional outages. To reduce the risk of widespread service disruption, use zonal DNS instead. Learn more at https://cloud.google.com/compute/docs/networking/zonal-dns?utm_id=vm-insert
+
+[23:02:07] creating aegon-bench-shard-22 (n2-highmem-16, boot=500GB pd-ssd)
+Created [https://www.googleapis.com/compute/v1/projects/jbonneau-mwalfish-9a0c/zones/us-central1-b/instances/aegon-bench-shard-22].
+WARNING: Some requests generated warnings:
+ - Disk size: '500 GB' is larger than image size: '10 GB'. You might need to resize the root repartition manually if the operating system does not support automatic resizing. See https://cloud.google.com/compute/docs/disks/add-persistent-disk#resize_pd for details.
+ - You are creating a global DNS VM. VM instances using global DNS are vulnerable to cross-regional outages. To reduce the risk of widespread service disruption, use zonal DNS instead. Learn more at https://cloud.google.com/compute/docs/networking/zonal-dns?utm_id=vm-insert
+
+[23:02:20] creating aegon-bench-shard-23 (n2-highmem-16, boot=500GB pd-ssd)
+Created [https://www.googleapis.com/compute/v1/projects/jbonneau-mwalfish-9a0c/zones/us-central1-b/instances/aegon-bench-shard-23].
+WARNING: Some requests generated warnings:
+ - Disk size: '500 GB' is larger than image size: '10 GB'. You might need to resize the root repartition manually if the operating system does not support automatic resizing. See https://cloud.google.com/compute/docs/disks/add-persistent-disk#resize_pd for details.
+ - You are creating a global DNS VM. VM instances using global DNS are vulnerable to cross-regional outages. To reduce the risk of widespread service disruption, use zonal DNS instead. Learn more at https://cloud.google.com/compute/docs/networking/zonal-dns?utm_id=vm-insert
+
+[23:02:31] creating aegon-bench-shard-24 (n2-highmem-16, boot=500GB pd-ssd)
+Created [https://www.googleapis.com/compute/v1/projects/jbonneau-mwalfish-9a0c/zones/us-central1-b/instances/aegon-bench-shard-24].
+WARNING: Some requests generated warnings:
+ - Disk size: '500 GB' is larger than image size: '10 GB'. You might need to resize the root repartition manually if the operating system does not support automatic resizing. See https://cloud.google.com/compute/docs/disks/add-persistent-disk#resize_pd for details.
+ - You are creating a global DNS VM. VM instances using global DNS are vulnerable to cross-regional outages. To reduce the risk of widespread service disruption, use zonal DNS instead. Learn more at https://cloud.google.com/compute/docs/networking/zonal-dns?utm_id=vm-insert
+
+[23:02:47] creating aegon-bench-shard-25 (n2-highmem-16, boot=500GB pd-ssd)
+Created [https://www.googleapis.com/compute/v1/projects/jbonneau-mwalfish-9a0c/zones/us-central1-b/instances/aegon-bench-shard-25].
+WARNING: Some requests generated warnings:
+ - Disk size: '500 GB' is larger than image size: '10 GB'. You might need to resize the root repartition manually if the operating system does not support automatic resizing. See https://cloud.google.com/compute/docs/disks/add-persistent-disk#resize_pd for details.
+ - You are creating a global DNS VM. VM instances using global DNS are vulnerable to cross-regional outages. To reduce the risk of widespread service disruption, use zonal DNS instead. Learn more at https://cloud.google.com/compute/docs/networking/zonal-dns?utm_id=vm-insert
+
+[23:03:08] creating aegon-bench-shard-26 (n2-highmem-16, boot=500GB pd-ssd)
+Created [https://www.googleapis.com/compute/v1/projects/jbonneau-mwalfish-9a0c/zones/us-central1-b/instances/aegon-bench-shard-26].
+WARNING: Some requests generated warnings:
+ - Disk size: '500 GB' is larger than image size: '10 GB'. You might need to resize the root repartition manually if the operating system does not support automatic resizing. See https://cloud.google.com/compute/docs/disks/add-persistent-disk#resize_pd for details.
+ - You are creating a global DNS VM. VM instances using global DNS are vulnerable to cross-regional outages. To reduce the risk of widespread service disruption, use zonal DNS instead. Learn more at https://cloud.google.com/compute/docs/networking/zonal-dns?utm_id=vm-insert
+
+[23:03:25] creating aegon-bench-shard-27 (n2-highmem-16, boot=500GB pd-ssd)
+Created [https://www.googleapis.com/compute/v1/projects/jbonneau-mwalfish-9a0c/zones/us-central1-b/instances/aegon-bench-shard-27].
+WARNING: Some requests generated warnings:
+ - Disk size: '500 GB' is larger than image size: '10 GB'. You might need to resize the root repartition manually if the operating system does not support automatic resizing. See https://cloud.google.com/compute/docs/disks/add-persistent-disk#resize_pd for details.
+ - You are creating a global DNS VM. VM instances using global DNS are vulnerable to cross-regional outages. To reduce the risk of widespread service disruption, use zonal DNS instead. Learn more at https://cloud.google.com/compute/docs/networking/zonal-dns?utm_id=vm-insert
+
+[23:03:44] creating aegon-bench-shard-28 (n2-highmem-16, boot=500GB pd-ssd)
+Created [https://www.googleapis.com/compute/v1/projects/jbonneau-mwalfish-9a0c/zones/us-central1-b/instances/aegon-bench-shard-28].
+WARNING: Some requests generated warnings:
+ - Disk size: '500 GB' is larger than image size: '10 GB'. You might need to resize the root repartition manually if the operating system does not support automatic resizing. See https://cloud.google.com/compute/docs/disks/add-persistent-disk#resize_pd for details.
+ - You are creating a global DNS VM. VM instances using global DNS are vulnerable to cross-regional outages. To reduce the risk of widespread service disruption, use zonal DNS instead. Learn more at https://cloud.google.com/compute/docs/networking/zonal-dns?utm_id=vm-insert
+
+[23:03:55] creating aegon-bench-shard-29 (n2-highmem-16, boot=500GB pd-ssd)
+Created [https://www.googleapis.com/compute/v1/projects/jbonneau-mwalfish-9a0c/zones/us-central1-b/instances/aegon-bench-shard-29].
+WARNING: Some requests generated warnings:
+ - Disk size: '500 GB' is larger than image size: '10 GB'. You might need to resize the root repartition manually if the operating system does not support automatic resizing. See https://cloud.google.com/compute/docs/disks/add-persistent-disk#resize_pd for details.
+ - You are creating a global DNS VM. VM instances using global DNS are vulnerable to cross-regional outages. To reduce the risk of widespread service disruption, use zonal DNS instead. Learn more at https://cloud.google.com/compute/docs/networking/zonal-dns?utm_id=vm-insert
+
+[23:04:06] creating aegon-bench-shard-30 (n2-highmem-16, boot=500GB pd-ssd)
+Created [https://www.googleapis.com/compute/v1/projects/jbonneau-mwalfish-9a0c/zones/us-central1-b/instances/aegon-bench-shard-30].
+WARNING: Some requests generated warnings:
+ - Disk size: '500 GB' is larger than image size: '10 GB'. You might need to resize the root repartition manually if the operating system does not support automatic resizing. See https://cloud.google.com/compute/docs/disks/add-persistent-disk#resize_pd for details.
+ - You are creating a global DNS VM. VM instances using global DNS are vulnerable to cross-regional outages. To reduce the risk of widespread service disruption, use zonal DNS instead. Learn more at https://cloud.google.com/compute/docs/networking/zonal-dns?utm_id=vm-insert
+
+[23:04:18] creating aegon-bench-shard-31 (n2-highmem-16, boot=500GB pd-ssd)
+Created [https://www.googleapis.com/compute/v1/projects/jbonneau-mwalfish-9a0c/zones/us-central1-b/instances/aegon-bench-shard-31].
+WARNING: Some requests generated warnings:
+ - Disk size: '500 GB' is larger than image size: '10 GB'. You might need to resize the root repartition manually if the operating system does not support automatic resizing. See https://cloud.google.com/compute/docs/disks/add-persistent-disk#resize_pd for details.
+ - You are creating a global DNS VM. VM instances using global DNS are vulnerable to cross-regional outages. To reduce the risk of widespread service disruption, use zonal DNS instead. Learn more at https://cloud.google.com/compute/docs/networking/zonal-dns?utm_id=vm-insert
+
+[23:04:31] creating aegon-bench-shard-32 (n2-highmem-16, boot=500GB pd-ssd)
+Created [https://www.googleapis.com/compute/v1/projects/jbonneau-mwalfish-9a0c/zones/us-central1-b/instances/aegon-bench-shard-32].
+WARNING: Some requests generated warnings:
+ - Disk size: '500 GB' is larger than image size: '10 GB'. You might need to resize the root repartition manually if the operating system does not support automatic resizing. See https://cloud.google.com/compute/docs/disks/add-persistent-disk#resize_pd for details.
+ - You are creating a global DNS VM. VM instances using global DNS are vulnerable to cross-regional outages. To reduce the risk of widespread service disruption, use zonal DNS instead. Learn more at https://cloud.google.com/compute/docs/networking/zonal-dns?utm_id=vm-insert
+
+[23:04:50] creating aegon-bench-shard-33 (n2-highmem-16, boot=500GB pd-ssd)
+Created [https://www.googleapis.com/compute/v1/projects/jbonneau-mwalfish-9a0c/zones/us-central1-b/instances/aegon-bench-shard-33].
+WARNING: Some requests generated warnings:
+ - Disk size: '500 GB' is larger than image size: '10 GB'. You might need to resize the root repartition manually if the operating system does not support automatic resizing. See https://cloud.google.com/compute/docs/disks/add-persistent-disk#resize_pd for details.
+ - You are creating a global DNS VM. VM instances using global DNS are vulnerable to cross-regional outages. To reduce the risk of widespread service disruption, use zonal DNS instead. Learn more at https://cloud.google.com/compute/docs/networking/zonal-dns?utm_id=vm-insert
+
+[23:05:08] creating aegon-bench-shard-34 (n2-highmem-16, boot=500GB pd-ssd)
+Created [https://www.googleapis.com/compute/v1/projects/jbonneau-mwalfish-9a0c/zones/us-central1-b/instances/aegon-bench-shard-34].
+WARNING: Some requests generated warnings:
+ - Disk size: '500 GB' is larger than image size: '10 GB'. You might need to resize the root repartition manually if the operating system does not support automatic resizing. See https://cloud.google.com/compute/docs/disks/add-persistent-disk#resize_pd for details.
+ - You are creating a global DNS VM. VM instances using global DNS are vulnerable to cross-regional outages. To reduce the risk of widespread service disruption, use zonal DNS instead. Learn more at https://cloud.google.com/compute/docs/networking/zonal-dns?utm_id=vm-insert
+
+[23:05:22] creating aegon-bench-shard-35 (n2-highmem-16, boot=500GB pd-ssd)
+Created [https://www.googleapis.com/compute/v1/projects/jbonneau-mwalfish-9a0c/zones/us-central1-b/instances/aegon-bench-shard-35].
+WARNING: Some requests generated warnings:
+ - Disk size: '500 GB' is larger than image size: '10 GB'. You might need to resize the root repartition manually if the operating system does not support automatic resizing. See https://cloud.google.com/compute/docs/disks/add-persistent-disk#resize_pd for details.
+ - You are creating a global DNS VM. VM instances using global DNS are vulnerable to cross-regional outages. To reduce the risk of widespread service disruption, use zonal DNS instead. Learn more at https://cloud.google.com/compute/docs/networking/zonal-dns?utm_id=vm-insert
+
+[23:05:33] creating aegon-bench-shard-36 (n2-highmem-16, boot=500GB pd-ssd)
+Created [https://www.googleapis.com/compute/v1/projects/jbonneau-mwalfish-9a0c/zones/us-central1-b/instances/aegon-bench-shard-36].
+WARNING: Some requests generated warnings:
+ - Disk size: '500 GB' is larger than image size: '10 GB'. You might need to resize the root repartition manually if the operating system does not support automatic resizing. See https://cloud.google.com/compute/docs/disks/add-persistent-disk#resize_pd for details.
+ - You are creating a global DNS VM. VM instances using global DNS are vulnerable to cross-regional outages. To reduce the risk of widespread service disruption, use zonal DNS instead. Learn more at https://cloud.google.com/compute/docs/networking/zonal-dns?utm_id=vm-insert
+
+[23:05:45] creating aegon-bench-shard-37 (n2-highmem-16, boot=500GB pd-ssd)
+Created [https://www.googleapis.com/compute/v1/projects/jbonneau-mwalfish-9a0c/zones/us-central1-b/instances/aegon-bench-shard-37].
+WARNING: Some requests generated warnings:
+ - Disk size: '500 GB' is larger than image size: '10 GB'. You might need to resize the root repartition manually if the operating system does not support automatic resizing. See https://cloud.google.com/compute/docs/disks/add-persistent-disk#resize_pd for details.
+ - You are creating a global DNS VM. VM instances using global DNS are vulnerable to cross-regional outages. To reduce the risk of widespread service disruption, use zonal DNS instead. Learn more at https://cloud.google.com/compute/docs/networking/zonal-dns?utm_id=vm-insert
+
+[23:06:01] creating aegon-bench-shard-38 (n2-highmem-16, boot=500GB pd-ssd)
+Created [https://www.googleapis.com/compute/v1/projects/jbonneau-mwalfish-9a0c/zones/us-central1-b/instances/aegon-bench-shard-38].
+WARNING: Some requests generated warnings:
+ - Disk size: '500 GB' is larger than image size: '10 GB'. You might need to resize the root repartition manually if the operating system does not support automatic resizing. See https://cloud.google.com/compute/docs/disks/add-persistent-disk#resize_pd for details.
+ - You are creating a global DNS VM. VM instances using global DNS are vulnerable to cross-regional outages. To reduce the risk of widespread service disruption, use zonal DNS instead. Learn more at https://cloud.google.com/compute/docs/networking/zonal-dns?utm_id=vm-insert
+
+[23:06:14] creating aegon-bench-shard-39 (n2-highmem-16, boot=500GB pd-ssd)
+Created [https://www.googleapis.com/compute/v1/projects/jbonneau-mwalfish-9a0c/zones/us-central1-b/instances/aegon-bench-shard-39].
+WARNING: Some requests generated warnings:
+ - Disk size: '500 GB' is larger than image size: '10 GB'. You might need to resize the root repartition manually if the operating system does not support automatic resizing. See https://cloud.google.com/compute/docs/disks/add-persistent-disk#resize_pd for details.
+ - You are creating a global DNS VM. VM instances using global DNS are vulnerable to cross-regional outages. To reduce the risk of widespread service disruption, use zonal DNS instead. Learn more at https://cloud.google.com/compute/docs/networking/zonal-dns?utm_id=vm-insert
+
+[23:06:25] creating aegon-bench-shard-40 (n2-highmem-16, boot=500GB pd-ssd)
+Created [https://www.googleapis.com/compute/v1/projects/jbonneau-mwalfish-9a0c/zones/us-central1-b/instances/aegon-bench-shard-40].
+WARNING: Some requests generated warnings:
+ - Disk size: '500 GB' is larger than image size: '10 GB'. You might need to resize the root repartition manually if the operating system does not support automatic resizing. See https://cloud.google.com/compute/docs/disks/add-persistent-disk#resize_pd for details.
+ - You are creating a global DNS VM. VM instances using global DNS are vulnerable to cross-regional outages. To reduce the risk of widespread service disruption, use zonal DNS instead. Learn more at https://cloud.google.com/compute/docs/networking/zonal-dns?utm_id=vm-insert
+
+[23:06:49] creating aegon-bench-shard-41 (n2-highmem-16, boot=500GB pd-ssd)
+Created [https://www.googleapis.com/compute/v1/projects/jbonneau-mwalfish-9a0c/zones/us-central1-b/instances/aegon-bench-shard-41].
+WARNING: Some requests generated warnings:
+ - Disk size: '500 GB' is larger than image size: '10 GB'. You might need to resize the root repartition manually if the operating system does not support automatic resizing. See https://cloud.google.com/compute/docs/disks/add-persistent-disk#resize_pd for details.
+ - You are creating a global DNS VM. VM instances using global DNS are vulnerable to cross-regional outages. To reduce the risk of widespread service disruption, use zonal DNS instead. Learn more at https://cloud.google.com/compute/docs/networking/zonal-dns?utm_id=vm-insert
+
+[23:07:01] creating aegon-bench-shard-42 (n2-highmem-16, boot=500GB pd-ssd)
+Created [https://www.googleapis.com/compute/v1/projects/jbonneau-mwalfish-9a0c/zones/us-central1-b/instances/aegon-bench-shard-42].
+WARNING: Some requests generated warnings:
+ - Disk size: '500 GB' is larger than image size: '10 GB'. You might need to resize the root repartition manually if the operating system does not support automatic resizing. See https://cloud.google.com/compute/docs/disks/add-persistent-disk#resize_pd for details.
+ - You are creating a global DNS VM. VM instances using global DNS are vulnerable to cross-regional outages. To reduce the risk of widespread service disruption, use zonal DNS instead. Learn more at https://cloud.google.com/compute/docs/networking/zonal-dns?utm_id=vm-insert
+
+[23:07:19] creating aegon-bench-shard-43 (n2-highmem-16, boot=500GB pd-ssd)
+Created [https://www.googleapis.com/compute/v1/projects/jbonneau-mwalfish-9a0c/zones/us-central1-b/instances/aegon-bench-shard-43].
+WARNING: Some requests generated warnings:
+ - Disk size: '500 GB' is larger than image size: '10 GB'. You might need to resize the root repartition manually if the operating system does not support automatic resizing. See https://cloud.google.com/compute/docs/disks/add-persistent-disk#resize_pd for details.
+ - You are creating a global DNS VM. VM instances using global DNS are vulnerable to cross-regional outages. To reduce the risk of widespread service disruption, use zonal DNS instead. Learn more at https://cloud.google.com/compute/docs/networking/zonal-dns?utm_id=vm-insert
+
+[23:07:40] creating aegon-bench-shard-44 (n2-highmem-16, boot=500GB pd-ssd)
+Created [https://www.googleapis.com/compute/v1/projects/jbonneau-mwalfish-9a0c/zones/us-central1-b/instances/aegon-bench-shard-44].
+WARNING: Some requests generated warnings:
+ - Disk size: '500 GB' is larger than image size: '10 GB'. You might need to resize the root repartition manually if the operating system does not support automatic resizing. See https://cloud.google.com/compute/docs/disks/add-persistent-disk#resize_pd for details.
+ - You are creating a global DNS VM. VM instances using global DNS are vulnerable to cross-regional outages. To reduce the risk of widespread service disruption, use zonal DNS instead. Learn more at https://cloud.google.com/compute/docs/networking/zonal-dns?utm_id=vm-insert
+
+[23:07:52] creating aegon-bench-shard-45 (n2-highmem-16, boot=500GB pd-ssd)
+Created [https://www.googleapis.com/compute/v1/projects/jbonneau-mwalfish-9a0c/zones/us-central1-b/instances/aegon-bench-shard-45].
+WARNING: Some requests generated warnings:
+ - Disk size: '500 GB' is larger than image size: '10 GB'. You might need to resize the root repartition manually if the operating system does not support automatic resizing. See https://cloud.google.com/compute/docs/disks/add-persistent-disk#resize_pd for details.
+ - You are creating a global DNS VM. VM instances using global DNS are vulnerable to cross-regional outages. To reduce the risk of widespread service disruption, use zonal DNS instead. Learn more at https://cloud.google.com/compute/docs/networking/zonal-dns?utm_id=vm-insert
+
+[23:08:06] creating aegon-bench-shard-46 (n2-highmem-16, boot=500GB pd-ssd)
+Created [https://www.googleapis.com/compute/v1/projects/jbonneau-mwalfish-9a0c/zones/us-central1-b/instances/aegon-bench-shard-46].
+WARNING: Some requests generated warnings:
+ - Disk size: '500 GB' is larger than image size: '10 GB'. You might need to resize the root repartition manually if the operating system does not support automatic resizing. See https://cloud.google.com/compute/docs/disks/add-persistent-disk#resize_pd for details.
+ - You are creating a global DNS VM. VM instances using global DNS are vulnerable to cross-regional outages. To reduce the risk of widespread service disruption, use zonal DNS instead. Learn more at https://cloud.google.com/compute/docs/networking/zonal-dns?utm_id=vm-insert
+
+[23:08:29] creating aegon-bench-shard-47 (n2-highmem-16, boot=500GB pd-ssd)
+Created [https://www.googleapis.com/compute/v1/projects/jbonneau-mwalfish-9a0c/zones/us-central1-b/instances/aegon-bench-shard-47].
+WARNING: Some requests generated warnings:
+ - Disk size: '500 GB' is larger than image size: '10 GB'. You might need to resize the root repartition manually if the operating system does not support automatic resizing. See https://cloud.google.com/compute/docs/disks/add-persistent-disk#resize_pd for details.
+ - You are creating a global DNS VM. VM instances using global DNS are vulnerable to cross-regional outages. To reduce the risk of widespread service disruption, use zonal DNS instead. Learn more at https://cloud.google.com/compute/docs/networking/zonal-dns?utm_id=vm-insert
+
+[23:08:51] creating aegon-bench-shard-48 (n2-highmem-16, boot=500GB pd-ssd)
+Created [https://www.googleapis.com/compute/v1/projects/jbonneau-mwalfish-9a0c/zones/us-central1-b/instances/aegon-bench-shard-48].
+WARNING: Some requests generated warnings:
+ - Disk size: '500 GB' is larger than image size: '10 GB'. You might need to resize the root repartition manually if the operating system does not support automatic resizing. See https://cloud.google.com/compute/docs/disks/add-persistent-disk#resize_pd for details.
+ - You are creating a global DNS VM. VM instances using global DNS are vulnerable to cross-regional outages. To reduce the risk of widespread service disruption, use zonal DNS instead. Learn more at https://cloud.google.com/compute/docs/networking/zonal-dns?utm_id=vm-insert
+
+[23:09:06] creating aegon-bench-shard-49 (n2-highmem-16, boot=500GB pd-ssd)
+Created [https://www.googleapis.com/compute/v1/projects/jbonneau-mwalfish-9a0c/zones/us-central1-b/instances/aegon-bench-shard-49].
+WARNING: Some requests generated warnings:
+ - Disk size: '500 GB' is larger than image size: '10 GB'. You might need to resize the root repartition manually if the operating system does not support automatic resizing. See https://cloud.google.com/compute/docs/disks/add-persistent-disk#resize_pd for details.
+ - You are creating a global DNS VM. VM instances using global DNS are vulnerable to cross-regional outages. To reduce the risk of widespread service disruption, use zonal DNS instead. Learn more at https://cloud.google.com/compute/docs/networking/zonal-dns?utm_id=vm-insert
+
+[23:09:23] creating aegon-bench-shard-50 (n2-highmem-16, boot=500GB pd-ssd)
+Created [https://www.googleapis.com/compute/v1/projects/jbonneau-mwalfish-9a0c/zones/us-central1-b/instances/aegon-bench-shard-50].
+WARNING: Some requests generated warnings:
+ - Disk size: '500 GB' is larger than image size: '10 GB'. You might need to resize the root repartition manually if the operating system does not support automatic resizing. See https://cloud.google.com/compute/docs/disks/add-persistent-disk#resize_pd for details.
+ - You are creating a global DNS VM. VM instances using global DNS are vulnerable to cross-regional outages. To reduce the risk of widespread service disruption, use zonal DNS instead. Learn more at https://cloud.google.com/compute/docs/networking/zonal-dns?utm_id=vm-insert
+
+[23:09:40] creating aegon-bench-shard-51 (n2-highmem-16, boot=500GB pd-ssd)
+Created [https://www.googleapis.com/compute/v1/projects/jbonneau-mwalfish-9a0c/zones/us-central1-b/instances/aegon-bench-shard-51].
+WARNING: Some requests generated warnings:
+ - Disk size: '500 GB' is larger than image size: '10 GB'. You might need to resize the root repartition manually if the operating system does not support automatic resizing. See https://cloud.google.com/compute/docs/disks/add-persistent-disk#resize_pd for details.
+ - You are creating a global DNS VM. VM instances using global DNS are vulnerable to cross-regional outages. To reduce the risk of widespread service disruption, use zonal DNS instead. Learn more at https://cloud.google.com/compute/docs/networking/zonal-dns?utm_id=vm-insert
+
+[23:10:09] creating aegon-bench-shard-52 (n2-highmem-16, boot=500GB pd-ssd)
+Created [https://www.googleapis.com/compute/v1/projects/jbonneau-mwalfish-9a0c/zones/us-central1-b/instances/aegon-bench-shard-52].
+WARNING: Some requests generated warnings:
+ - Disk size: '500 GB' is larger than image size: '10 GB'. You might need to resize the root repartition manually if the operating system does not support automatic resizing. See https://cloud.google.com/compute/docs/disks/add-persistent-disk#resize_pd for details.
+ - You are creating a global DNS VM. VM instances using global DNS are vulnerable to cross-regional outages. To reduce the risk of widespread service disruption, use zonal DNS instead. Learn more at https://cloud.google.com/compute/docs/networking/zonal-dns?utm_id=vm-insert
+
+[23:10:20] creating aegon-bench-shard-53 (n2-highmem-16, boot=500GB pd-ssd)
+Created [https://www.googleapis.com/compute/v1/projects/jbonneau-mwalfish-9a0c/zones/us-central1-b/instances/aegon-bench-shard-53].
+WARNING: Some requests generated warnings:
+ - Disk size: '500 GB' is larger than image size: '10 GB'. You might need to resize the root repartition manually if the operating system does not support automatic resizing. See https://cloud.google.com/compute/docs/disks/add-persistent-disk#resize_pd for details.
+ - You are creating a global DNS VM. VM instances using global DNS are vulnerable to cross-regional outages. To reduce the risk of widespread service disruption, use zonal DNS instead. Learn more at https://cloud.google.com/compute/docs/networking/zonal-dns?utm_id=vm-insert
+
+[23:10:33] creating aegon-bench-shard-54 (n2-highmem-16, boot=500GB pd-ssd)
+Created [https://www.googleapis.com/compute/v1/projects/jbonneau-mwalfish-9a0c/zones/us-central1-b/instances/aegon-bench-shard-54].
+WARNING: Some requests generated warnings:
+ - Disk size: '500 GB' is larger than image size: '10 GB'. You might need to resize the root repartition manually if the operating system does not support automatic resizing. See https://cloud.google.com/compute/docs/disks/add-persistent-disk#resize_pd for details.
+ - You are creating a global DNS VM. VM instances using global DNS are vulnerable to cross-regional outages. To reduce the risk of widespread service disruption, use zonal DNS instead. Learn more at https://cloud.google.com/compute/docs/networking/zonal-dns?utm_id=vm-insert
+
+[23:10:49] creating aegon-bench-shard-55 (n2-highmem-16, boot=500GB pd-ssd)
+Created [https://www.googleapis.com/compute/v1/projects/jbonneau-mwalfish-9a0c/zones/us-central1-b/instances/aegon-bench-shard-55].
+WARNING: Some requests generated warnings:
+ - Disk size: '500 GB' is larger than image size: '10 GB'. You might need to resize the root repartition manually if the operating system does not support automatic resizing. See https://cloud.google.com/compute/docs/disks/add-persistent-disk#resize_pd for details.
+ - You are creating a global DNS VM. VM instances using global DNS are vulnerable to cross-regional outages. To reduce the risk of widespread service disruption, use zonal DNS instead. Learn more at https://cloud.google.com/compute/docs/networking/zonal-dns?utm_id=vm-insert
+
+[23:11:01] creating aegon-bench-shard-56 (n2-highmem-16, boot=500GB pd-ssd)
+Created [https://www.googleapis.com/compute/v1/projects/jbonneau-mwalfish-9a0c/zones/us-central1-b/instances/aegon-bench-shard-56].
+WARNING: Some requests generated warnings:
+ - Disk size: '500 GB' is larger than image size: '10 GB'. You might need to resize the root repartition manually if the operating system does not support automatic resizing. See https://cloud.google.com/compute/docs/disks/add-persistent-disk#resize_pd for details.
+ - You are creating a global DNS VM. VM instances using global DNS are vulnerable to cross-regional outages. To reduce the risk of widespread service disruption, use zonal DNS instead. Learn more at https://cloud.google.com/compute/docs/networking/zonal-dns?utm_id=vm-insert
+
+[23:11:13] creating aegon-bench-shard-57 (n2-highmem-16, boot=500GB pd-ssd)
+Created [https://www.googleapis.com/compute/v1/projects/jbonneau-mwalfish-9a0c/zones/us-central1-b/instances/aegon-bench-shard-57].
+WARNING: Some requests generated warnings:
+ - Disk size: '500 GB' is larger than image size: '10 GB'. You might need to resize the root repartition manually if the operating system does not support automatic resizing. See https://cloud.google.com/compute/docs/disks/add-persistent-disk#resize_pd for details.
+ - You are creating a global DNS VM. VM instances using global DNS are vulnerable to cross-regional outages. To reduce the risk of widespread service disruption, use zonal DNS instead. Learn more at https://cloud.google.com/compute/docs/networking/zonal-dns?utm_id=vm-insert
+
+[23:11:42] creating aegon-bench-shard-58 (n2-highmem-16, boot=500GB pd-ssd)
+Created [https://www.googleapis.com/compute/v1/projects/jbonneau-mwalfish-9a0c/zones/us-central1-b/instances/aegon-bench-shard-58].
+WARNING: Some requests generated warnings:
+ - Disk size: '500 GB' is larger than image size: '10 GB'. You might need to resize the root repartition manually if the operating system does not support automatic resizing. See https://cloud.google.com/compute/docs/disks/add-persistent-disk#resize_pd for details.
+ - You are creating a global DNS VM. VM instances using global DNS are vulnerable to cross-regional outages. To reduce the risk of widespread service disruption, use zonal DNS instead. Learn more at https://cloud.google.com/compute/docs/networking/zonal-dns?utm_id=vm-insert
+
+[23:11:58] creating aegon-bench-shard-59 (n2-highmem-16, boot=500GB pd-ssd)
+Created [https://www.googleapis.com/compute/v1/projects/jbonneau-mwalfish-9a0c/zones/us-central1-b/instances/aegon-bench-shard-59].
+WARNING: Some requests generated warnings:
+ - Disk size: '500 GB' is larger than image size: '10 GB'. You might need to resize the root repartition manually if the operating system does not support automatic resizing. See https://cloud.google.com/compute/docs/disks/add-persistent-disk#resize_pd for details.
+ - You are creating a global DNS VM. VM instances using global DNS are vulnerable to cross-regional outages. To reduce the risk of widespread service disruption, use zonal DNS instead. Learn more at https://cloud.google.com/compute/docs/networking/zonal-dns?utm_id=vm-insert
+
+[23:12:15] creating aegon-bench-shard-60 (n2-highmem-16, boot=500GB pd-ssd)
+Created [https://www.googleapis.com/compute/v1/projects/jbonneau-mwalfish-9a0c/zones/us-central1-b/instances/aegon-bench-shard-60].
+WARNING: Some requests generated warnings:
+ - Disk size: '500 GB' is larger than image size: '10 GB'. You might need to resize the root repartition manually if the operating system does not support automatic resizing. See https://cloud.google.com/compute/docs/disks/add-persistent-disk#resize_pd for details.
+ - You are creating a global DNS VM. VM instances using global DNS are vulnerable to cross-regional outages. To reduce the risk of widespread service disruption, use zonal DNS instead. Learn more at https://cloud.google.com/compute/docs/networking/zonal-dns?utm_id=vm-insert
+
+[23:12:30] creating aegon-bench-shard-61 (n2-highmem-16, boot=500GB pd-ssd)
+Created [https://www.googleapis.com/compute/v1/projects/jbonneau-mwalfish-9a0c/zones/us-central1-b/instances/aegon-bench-shard-61].
+WARNING: Some requests generated warnings:
+ - Disk size: '500 GB' is larger than image size: '10 GB'. You might need to resize the root repartition manually if the operating system does not support automatic resizing. See https://cloud.google.com/compute/docs/disks/add-persistent-disk#resize_pd for details.
+ - You are creating a global DNS VM. VM instances using global DNS are vulnerable to cross-regional outages. To reduce the risk of widespread service disruption, use zonal DNS instead. Learn more at https://cloud.google.com/compute/docs/networking/zonal-dns?utm_id=vm-insert
+
+[23:12:48] creating aegon-bench-shard-62 (n2-highmem-16, boot=500GB pd-ssd)
+Created [https://www.googleapis.com/compute/v1/projects/jbonneau-mwalfish-9a0c/zones/us-central1-b/instances/aegon-bench-shard-62].
+WARNING: Some requests generated warnings:
+ - Disk size: '500 GB' is larger than image size: '10 GB'. You might need to resize the root repartition manually if the operating system does not support automatic resizing. See https://cloud.google.com/compute/docs/disks/add-persistent-disk#resize_pd for details.
+ - You are creating a global DNS VM. VM instances using global DNS are vulnerable to cross-regional outages. To reduce the risk of widespread service disruption, use zonal DNS instead. Learn more at https://cloud.google.com/compute/docs/networking/zonal-dns?utm_id=vm-insert
+
+[23:13:02] creating aegon-bench-shard-63 (n2-highmem-16, boot=500GB pd-ssd)
+Created [https://www.googleapis.com/compute/v1/projects/jbonneau-mwalfish-9a0c/zones/us-central1-b/instances/aegon-bench-shard-63].
+WARNING: Some requests generated warnings:
+ - Disk size: '500 GB' is larger than image size: '10 GB'. You might need to resize the root repartition manually if the operating system does not support automatic resizing. See https://cloud.google.com/compute/docs/disks/add-persistent-disk#resize_pd for details.
+ - You are creating a global DNS VM. VM instances using global DNS are vulnerable to cross-regional outages. To reduce the risk of widespread service disruption, use zonal DNS instead. Learn more at https://cloud.google.com/compute/docs/networking/zonal-dns?utm_id=vm-insert
+
+[23:13:14] creating aegon-bench-shard-64 (n2-highmem-16, boot=500GB pd-ssd)
+Created [https://www.googleapis.com/compute/v1/projects/jbonneau-mwalfish-9a0c/zones/us-central1-b/instances/aegon-bench-shard-64].
+WARNING: Some requests generated warnings:
+ - Disk size: '500 GB' is larger than image size: '10 GB'. You might need to resize the root repartition manually if the operating system does not support automatic resizing. See https://cloud.google.com/compute/docs/disks/add-persistent-disk#resize_pd for details.
+ - You are creating a global DNS VM. VM instances using global DNS are vulnerable to cross-regional outages. To reduce the risk of widespread service disruption, use zonal DNS instead. Learn more at https://cloud.google.com/compute/docs/networking/zonal-dns?utm_id=vm-insert
+
+[23:15:38] creating aegon-bench-shard-65 (n2-highmem-16, boot=500GB pd-ssd)
+Created [https://www.googleapis.com/compute/v1/projects/jbonneau-mwalfish-9a0c/zones/us-central1-b/instances/aegon-bench-shard-65].
+WARNING: Some requests generated warnings:
+ - Disk size: '500 GB' is larger than image size: '10 GB'. You might need to resize the root repartition manually if the operating system does not support automatic resizing. See https://cloud.google.com/compute/docs/disks/add-persistent-disk#resize_pd for details.
+ - You are creating a global DNS VM. VM instances using global DNS are vulnerable to cross-regional outages. To reduce the risk of widespread service disruption, use zonal DNS instead. Learn more at https://cloud.google.com/compute/docs/networking/zonal-dns?utm_id=vm-insert
+
+[23:15:53] creating aegon-bench-shard-66 (n2-highmem-16, boot=500GB pd-ssd)
+Created [https://www.googleapis.com/compute/v1/projects/jbonneau-mwalfish-9a0c/zones/us-central1-b/instances/aegon-bench-shard-66].
+WARNING: Some requests generated warnings:
+ - Disk size: '500 GB' is larger than image size: '10 GB'. You might need to resize the root repartition manually if the operating system does not support automatic resizing. See https://cloud.google.com/compute/docs/disks/add-persistent-disk#resize_pd for details.
+ - You are creating a global DNS VM. VM instances using global DNS are vulnerable to cross-regional outages. To reduce the risk of widespread service disruption, use zonal DNS instead. Learn more at https://cloud.google.com/compute/docs/networking/zonal-dns?utm_id=vm-insert
+
+[23:16:07] creating aegon-bench-shard-67 (n2-highmem-16, boot=500GB pd-ssd)
+Created [https://www.googleapis.com/compute/v1/projects/jbonneau-mwalfish-9a0c/zones/us-central1-b/instances/aegon-bench-shard-67].
+WARNING: Some requests generated warnings:
+ - Disk size: '500 GB' is larger than image size: '10 GB'. You might need to resize the root repartition manually if the operating system does not support automatic resizing. See https://cloud.google.com/compute/docs/disks/add-persistent-disk#resize_pd for details.
+ - You are creating a global DNS VM. VM instances using global DNS are vulnerable to cross-regional outages. To reduce the risk of widespread service disruption, use zonal DNS instead. Learn more at https://cloud.google.com/compute/docs/networking/zonal-dns?utm_id=vm-insert
+
+[23:16:23] creating aegon-bench-shard-68 (n2-highmem-16, boot=500GB pd-ssd)
+Created [https://www.googleapis.com/compute/v1/projects/jbonneau-mwalfish-9a0c/zones/us-central1-b/instances/aegon-bench-shard-68].
+WARNING: Some requests generated warnings:
+ - Disk size: '500 GB' is larger than image size: '10 GB'. You might need to resize the root repartition manually if the operating system does not support automatic resizing. See https://cloud.google.com/compute/docs/disks/add-persistent-disk#resize_pd for details.
+ - You are creating a global DNS VM. VM instances using global DNS are vulnerable to cross-regional outages. To reduce the risk of widespread service disruption, use zonal DNS instead. Learn more at https://cloud.google.com/compute/docs/networking/zonal-dns?utm_id=vm-insert
+
+[23:16:36] creating aegon-bench-shard-69 (n2-highmem-16, boot=500GB pd-ssd)
+Created [https://www.googleapis.com/compute/v1/projects/jbonneau-mwalfish-9a0c/zones/us-central1-b/instances/aegon-bench-shard-69].
+WARNING: Some requests generated warnings:
+ - Disk size: '500 GB' is larger than image size: '10 GB'. You might need to resize the root repartition manually if the operating system does not support automatic resizing. See https://cloud.google.com/compute/docs/disks/add-persistent-disk#resize_pd for details.
+ - You are creating a global DNS VM. VM instances using global DNS are vulnerable to cross-regional outages. To reduce the risk of widespread service disruption, use zonal DNS instead. Learn more at https://cloud.google.com/compute/docs/networking/zonal-dns?utm_id=vm-insert
+
+[23:16:47] creating aegon-bench-shard-70 (n2-highmem-16, boot=500GB pd-ssd)
+Created [https://www.googleapis.com/compute/v1/projects/jbonneau-mwalfish-9a0c/zones/us-central1-b/instances/aegon-bench-shard-70].
+WARNING: Some requests generated warnings:
+ - Disk size: '500 GB' is larger than image size: '10 GB'. You might need to resize the root repartition manually if the operating system does not support automatic resizing. See https://cloud.google.com/compute/docs/disks/add-persistent-disk#resize_pd for details.
+ - You are creating a global DNS VM. VM instances using global DNS are vulnerable to cross-regional outages. To reduce the risk of widespread service disruption, use zonal DNS instead. Learn more at https://cloud.google.com/compute/docs/networking/zonal-dns?utm_id=vm-insert
+
+[23:16:59] creating aegon-bench-shard-71 (n2-highmem-16, boot=500GB pd-ssd)
+Created [https://www.googleapis.com/compute/v1/projects/jbonneau-mwalfish-9a0c/zones/us-central1-b/instances/aegon-bench-shard-71].
+WARNING: Some requests generated warnings:
+ - Disk size: '500 GB' is larger than image size: '10 GB'. You might need to resize the root repartition manually if the operating system does not support automatic resizing. See https://cloud.google.com/compute/docs/disks/add-persistent-disk#resize_pd for details.
+ - You are creating a global DNS VM. VM instances using global DNS are vulnerable to cross-regional outages. To reduce the risk of widespread service disruption, use zonal DNS instead. Learn more at https://cloud.google.com/compute/docs/networking/zonal-dns?utm_id=vm-insert
+
+[23:17:17] creating aegon-bench-shard-72 (n2-highmem-16, boot=500GB pd-ssd)
+Created [https://www.googleapis.com/compute/v1/projects/jbonneau-mwalfish-9a0c/zones/us-central1-b/instances/aegon-bench-shard-72].
+WARNING: Some requests generated warnings:
+ - Disk size: '500 GB' is larger than image size: '10 GB'. You might need to resize the root repartition manually if the operating system does not support automatic resizing. See https://cloud.google.com/compute/docs/disks/add-persistent-disk#resize_pd for details.
+ - You are creating a global DNS VM. VM instances using global DNS are vulnerable to cross-regional outages. To reduce the risk of widespread service disruption, use zonal DNS instead. Learn more at https://cloud.google.com/compute/docs/networking/zonal-dns?utm_id=vm-insert
+
+[23:17:33] creating aegon-bench-shard-73 (n2-highmem-16, boot=500GB pd-ssd)
+Created [https://www.googleapis.com/compute/v1/projects/jbonneau-mwalfish-9a0c/zones/us-central1-b/instances/aegon-bench-shard-73].
+WARNING: Some requests generated warnings:
+ - Disk size: '500 GB' is larger than image size: '10 GB'. You might need to resize the root repartition manually if the operating system does not support automatic resizing. See https://cloud.google.com/compute/docs/disks/add-persistent-disk#resize_pd for details.
+ - You are creating a global DNS VM. VM instances using global DNS are vulnerable to cross-regional outages. To reduce the risk of widespread service disruption, use zonal DNS instead. Learn more at https://cloud.google.com/compute/docs/networking/zonal-dns?utm_id=vm-insert
+
+[23:17:49] creating aegon-bench-shard-74 (n2-highmem-16, boot=500GB pd-ssd)
+Created [https://www.googleapis.com/compute/v1/projects/jbonneau-mwalfish-9a0c/zones/us-central1-b/instances/aegon-bench-shard-74].
+WARNING: Some requests generated warnings:
+ - Disk size: '500 GB' is larger than image size: '10 GB'. You might need to resize the root repartition manually if the operating system does not support automatic resizing. See https://cloud.google.com/compute/docs/disks/add-persistent-disk#resize_pd for details.
+ - You are creating a global DNS VM. VM instances using global DNS are vulnerable to cross-regional outages. To reduce the risk of widespread service disruption, use zonal DNS instead. Learn more at https://cloud.google.com/compute/docs/networking/zonal-dns?utm_id=vm-insert
+
+[23:18:03] creating aegon-bench-shard-75 (n2-highmem-16, boot=500GB pd-ssd)
+Created [https://www.googleapis.com/compute/v1/projects/jbonneau-mwalfish-9a0c/zones/us-central1-b/instances/aegon-bench-shard-75].
+WARNING: Some requests generated warnings:
+ - Disk size: '500 GB' is larger than image size: '10 GB'. You might need to resize the root repartition manually if the operating system does not support automatic resizing. See https://cloud.google.com/compute/docs/disks/add-persistent-disk#resize_pd for details.
+ - You are creating a global DNS VM. VM instances using global DNS are vulnerable to cross-regional outages. To reduce the risk of widespread service disruption, use zonal DNS instead. Learn more at https://cloud.google.com/compute/docs/networking/zonal-dns?utm_id=vm-insert
+
+[23:18:17] creating aegon-bench-shard-76 (n2-highmem-16, boot=500GB pd-ssd)
+Created [https://www.googleapis.com/compute/v1/projects/jbonneau-mwalfish-9a0c/zones/us-central1-b/instances/aegon-bench-shard-76].
+WARNING: Some requests generated warnings:
+ - Disk size: '500 GB' is larger than image size: '10 GB'. You might need to resize the root repartition manually if the operating system does not support automatic resizing. See https://cloud.google.com/compute/docs/disks/add-persistent-disk#resize_pd for details.
+ - You are creating a global DNS VM. VM instances using global DNS are vulnerable to cross-regional outages. To reduce the risk of widespread service disruption, use zonal DNS instead. Learn more at https://cloud.google.com/compute/docs/networking/zonal-dns?utm_id=vm-insert
+
+[23:18:33] creating aegon-bench-shard-77 (n2-highmem-16, boot=500GB pd-ssd)
+Created [https://www.googleapis.com/compute/v1/projects/jbonneau-mwalfish-9a0c/zones/us-central1-b/instances/aegon-bench-shard-77].
+WARNING: Some requests generated warnings:
+ - Disk size: '500 GB' is larger than image size: '10 GB'. You might need to resize the root repartition manually if the operating system does not support automatic resizing. See https://cloud.google.com/compute/docs/disks/add-persistent-disk#resize_pd for details.
+ - You are creating a global DNS VM. VM instances using global DNS are vulnerable to cross-regional outages. To reduce the risk of widespread service disruption, use zonal DNS instead. Learn more at https://cloud.google.com/compute/docs/networking/zonal-dns?utm_id=vm-insert
+
+[23:18:46] creating aegon-bench-shard-78 (n2-highmem-16, boot=500GB pd-ssd)
+Created [https://www.googleapis.com/compute/v1/projects/jbonneau-mwalfish-9a0c/zones/us-central1-b/instances/aegon-bench-shard-78].
+WARNING: Some requests generated warnings:
+ - Disk size: '500 GB' is larger than image size: '10 GB'. You might need to resize the root repartition manually if the operating system does not support automatic resizing. See https://cloud.google.com/compute/docs/disks/add-persistent-disk#resize_pd for details.
+ - You are creating a global DNS VM. VM instances using global DNS are vulnerable to cross-regional outages. To reduce the risk of widespread service disruption, use zonal DNS instead. Learn more at https://cloud.google.com/compute/docs/networking/zonal-dns?utm_id=vm-insert
+
+[23:19:06] creating aegon-bench-shard-79 (n2-highmem-16, boot=500GB pd-ssd)
+Created [https://www.googleapis.com/compute/v1/projects/jbonneau-mwalfish-9a0c/zones/us-central1-b/instances/aegon-bench-shard-79].
+WARNING: Some requests generated warnings:
+ - Disk size: '500 GB' is larger than image size: '10 GB'. You might need to resize the root repartition manually if the operating system does not support automatic resizing. See https://cloud.google.com/compute/docs/disks/add-persistent-disk#resize_pd for details.
+ - You are creating a global DNS VM. VM instances using global DNS are vulnerable to cross-regional outages. To reduce the risk of widespread service disruption, use zonal DNS instead. Learn more at https://cloud.google.com/compute/docs/networking/zonal-dns?utm_id=vm-insert
+
+[23:19:17] creating aegon-bench-shard-80 (n2-highmem-16, boot=500GB pd-ssd)
+WARNING: Some requests generated warnings:
+ - Disk size: '500 GB' is larger than image size: '10 GB'. You might need to resize the root repartition manually if the operating system does not support automatic resizing. See https://cloud.google.com/compute/docs/disks/add-persistent-disk#resize_pd for details.
+ - You are creating a global DNS VM. VM instances using global DNS are vulnerable to cross-regional outages. To reduce the risk of widespread service disruption, use zonal DNS instead. Learn more at https://cloud.google.com/compute/docs/networking/zonal-dns?utm_id=vm-insert
+
+ERROR: (gcloud.compute.instances.create) Could not fetch resource:
+---
+code: ZONE_RESOURCE_POOL_EXHAUSTED_WITH_DETAILS
+errorDetails:
+- help:
+    links:
+    - description: Troubleshooting documentation
+      url: https://cloud.google.com/compute/docs/resource-error
+- localizedMessage:
+    locale: en-US
+    message: A n2-highmem-16 VM instance is currently unavailable in the us-central1-b
+      zone. Consider trying your request in the us-central1-c, us-central1-f, us-central1-a
+      zone(s), which currently has capacity to accommodate your request. Alternatively,
+      you can try your request again with a different VM hardware configuration or
+      at a later time. For more information, see the troubleshooting documentation.
+- errorInfo:
+    domain: compute.googleapis.com
+    metadatas:
+      attachment: ''
+      vmType: n2-highmem-16
+      zone: us-central1-b
+      zonesAvailable: us-central1-c,us-central1-f,us-central1-a
+    reason: resource_availability
+message: The zone 'projects/jbonneau-mwalfish-9a0c/zones/us-central1-b' does not have
+  enough resources available to fulfill the request.  'NULL:0/NULL:0/NULL:0 (state:STOCKOUT,
+  sub-state:STOCKOUT, resource type:compute)'.
+
+[2026-06-23T23:19:32+0000] ==== large-up FAILED rc=1 after 1466s ====

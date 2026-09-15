@@ -1,0 +1,257 @@
+syntax = "proto3";
+
+package aegon.coordinator.v1;
+
+// User-facing surface exposed by the Aegon coordinator. Mirrors the
+// split lookup design on the Rust side
+// (`ShardedAegon::lookup_label` + `ShardedAegon::lookup_value`):
+//
+//   * `LookupLabel` proves a label is canonically placed at a
+//     specific `(shard_id, slot_bits)`. The client caches that slot
+//     and uses it for `LookupValue` calls forever after.
+//
+//   * `LookupValue` proves the current `value_poly` opens to some
+//     `H_F(value)` at that slot. Value bytes ride a side channel —
+//     either a separate KV fetch by label or returned in the response
+//     when the coordinator's KV-by-slot index is populated.
+//
+//   * `CurrentCommitment` returns the current `ShardedEpochCommitment`
+//     so a client that just connected can pin its verification root
+//     without waiting for an epoch transition.
+//
+// All payloads are arkworks-canonical-serialized bytes (uncompressed
+// — the wire encoding matches the shard service, which switched off
+// the compressed path to dodge per-point Tonelli–Shanks on decode).
+service CoordinatorService {
+  rpc LookupLabel(LookupLabelRequest) returns (LookupLabelResponse);
+  rpc LookupValue(LookupValueRequest) returns (LookupValueResponse);
+  // Combined value-chain RPC. Bundles `LookupLabel` + `LookupValue` into
+  // a single bench↔coord round-trip so realistic clients don't pay an
+  // extra RTT for the second half of the chain. The server runs the same
+  // two-layer label probe + value-poly opening it would for the split
+  // RPCs and bundles the (slot, label_proof, value_proof, value_bytes)
+  // tuple in one response. Saves 1 client↔coord RTT per call — the
+  // dominant remaining hop now that the shard side is collapsed to 1
+  // RPC per lookup.
+  rpc LookupValueChain(LookupValueChainRequest)
+      returns (LookupValueChainResponse);
+  // Fetch up to HISTORY_WINDOW (currently 5) most-recent value-change
+  // records for `label`. Each record is a self-contained bundle the
+  // client verifies locally via `verify_lookup_history`. Response is
+  // empty when the label is unknown OR when the coordinator was
+  // configured with DbSource::None (no DB backing).
+  rpc LookupHistory(LookupHistoryRequest) returns (LookupHistoryResponse);
+  // Label-side mirror of LookupHistory. Returns the (single)
+  // placement record for `label` plus a freshness attestation
+  // against the live rand_index_poly. The client verifies via
+  // `verify_lookup_label_history`. Asymmetric with LookupHistory:
+  // labels are placed exactly once, so the placement record is
+  // singular (not a list) and immutable; the freshness opening is
+  // recomputed by the owning shard on every call.
+  rpc LookupLabelHistory(LookupLabelHistoryRequest)
+      returns (LookupLabelHistoryResponse);
+  rpc CurrentCommitment(Empty) returns (CommitmentResponse);
+
+  // Publish a batch of `(label, value)` updates. The coordinator runs
+  // the full two-layer publish pipeline (H_shard routing → per-shard
+  // phase 1 + 2 fan-out → cross-shard merkle commit → per-shard finalize
+  // RPC) and returns the new `ShardedEpochCommitment`.
+  //
+  // Wire payload at K=65k batch is ~17 MB; the MAX_MSG_BYTES ceiling on
+  // both sides is 8 GiB so even K=524k (~150 MB) fits comfortably.
+  rpc Publish(PublishRequest) returns (PublishResponse);
+
+  // Audit the first `num_samples` consecutive epoch transitions
+  // (0→1, 1→2, …) and return per-sample timings + audit-proof sizes.
+  // Bench-only RPC: lets remote-coord clients populate `audit_vs_fill`
+  // without holding an in-process `ShardedAegon` or shipping verifier
+  // params over the wire. The coord walks `verify_sharded_invariance`
+  // using its own cached commits + verifier context; the bench just
+  // records the times.
+  rpc AuditChain(AuditChainRequest) returns (AuditChainResponse);
+}
+
+message LookupLabelRequest {
+  // Raw label bytes — the same bytes that were used at publish time.
+  // The coordinator hashes them locally via the configured HashSuite
+  // and walks `H(ctr, label)` to recover the open-addressing trail.
+  bytes label = 1;
+}
+
+message LookupLabelResponse {
+  // Canonical-serialized LabelSlot — the canonical (shard_id,
+  // slot_bits) the label is placed at. The client should cache this
+  // after verifying the proof, and pass it back as `slot` in every
+  // subsequent `LookupValue` request.
+  bytes slot = 1;
+  // Canonical-serialized ShardedLabelProof — open-addressing trail
+  // of probe openings against the current epoch's per-shard
+  // index_commitment.
+  bytes proof = 2;
+  // Server-side processing time for this RPC, in microseconds.
+  // Measured from handler entry to response construction; includes
+  // queue-wait inside the server's tokio runtime when overloaded.
+  // Used by benches to report load-induced latency without
+  // contamination from client-side network/serialization overhead.
+  uint64 server_processing_micros = 3;
+}
+
+message LookupValueRequest {
+  // Canonical-serialized LabelSlot the client cached from a prior
+  // (verified) `LookupLabel` call. The coordinator opens value_poly
+  // at this slot on the relevant shard.
+  bytes slot = 1;
+}
+
+message LookupValueResponse {
+  // Canonical-serialized ShardedValueProof — value-poly opening +
+  // merkle anchor for the slot's shard against the current epoch.
+  bytes proof = 1;
+  // Raw value bytes, fetched from the coordinator's KV side channel.
+  // Empty when the coordinator was configured with `DbSource::None`
+  // (in-process / test mode) — the client is expected to obtain the
+  // value bytes some other way and verify the proof's `evaluation`
+  // matches `H_F(value)` themselves.
+  bytes value = 2;
+  uint64 server_processing_micros = 3;
+}
+
+message LookupValueChainRequest {
+  // Raw label bytes — same as LookupLabelRequest.label.
+  bytes label = 1;
+}
+
+message LookupValueChainResponse {
+  // Canonical-serialized LabelSlot. Same payload as
+  // LookupLabelResponse.slot — the client caches it for subsequent
+  // value-only calls (the chain RPC is meant for "I want everything
+  // about this label right now"; once cached, subsequent value-only
+  // refreshes can still use the plain LookupValue with the cached
+  // slot).
+  bytes slot = 1;
+  // Canonical-serialized ShardedLabelProofTwoLayer — the H_shard /
+  // H_slot probe trail proving residency. Same payload as
+  // LookupLabelResponse.proof.
+  bytes label_proof = 2;
+  // Canonical-serialized ShardedValueProof — the value-poly opening
+  // at the same slot. Same payload as LookupValueResponse.proof.
+  bytes value_proof = 3;
+  // Raw value bytes; same semantics as LookupValueResponse.value
+  // (empty when DbSource::None or when the coord has no KV index by
+  // slot).
+  bytes value = 4;
+  // Total handler wall-clock micros (label probe + value open). The
+  // benches sum this directly instead of having to add two server
+  // micros across two RPCs.
+  uint64 server_processing_micros = 5;
+}
+
+message CommitmentResponse {
+  // Canonical-serialized ShardedEpochCommitment — the current
+  // bulletin-board commitment the client should anchor verifications
+  // against. Includes the cross-shard merkle root.
+  bytes commitment = 1;
+  uint64 server_processing_micros = 2;
+  // Ed25519 VRF public key (32 bytes, compressed Edwards Y) when the
+  // deployment uses ECVRF-EDWARDS25519-SHA512-TAI for index
+  // assignment. Empty when the deployment runs with SHA-256 (in
+  // which case `vrf_proof` on every `ShardedProbe` is also empty).
+  //
+  // Clients should construct a `VrfVerifier` from this key on first
+  // CurrentCommitment call and reuse it for the life of the
+  // connection; the key is rotated only on a full deployment
+  // re-bootstrap, so caching is safe.
+  bytes vrf_pubkey = 3;
+}
+
+message LookupHistoryRequest {
+  // Raw label bytes — the same identifier used at publish time.
+  bytes label = 1;
+}
+
+message LookupHistoryResponse {
+  // Canonical-serialized ShardedValueHistory. Carries the label bytes
+  // plus up to HISTORY_WINDOW entries (most-recent first). Each entry
+  // is a full self-contained bundle (pre/post shard commitments, both
+  // merkle paths, three openings, value bytes) — the client verifies
+  // each via `verify_lookup_history` and is then responsible for
+  // cross-checking the returned (prev_root, post_root) pairs against
+  // its trusted view of historical bulletin-board roots.
+  bytes history = 1;
+  uint64 server_processing_micros = 2;
+}
+
+message LookupLabelHistoryRequest {
+  bytes label = 1;
+}
+
+message LookupLabelHistoryResponse {
+  // Canonical-serialized ShardedLabelHistory. Carries the label
+  // bytes, an optional placement record (present iff the label is
+  // known), and an optional freshness attestation (present iff
+  // placement is present). The client verifies via
+  // `verify_lookup_label_history` and cross-checks the returned
+  // (placement_root, live_root) against its trusted bulletin-board
+  // view for the placement epoch and the live epoch.
+  bytes history = 1;
+  uint64 server_processing_micros = 2;
+}
+
+message Empty {}
+
+message PublishRequest {
+  // Canonical-serialized `Vec<(Label, Value)>` (arkworks
+  // CanonicalSerialize on `Vec<(Vec<u8>, Vec<u8>)>` — same wire
+  // format the shard service's `PublishBatchRequest.batch_bytes`
+  // uses).
+  bytes updates_bytes = 1;
+}
+
+message PublishResponse {
+  // Canonical-serialized `ShardedEpochCommitment<E, P>` for the new
+  // epoch (the one this publish just created).
+  bytes commitment = 1;
+  uint64 server_processing_micros = 2;
+  // Commit-class uncompressed byte counts, summed across shards.
+  // Recorded for `publish_bench` so the bench client can populate the
+  // publish_vs_batch plot in remote-coord mode (where it has no
+  // in-process `ShardedEpochCommitment` to introspect locally). The
+  // four per-class fields sum to less than `total_commitment_bytes`
+  // because the latter also covers the cross-shard envelope (epoch,
+  // n_shards, merkle anchors) on top of the per-shard commits.
+  uint64 index_commitment_bytes = 3;
+  uint64 value_commitment_bytes = 4;
+  uint64 rand_index_commitment_bytes = 5;
+  uint64 rand_value_commitment_bytes = 6;
+  uint64 total_commitment_bytes = 7;
+}
+
+message AuditChainRequest {
+  // Number of consecutive epoch transitions to time, starting from
+  // (epoch 0 → epoch 1). Clamped to current_epoch on the server side
+  // so callers can pass `audit_samples` directly without worrying
+  // about the current chain length.
+  uint32 num_samples = 1;
+}
+
+message AuditChainResponse {
+  repeated AuditSample samples = 1;
+}
+
+message AuditSample {
+  uint64 prev_epoch = 1;
+  uint64 next_epoch = 2;
+  // Cached-commit fetch on the coord (dictionary lookup over the
+  // epoch_commits cache, no I/O at steady state). Modeled after the
+  // in-process `epoch_commitment(epoch)` accessor. Nanoseconds for
+  // schema parity with the in-process bench's `server_fetch_ns`.
+  uint64 server_fetch_nanos = 3;
+  // `verify_sharded_invariance` on the coord using its in-process
+  // verifier context — same code path an external auditor would run.
+  // Nanoseconds, see above.
+  uint64 verify_nanos = 4;
+  // Uncompressed `ShardedEpochCommitment` size for `next_epoch`. This
+  // is what the auditor would receive from the bulletin board; size
+  // is invariant in epoch but varies in n_shards.
+  uint64 audit_proof_bytes = 5;
+}

@@ -1,0 +1,119 @@
+{
+  "params": {
+    "mode": "local",
+    "n_shards": 1,
+    "log_n_shards": 0,
+    "shard_log_capacity": 22,
+    "true_log_capacity": 20,
+    "kzh_k": 7,
+    "private": true,
+    "samples_per_level": 20,
+    "publish_batch_size": 1024,
+    "publish_batch_sizes": [2, 4, 8, 16, 32, 64],
+    "publish_samples_per_batch": 3,
+    "audit_samples": 5,
+    "initial_prefill_count": 0,
+    "prefill_seed": 1,
+    "endpoints": [],
+    "preload_counts": [0],
+    "fill_percents": [0]
+  },
+  "setup_ms": 1180.7078,
+  "initial_prefill_ms": 0.0000,
+  "levels": [
+    {
+      "preload_count": 0,
+      "current_count_after_topup": 0,
+      "preload_publish_ms_total": 0.0000,
+      "rss_kb": 299416,
+      "lookup": {
+        "sample_count": 0,
+        "samples": [
+
+        ]
+      },
+      "publish_bench": {
+        "batches": [
+          {
+            "batch_size": 2,
+            "samples_ms": [3.4359, 3.1746, 3.0102],
+            "fastest_ms": 3.0102,
+            "slowest_ms": 3.4359,
+            "median_ms": 3.1746,
+            "mean_ms": 3.2069,
+            "index_commitment_bytes": 72,
+            "value_commitment_bytes": 72,
+            "rand_index_commitment_bytes": 72,
+            "rand_value_commitment_bytes": 72,
+            "total_commit_bytes": 344
+          },
+          {
+            "batch_size": 4,
+            "samples_ms": [4.5947, 4.6554, 4.6765],
+            "fastest_ms": 4.5947,
+            "slowest_ms": 4.6765,
+            "median_ms": 4.6554,
+            "mean_ms": 4.6422,
+            "index_commitment_bytes": 72,
+            "value_commitment_bytes": 72,
+            "rand_index_commitment_bytes": 72,
+            "rand_value_commitment_bytes": 72,
+            "total_commit_bytes": 344
+          },
+          {
+            "batch_size": 8,
+            "samples_ms": [5.6506, 5.1248, 5.2997],
+            "fastest_ms": 5.1248,
+            "slowest_ms": 5.6506,
+            "median_ms": 5.2997,
+            "mean_ms": 5.3584,
+            "index_commitment_bytes": 72,
+            "value_commitment_bytes": 72,
+            "rand_index_commitment_bytes": 72,
+            "rand_value_commitment_bytes": 72,
+            "total_commit_bytes": 344
+          },
+          {
+            "batch_size": 16,
+            "samples_ms": [7.7468, 8.1482, 8.1056],
+            "fastest_ms": 7.7468,
+            "slowest_ms": 8.1482,
+            "median_ms": 8.1056,
+            "mean_ms": 8.0002,
+            "index_commitment_bytes": 72,
+            "value_commitment_bytes": 72,
+            "rand_index_commitment_bytes": 72,
+            "rand_value_commitment_bytes": 72,
+            "total_commit_bytes": 344
+          },
+          {
+            "batch_size": 32,
+            "samples_ms": [13.8431, 13.3381, 13.4415],
+            "fastest_ms": 13.3381,
+            "slowest_ms": 13.8431,
+            "median_ms": 13.4415,
+            "mean_ms": 13.5409,
+            "index_commitment_bytes": 72,
+            "value_commitment_bytes": 72,
+            "rand_index_commitment_bytes": 72,
+            "rand_value_commitment_bytes": 72,
+            "total_commit_bytes": 344
+          },
+          {
+            "batch_size": 64,
+            "samples_ms": [25.0832, 25.5192, 25.6683],
+            "fastest_ms": 25.0832,
+            "slowest_ms": 25.6683,
+            "median_ms": 25.5192,
+            "mean_ms": 25.4235,
+            "index_commitment_bytes": 72,
+            "value_commitment_bytes": 72,
+            "rand_index_commitment_bytes": 72,
+            "rand_value_commitment_bytes": 72,
+            "total_commit_bytes": 344
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -1,0 +1,18 @@
+[2026-05-19T23:53:50+0000] host: instance-20260503-131121
+[2026-05-19T23:53:50+0000] PROJECT=jbonneau-mwalfish-9a0c  N_SHARDS=2  SHARD_LOG_CAPACITY=27  KZH_K=9
+[2026-05-19T23:53:50+0000] PUBLISH_BATCH_SIZES=64,128,256,512,1024,2048
+[2026-05-19T23:53:50+0000] results dir: /home/alrshir/aegon/bench-results
+[2026-05-19T23:53:50+0000] ==== medium-publish-bench START ====
+[2026-05-19T23:58:06+0000] ==== medium-publish-bench FAILED rc=1 after 256s ====
+[2026-05-19T23:58:06+0000] WARN: publish-bench failed; continuing with lookup-bench
+[2026-05-19T23:58:06+0000] ==== medium-lookup-bench START ====
+[2026-05-20T00:02:21+0000] ==== medium-lookup-bench FAILED rc=1 after 255s ====
+[2026-05-20T00:02:21+0000] WARN: lookup-bench failed; tearing down anyway
+[2026-05-20T00:02:21+0000] ==== medium-down START ====
+[2026-05-20T00:04:48+0000] ==== medium-down OK in 147s ====
+[2026-05-20T00:04:48+0000] ==== MEDIUM CLUSTER DONE ====
+[2026-05-20T00:04:48+0000] JSON outputs:
+/home/alrshir/aegon/bench-results/_backup-pre-nfs-refactor/lookup/medium_fill0.json
+/home/alrshir/aegon/bench-results/_backup-pre-nfs-refactor/publish/medium.json
+/home/alrshir/aegon/bench-results/_backup-pre-nfs-refactor/setup/medium.json
+/home/alrshir/aegon/bench-results/setup/medium_cluster.json

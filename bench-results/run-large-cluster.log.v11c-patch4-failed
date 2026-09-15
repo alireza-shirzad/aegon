@@ -1,0 +1,3451 @@
+[v11c] Tue Jun 23 02:19:14 UTC 2026 restart-shards (clean state at epoch=0)
+[02:19:15] [aegon-bench-coord] wiping /opt/aegon/coord-db (clean RocksDB for the run)
+WARNING: 
+
+To increase the performance of the tunnel, consider installing NumPy. For instructions,
+please see https://cloud.google.com/iap/docs/using-tcp-forwarding#increasing_the_tcp_upload_bandwidth
+
+[02:19:18] pre-resolving 1 masking server endpoint(s)...
+[02:19:20] masking endpoints: http://10.138.15.221:50061
+[02:19:20] [aegon-bench-shard-0] starting shard server (shard_id=0, --prefill-count 0)
+[02:19:20] [aegon-bench-shard-1] starting shard server (shard_id=1, --prefill-count 0)
+[02:19:20] [aegon-bench-shard-2] starting shard server (shard_id=2, --prefill-count 0)
+[02:19:20] [aegon-bench-shard-3] starting shard server (shard_id=3, --prefill-count 0)
+[02:19:20] [aegon-bench-shard-4] starting shard server (shard_id=4, --prefill-count 0)
+[02:19:20] [aegon-bench-shard-5] starting shard server (shard_id=5, --prefill-count 0)
+[02:19:20] [aegon-bench-shard-6] starting shard server (shard_id=6, --prefill-count 0)
+[02:19:20] [aegon-bench-shard-7] starting shard server (shard_id=7, --prefill-count 0)
+[02:19:20] [aegon-bench-shard-8] starting shard server (shard_id=8, --prefill-count 0)
+[02:19:20] [aegon-bench-shard-9] starting shard server (shard_id=9, --prefill-count 0)
+[02:19:20] [aegon-bench-shard-10] starting shard server (shard_id=10, --prefill-count 0)
+[02:19:20] [aegon-bench-shard-11] starting shard server (shard_id=11, --prefill-count 0)
+[02:19:20] [aegon-bench-shard-12] starting shard server (shard_id=12, --prefill-count 0)
+[02:19:20] [aegon-bench-shard-13] starting shard server (shard_id=13, --prefill-count 0)
+[02:19:20] [aegon-bench-shard-14] starting shard server (shard_id=14, --prefill-count 0)
+[02:19:20] [aegon-bench-shard-15] starting shard server (shard_id=15, --prefill-count 0)
+[02:19:20] [aegon-bench-shard-16] starting shard server (shard_id=16, --prefill-count 0)
+[02:19:20] [aegon-bench-shard-17] starting shard server (shard_id=17, --prefill-count 0)
+[02:19:20] [aegon-bench-shard-18] starting shard server (shard_id=18, --prefill-count 0)
+[02:19:20] [aegon-bench-shard-19] starting shard server (shard_id=19, --prefill-count 0)
+[02:19:20] [aegon-bench-shard-20] starting shard server (shard_id=20, --prefill-count 0)
+[02:19:20] [aegon-bench-shard-21] starting shard server (shard_id=21, --prefill-count 0)
+[02:19:20] [aegon-bench-shard-22] starting shard server (shard_id=22, --prefill-count 0)
+[02:19:20] [aegon-bench-shard-23] starting shard server (shard_id=23, --prefill-count 0)
+[02:19:20] [aegon-bench-shard-24] starting shard server (shard_id=24, --prefill-count 0)
+[02:19:20] [aegon-bench-shard-25] starting shard server (shard_id=25, --prefill-count 0)
+[02:19:20] [aegon-bench-shard-26] starting shard server (shard_id=26, --prefill-count 0)
+[02:19:20] [aegon-bench-shard-27] starting shard server (shard_id=27, --prefill-count 0)
+[02:19:20] [aegon-bench-shard-28] starting shard server (shard_id=28, --prefill-count 0)
+[02:19:20] [aegon-bench-shard-29] starting shard server (shard_id=29, --prefill-count 0)
+[02:19:20] [aegon-bench-shard-30] starting shard server (shard_id=30, --prefill-count 0)
+[02:19:20] [aegon-bench-shard-31] starting shard server (shard_id=31, --prefill-count 0)
+[02:19:39] [aegon-bench-shard-10] spawn hit known_hosts race (attempt 1/4); retrying in 5s
+[02:24:20] [aegon-bench-shard-9] spawn OK; polling for :50051
+[02:24:20] [aegon-bench-shard-1] spawn OK; polling for :50051
+[02:24:20] [aegon-bench-shard-13] spawn OK; polling for :50051
+[02:24:20] [aegon-bench-shard-16] spawn OK; polling for :50051
+[02:24:20] [aegon-bench-shard-4] spawn OK; polling for :50051
+[02:24:20] [aegon-bench-shard-7] spawn OK; polling for :50051
+[02:24:20] [aegon-bench-shard-12] spawn OK; polling for :50051
+[02:24:20] [aegon-bench-shard-0] spawn OK; polling for :50051
+[02:24:21] [aegon-bench-shard-3] spawn OK; polling for :50051
+[02:24:21] [aegon-bench-shard-11] spawn OK; polling for :50051
+[02:24:21] [aegon-bench-shard-5] spawn OK; polling for :50051
+[02:24:21] [aegon-bench-shard-6] spawn OK; polling for :50051
+[02:24:21] [aegon-bench-shard-14] spawn OK; polling for :50051
+[02:24:21] [aegon-bench-shard-2] spawn OK; polling for :50051
+[02:24:21] [aegon-bench-shard-17] spawn OK; polling for :50051
+[02:24:21] [aegon-bench-shard-25] spawn OK; polling for :50051
+[02:24:21] [aegon-bench-shard-8] spawn OK; polling for :50051
+[02:24:21] [aegon-bench-shard-18] spawn OK; polling for :50051
+[02:24:21] [aegon-bench-shard-15] spawn OK; polling for :50051
+[02:24:21] [aegon-bench-shard-26] spawn OK; polling for :50051
+[02:24:21] [aegon-bench-shard-24] spawn OK; polling for :50051
+[02:24:21] [aegon-bench-shard-23] spawn OK; polling for :50051
+[02:24:21] [aegon-bench-shard-22] spawn OK; polling for :50051
+[02:24:21] [aegon-bench-shard-29] spawn OK; polling for :50051
+[02:24:21] [aegon-bench-shard-21] spawn OK; polling for :50051
+[02:24:21] [aegon-bench-shard-19] spawn OK; polling for :50051
+[02:24:21] [aegon-bench-shard-31] spawn OK; polling for :50051
+[02:24:21] [aegon-bench-shard-30] spawn OK; polling for :50051
+[02:24:21] [aegon-bench-shard-27] spawn OK; polling for :50051
+[02:24:21] [aegon-bench-shard-28] spawn OK; polling for :50051
+[02:24:21] [aegon-bench-shard-20] spawn OK; polling for :50051
+[02:24:39] [aegon-bench-shard-25] READY (listening on :50051)
+[02:24:39] [aegon-bench-shard-25] start done
+[02:24:39] [aegon-bench-shard-8] READY (listening on :50051)
+[02:24:40] [aegon-bench-shard-8] start done
+[02:24:40] [aegon-bench-shard-30] READY (listening on :50051)
+[02:24:40] [aegon-bench-shard-30] start done
+[02:24:40] [aegon-bench-shard-32] starting shard server (shard_id=32, --prefill-count 0)
+[02:24:40] [aegon-bench-shard-33] starting shard server (shard_id=33, --prefill-count 0)
+[02:24:40] [aegon-bench-shard-34] starting shard server (shard_id=34, --prefill-count 0)
+[02:24:40] [aegon-bench-shard-24] READY (listening on :50051)
+[02:24:40] [aegon-bench-shard-24] start done
+[02:24:40] [aegon-bench-shard-31] READY (listening on :50051)
+[02:24:40] [aegon-bench-shard-31] start done
+[02:24:40] [aegon-bench-shard-15] READY (listening on :50051)
+[02:24:40] [aegon-bench-shard-15] start done
+[02:24:40] [aegon-bench-shard-29] READY (listening on :50051)
+[02:24:40] [aegon-bench-shard-29] start done
+[02:24:40] [aegon-bench-shard-20] READY (listening on :50051)
+[02:24:40] [aegon-bench-shard-20] start done
+[02:24:40] [aegon-bench-shard-28] READY (listening on :50051)
+[02:24:40] [aegon-bench-shard-28] start done
+[02:24:41] [aegon-bench-shard-35] starting shard server (shard_id=35, --prefill-count 0)
+[02:24:41] [aegon-bench-shard-36] starting shard server (shard_id=36, --prefill-count 0)
+[02:24:41] [aegon-bench-shard-37] starting shard server (shard_id=37, --prefill-count 0)
+[02:24:41] [aegon-bench-shard-38] starting shard server (shard_id=38, --prefill-count 0)
+[02:24:41] [aegon-bench-shard-39] starting shard server (shard_id=39, --prefill-count 0)
+[02:24:41] [aegon-bench-shard-40] starting shard server (shard_id=40, --prefill-count 0)
+[02:24:45] [aegon-bench-shard-10] spawn OK; polling for :50051
+[02:24:48] [aegon-bench-shard-10] READY (listening on :50051)
+[02:24:48] [aegon-bench-shard-10] start done
+[02:24:49] [aegon-bench-shard-41] starting shard server (shard_id=41, --prefill-count 0)
+[02:25:02] [aegon-bench-shard-13] READY (listening on :50051)
+[02:25:02] [aegon-bench-shard-13] start done
+[02:25:02] [aegon-bench-shard-5] READY (listening on :50051)
+[02:25:02] [aegon-bench-shard-5] start done
+[02:25:02] [aegon-bench-shard-3] READY (listening on :50051)
+[02:25:02] [aegon-bench-shard-3] start done
+[02:25:03] [aegon-bench-shard-11] READY (listening on :50051)
+[02:25:03] [aegon-bench-shard-11] start done
+[02:25:03] [aegon-bench-shard-42] starting shard server (shard_id=42, --prefill-count 0)
+[02:25:03] [aegon-bench-shard-43] starting shard server (shard_id=43, --prefill-count 0)
+[02:25:03] [aegon-bench-shard-44] starting shard server (shard_id=44, --prefill-count 0)
+[02:25:03] [aegon-bench-shard-45] starting shard server (shard_id=45, --prefill-count 0)
+[02:25:05] [aegon-bench-shard-16] READY (listening on :50051)
+[02:25:05] [aegon-bench-shard-16] start done
+[02:25:05] [aegon-bench-shard-46] starting shard server (shard_id=46, --prefill-count 0)
+[02:25:05] [aegon-bench-shard-7] READY (listening on :50051)
+[02:25:05] [aegon-bench-shard-7] start done
+[02:25:05] [aegon-bench-shard-1] READY (listening on :50051)
+[02:25:05] [aegon-bench-shard-1] start done
+[02:25:06] [aegon-bench-shard-47] starting shard server (shard_id=47, --prefill-count 0)
+[02:25:06] [aegon-bench-shard-48] starting shard server (shard_id=48, --prefill-count 0)
+[02:25:08] [aegon-bench-shard-12] READY (listening on :50051)
+[02:25:08] [aegon-bench-shard-12] start done
+[02:25:09] [aegon-bench-shard-49] starting shard server (shard_id=49, --prefill-count 0)
+[02:25:10] [aegon-bench-shard-18] READY (listening on :50051)
+[02:25:10] [aegon-bench-shard-18] start done
+[02:25:11] [aegon-bench-shard-50] starting shard server (shard_id=50, --prefill-count 0)
+[02:25:13] [aegon-bench-shard-27] READY (listening on :50051)
+[02:25:13] [aegon-bench-shard-27] start done
+[02:25:13] [aegon-bench-shard-6] READY (listening on :50051)
+[02:25:13] [aegon-bench-shard-6] start done
+[02:25:13] [aegon-bench-shard-23] READY (listening on :50051)
+[02:25:13] [aegon-bench-shard-23] start done
+[02:25:13] [aegon-bench-shard-0] READY (listening on :50051)
+[02:25:13] [aegon-bench-shard-0] start done
+[02:25:13] [aegon-bench-shard-9] READY (listening on :50051)
+[02:25:13] [aegon-bench-shard-9] start done
+[02:25:13] [aegon-bench-shard-51] starting shard server (shard_id=51, --prefill-count 0)
+[02:25:13] [aegon-bench-shard-52] starting shard server (shard_id=52, --prefill-count 0)
+[02:25:13] [aegon-bench-shard-53] starting shard server (shard_id=53, --prefill-count 0)
+[02:25:13] [aegon-bench-shard-54] starting shard server (shard_id=54, --prefill-count 0)
+[02:25:13] [aegon-bench-shard-55] starting shard server (shard_id=55, --prefill-count 0)
+[02:25:13] [aegon-bench-shard-2] READY (listening on :50051)
+[02:25:13] [aegon-bench-shard-2] start done
+[02:25:13] [aegon-bench-shard-19] READY (listening on :50051)
+[02:25:13] [aegon-bench-shard-19] start done
+[02:25:14] [aegon-bench-shard-56] starting shard server (shard_id=56, --prefill-count 0)
+[02:25:14] [aegon-bench-shard-57] starting shard server (shard_id=57, --prefill-count 0)
+[02:25:16] [aegon-bench-shard-51] spawn hit known_hosts race (attempt 1/4); retrying in 5s
+[02:25:45] [aegon-bench-shard-26] READY (listening on :50051)
+[02:25:45] [aegon-bench-shard-26] start done
+[02:25:45] [aegon-bench-shard-58] starting shard server (shard_id=58, --prefill-count 0)
+[02:25:45] [aegon-bench-shard-17] READY (listening on :50051)
+[02:25:45] [aegon-bench-shard-17] start done
+[02:25:46] [aegon-bench-shard-22] READY (listening on :50051)
+[02:25:46] [aegon-bench-shard-22] start done
+[02:25:46] [aegon-bench-shard-4] READY (listening on :50051)
+[02:25:46] [aegon-bench-shard-4] start done
+[02:25:46] [aegon-bench-shard-21] READY (listening on :50051)
+[02:25:46] [aegon-bench-shard-21] start done
+[02:25:46] [aegon-bench-shard-14] READY (listening on :50051)
+[02:25:46] [aegon-bench-shard-14] start done
+[02:25:46] [aegon-bench-shard-59] starting shard server (shard_id=59, --prefill-count 0)
+[02:25:46] [aegon-bench-shard-60] starting shard server (shard_id=60, --prefill-count 0)
+[02:25:46] [aegon-bench-shard-61] starting shard server (shard_id=61, --prefill-count 0)
+[02:25:46] [aegon-bench-shard-62] starting shard server (shard_id=62, --prefill-count 0)
+[02:25:46] [aegon-bench-shard-63] starting shard server (shard_id=63, --prefill-count 0)
+[02:29:40] [aegon-bench-shard-33] spawn OK; polling for :50051
+[02:29:40] [aegon-bench-shard-34] spawn OK; polling for :50051
+[02:29:40] [aegon-bench-shard-32] spawn OK; polling for :50051
+[02:29:41] [aegon-bench-shard-37] spawn OK; polling for :50051
+[02:29:41] [aegon-bench-shard-35] spawn OK; polling for :50051
+[02:29:41] [aegon-bench-shard-36] spawn OK; polling for :50051
+[02:29:41] [aegon-bench-shard-40] spawn OK; polling for :50051
+[02:29:41] [aegon-bench-shard-39] spawn OK; polling for :50051
+[02:29:41] [aegon-bench-shard-38] spawn OK; polling for :50051
+[02:29:44] [aegon-bench-shard-34] READY (listening on :50051)
+[02:29:44] [aegon-bench-shard-34] start done
+[02:29:44] [aegon-bench-shard-33] READY (listening on :50051)
+[02:29:44] [aegon-bench-shard-33] start done
+[02:29:44] [aegon-bench-shard-32] READY (listening on :50051)
+[02:29:44] [aegon-bench-shard-32] start done
+[02:29:44] [aegon-bench-shard-64] starting shard server (shard_id=64, --prefill-count 0)
+[02:29:44] [aegon-bench-shard-65] starting shard server (shard_id=65, --prefill-count 0)
+[02:29:44] [aegon-bench-shard-66] starting shard server (shard_id=66, --prefill-count 0)
+[02:29:45] [aegon-bench-shard-37] READY (listening on :50051)
+[02:29:45] [aegon-bench-shard-37] start done
+[02:29:45] [aegon-bench-shard-40] READY (listening on :50051)
+[02:29:45] [aegon-bench-shard-40] start done
+[02:29:45] [aegon-bench-shard-35] READY (listening on :50051)
+[02:29:45] [aegon-bench-shard-35] start done
+[02:29:45] [aegon-bench-shard-36] READY (listening on :50051)
+[02:29:45] [aegon-bench-shard-36] start done
+[02:29:45] [aegon-bench-shard-39] READY (listening on :50051)
+[02:29:45] [aegon-bench-shard-39] start done
+[02:29:45] [aegon-bench-shard-38] READY (listening on :50051)
+[02:29:45] [aegon-bench-shard-38] start done
+[02:29:45] [aegon-bench-shard-67] starting shard server (shard_id=67, --prefill-count 0)
+[02:29:45] [aegon-bench-shard-68] starting shard server (shard_id=68, --prefill-count 0)
+[02:29:45] [aegon-bench-shard-69] starting shard server (shard_id=69, --prefill-count 0)
+[02:29:45] [aegon-bench-shard-70] starting shard server (shard_id=70, --prefill-count 0)
+[02:29:45] [aegon-bench-shard-71] starting shard server (shard_id=71, --prefill-count 0)
+[02:29:45] [aegon-bench-shard-72] starting shard server (shard_id=72, --prefill-count 0)
+[02:29:49] [aegon-bench-shard-41] spawn OK; polling for :50051
+[02:29:53] [aegon-bench-shard-41] READY (listening on :50051)
+[02:29:53] [aegon-bench-shard-41] start done
+[02:29:54] [aegon-bench-shard-73] starting shard server (shard_id=73, --prefill-count 0)
+[02:30:03] [aegon-bench-shard-43] spawn OK; polling for :50051
+[02:30:03] [aegon-bench-shard-42] spawn OK; polling for :50051
+[02:30:03] [aegon-bench-shard-44] spawn OK; polling for :50051
+[02:30:03] [aegon-bench-shard-45] spawn OK; polling for :50051
+[02:30:05] [aegon-bench-shard-46] spawn OK; polling for :50051
+[02:30:06] [aegon-bench-shard-47] spawn OK; polling for :50051
+[02:30:06] [aegon-bench-shard-48] spawn OK; polling for :50051
+[02:30:07] [aegon-bench-shard-42] READY (listening on :50051)
+[02:30:07] [aegon-bench-shard-45] READY (listening on :50051)
+[02:30:07] [aegon-bench-shard-42] start done
+[02:30:07] [aegon-bench-shard-45] start done
+[02:30:07] [aegon-bench-shard-43] READY (listening on :50051)
+[02:30:07] [aegon-bench-shard-43] start done
+[02:30:08] [aegon-bench-shard-74] starting shard server (shard_id=74, --prefill-count 0)
+[02:30:08] [aegon-bench-shard-75] starting shard server (shard_id=75, --prefill-count 0)
+[02:30:08] [aegon-bench-shard-76] starting shard server (shard_id=76, --prefill-count 0)
+[02:30:09] [aegon-bench-shard-46] READY (listening on :50051)
+[02:30:09] [aegon-bench-shard-46] start done
+[02:30:09] [aegon-bench-shard-49] spawn OK; polling for :50051
+[02:30:10] [aegon-bench-shard-77] starting shard server (shard_id=77, --prefill-count 0)
+[02:30:10] [aegon-bench-shard-47] READY (listening on :50051)
+[02:30:10] [aegon-bench-shard-47] start done
+[02:30:10] [aegon-bench-shard-48] READY (listening on :50051)
+[02:30:10] [aegon-bench-shard-48] start done
+[02:30:11] [aegon-bench-shard-78] starting shard server (shard_id=78, --prefill-count 0)
+[02:30:11] [aegon-bench-shard-79] starting shard server (shard_id=79, --prefill-count 0)
+[02:30:11] [aegon-bench-shard-50] spawn OK; polling for :50051
+[02:30:13] [aegon-bench-shard-49] READY (listening on :50051)
+[02:30:13] [aegon-bench-shard-49] start done
+[02:30:13] [aegon-bench-shard-53] spawn OK; polling for :50051
+[02:30:13] [aegon-bench-shard-52] spawn OK; polling for :50051
+[02:30:13] [aegon-bench-shard-54] spawn OK; polling for :50051
+[02:30:13] [aegon-bench-shard-55] spawn OK; polling for :50051
+[02:30:14] [aegon-bench-shard-80] starting shard server (shard_id=80, --prefill-count 0)
+[02:30:14] [aegon-bench-shard-56] spawn OK; polling for :50051
+[02:30:15] [aegon-bench-shard-57] spawn OK; polling for :50051
+[02:30:15] [aegon-bench-shard-50] READY (listening on :50051)
+[02:30:15] [aegon-bench-shard-50] start done
+[02:30:16] [aegon-bench-shard-81] starting shard server (shard_id=81, --prefill-count 0)
+[02:30:17] [aegon-bench-shard-53] READY (listening on :50051)
+[02:30:17] [aegon-bench-shard-53] start done
+[02:30:17] [aegon-bench-shard-54] READY (listening on :50051)
+[02:30:17] [aegon-bench-shard-54] start done
+[02:30:17] [aegon-bench-shard-55] READY (listening on :50051)
+[02:30:17] [aegon-bench-shard-55] start done
+[02:30:17] [aegon-bench-shard-52] READY (listening on :50051)
+[02:30:17] [aegon-bench-shard-52] start done
+[02:30:18] [aegon-bench-shard-82] starting shard server (shard_id=82, --prefill-count 0)
+[02:30:18] [aegon-bench-shard-83] starting shard server (shard_id=83, --prefill-count 0)
+[02:30:18] [aegon-bench-shard-84] starting shard server (shard_id=84, --prefill-count 0)
+[02:30:18] [aegon-bench-shard-85] starting shard server (shard_id=85, --prefill-count 0)
+[02:30:18] [aegon-bench-shard-56] READY (listening on :50051)
+[02:30:18] [aegon-bench-shard-56] start done
+[02:30:18] [aegon-bench-shard-57] READY (listening on :50051)
+[02:30:18] [aegon-bench-shard-57] start done
+[02:30:19] [aegon-bench-shard-86] starting shard server (shard_id=86, --prefill-count 0)
+[02:30:19] [aegon-bench-shard-87] starting shard server (shard_id=87, --prefill-count 0)
+[02:30:21] [aegon-bench-shard-51] spawn OK; polling for :50051
+[02:30:25] [aegon-bench-shard-51] READY (listening on :50051)
+[02:30:25] [aegon-bench-shard-51] start done
+[02:30:25] [aegon-bench-shard-88] starting shard server (shard_id=88, --prefill-count 0)
+[02:30:40] [aegon-bench-shard-44] READY (listening on :50051)
+[02:30:40] [aegon-bench-shard-44] start done
+[02:30:40] [aegon-bench-shard-89] starting shard server (shard_id=89, --prefill-count 0)
+[02:30:46] [aegon-bench-shard-58] spawn OK; polling for :50051
+[02:30:47] [aegon-bench-shard-59] spawn OK; polling for :50051
+[02:30:47] [aegon-bench-shard-63] spawn OK; polling for :50051
+[02:30:47] [aegon-bench-shard-60] spawn OK; polling for :50051
+[02:30:47] [aegon-bench-shard-61] spawn OK; polling for :50051
+[02:30:47] [aegon-bench-shard-62] spawn OK; polling for :50051
+[02:30:49] [aegon-bench-shard-58] READY (listening on :50051)
+[02:30:49] [aegon-bench-shard-58] start done
+[02:30:50] [aegon-bench-shard-59] READY (listening on :50051)
+[02:30:50] [aegon-bench-shard-59] start done
+[02:30:50] [aegon-bench-shard-90] starting shard server (shard_id=90, --prefill-count 0)
+[02:30:50] [aegon-bench-shard-91] starting shard server (shard_id=91, --prefill-count 0)
+[02:30:50] [aegon-bench-shard-63] READY (listening on :50051)
+[02:30:50] [aegon-bench-shard-60] READY (listening on :50051)
+[02:30:50] [aegon-bench-shard-63] start done
+[02:30:50] [aegon-bench-shard-60] start done
+[02:30:50] [aegon-bench-shard-61] READY (listening on :50051)
+[02:30:50] [aegon-bench-shard-62] READY (listening on :50051)
+[02:30:50] [aegon-bench-shard-61] start done
+[02:30:50] [aegon-bench-shard-62] start done
+[02:30:51] [aegon-bench-shard-92] starting shard server (shard_id=92, --prefill-count 0)
+[02:30:51] [aegon-bench-shard-93] starting shard server (shard_id=93, --prefill-count 0)
+[02:30:51] [aegon-bench-shard-94] starting shard server (shard_id=94, --prefill-count 0)
+[02:30:51] [aegon-bench-shard-95] starting shard server (shard_id=95, --prefill-count 0)
+[02:34:45] [aegon-bench-shard-64] spawn OK; polling for :50051
+[02:34:45] [aegon-bench-shard-65] spawn OK; polling for :50051
+[02:34:45] [aegon-bench-shard-66] spawn OK; polling for :50051
+[02:34:46] [aegon-bench-shard-67] spawn OK; polling for :50051
+[02:34:46] [aegon-bench-shard-68] spawn OK; polling for :50051
+[02:34:46] [aegon-bench-shard-69] spawn OK; polling for :50051
+[02:34:46] [aegon-bench-shard-71] spawn OK; polling for :50051
+[02:34:46] [aegon-bench-shard-70] spawn OK; polling for :50051
+[02:34:46] [aegon-bench-shard-72] spawn OK; polling for :50051
+[02:34:48] [aegon-bench-shard-65] READY (listening on :50051)
+[02:34:48] [aegon-bench-shard-65] start done
+[02:34:48] [aegon-bench-shard-64] READY (listening on :50051)
+[02:34:48] [aegon-bench-shard-64] start done
+[02:34:49] [aegon-bench-shard-66] READY (listening on :50051)
+[02:34:49] [aegon-bench-shard-66] start done
+[02:34:49] [aegon-bench-shard-96] starting shard server (shard_id=96, --prefill-count 0)
+[02:34:49] [aegon-bench-shard-97] starting shard server (shard_id=97, --prefill-count 0)
+[02:34:49] [aegon-bench-shard-98] starting shard server (shard_id=98, --prefill-count 0)
+[02:34:49] [aegon-bench-shard-69] READY (listening on :50051)
+[02:34:49] [aegon-bench-shard-71] READY (listening on :50051)
+[02:34:49] [aegon-bench-shard-69] start done
+[02:34:49] [aegon-bench-shard-71] start done
+[02:34:50] [aegon-bench-shard-72] READY (listening on :50051)
+[02:34:50] [aegon-bench-shard-67] READY (listening on :50051)
+[02:34:50] [aegon-bench-shard-72] start done
+[02:34:50] [aegon-bench-shard-67] start done
+[02:34:50] [aegon-bench-shard-68] READY (listening on :50051)
+[02:34:50] [aegon-bench-shard-68] start done
+[02:34:50] [aegon-bench-shard-70] READY (listening on :50051)
+[02:34:50] [aegon-bench-shard-70] start done
+[02:34:50] [aegon-bench-shard-99] starting shard server (shard_id=99, --prefill-count 0)
+[02:34:50] [aegon-bench-shard-100] starting shard server (shard_id=100, --prefill-count 0)
+[02:34:50] [aegon-bench-shard-101] starting shard server (shard_id=101, --prefill-count 0)
+[02:34:50] [aegon-bench-shard-102] starting shard server (shard_id=102, --prefill-count 0)
+[02:34:50] [aegon-bench-shard-103] starting shard server (shard_id=103, --prefill-count 0)
+[02:34:50] [aegon-bench-shard-104] starting shard server (shard_id=104, --prefill-count 0)
+[02:34:54] [aegon-bench-shard-73] spawn OK; polling for :50051
+[02:34:57] [aegon-bench-shard-73] READY (listening on :50051)
+[02:34:57] [aegon-bench-shard-73] start done
+[02:34:58] [aegon-bench-shard-105] starting shard server (shard_id=105, --prefill-count 0)
+[02:35:08] [aegon-bench-shard-74] spawn OK; polling for :50051
+[02:35:08] [aegon-bench-shard-75] spawn OK; polling for :50051
+[02:35:08] [aegon-bench-shard-76] spawn OK; polling for :50051
+[02:35:10] [aegon-bench-shard-77] spawn OK; polling for :50051
+[02:35:11] [aegon-bench-shard-78] spawn OK; polling for :50051
+[02:35:11] [aegon-bench-shard-79] spawn OK; polling for :50051
+[02:35:12] [aegon-bench-shard-74] READY (listening on :50051)
+[02:35:12] [aegon-bench-shard-74] start done
+[02:35:12] [aegon-bench-shard-76] READY (listening on :50051)
+[02:35:12] [aegon-bench-shard-76] start done
+[02:35:12] [aegon-bench-shard-75] READY (listening on :50051)
+[02:35:12] [aegon-bench-shard-75] start done
+[02:35:12] [aegon-bench-shard-106] starting shard server (shard_id=106, --prefill-count 0)
+[02:35:12] [aegon-bench-shard-107] starting shard server (shard_id=107, --prefill-count 0)
+[02:35:12] [aegon-bench-shard-108] starting shard server (shard_id=108, --prefill-count 0)
+[02:35:14] [aegon-bench-shard-77] READY (listening on :50051)
+[02:35:14] [aegon-bench-shard-77] start done
+[02:35:14] [aegon-bench-shard-80] spawn OK; polling for :50051
+[02:35:15] [aegon-bench-shard-109] starting shard server (shard_id=109, --prefill-count 0)
+[02:35:15] [aegon-bench-shard-79] READY (listening on :50051)
+[02:35:15] [aegon-bench-shard-79] start done
+[02:35:15] [aegon-bench-shard-78] READY (listening on :50051)
+[02:35:15] [aegon-bench-shard-78] start done
+[02:35:16] [aegon-bench-shard-110] starting shard server (shard_id=110, --prefill-count 0)
+[02:35:16] [aegon-bench-shard-111] starting shard server (shard_id=111, --prefill-count 0)
+[02:35:16] [aegon-bench-shard-81] spawn OK; polling for :50051
+[02:35:18] [aegon-bench-shard-80] READY (listening on :50051)
+[02:35:18] [aegon-bench-shard-80] start done
+[02:35:18] [aegon-bench-shard-83] spawn OK; polling for :50051
+[02:35:18] [aegon-bench-shard-82] spawn OK; polling for :50051
+[02:35:18] [aegon-bench-shard-85] spawn OK; polling for :50051
+[02:35:18] [aegon-bench-shard-84] spawn OK; polling for :50051
+[02:35:19] [aegon-bench-shard-112] starting shard server (shard_id=112, --prefill-count 0)
+[02:35:19] [aegon-bench-shard-87] spawn OK; polling for :50051
+[02:35:19] [aegon-bench-shard-86] spawn OK; polling for :50051
+[02:35:20] [aegon-bench-shard-81] READY (listening on :50051)
+[02:35:20] [aegon-bench-shard-81] start done
+[02:35:21] [aegon-bench-shard-113] starting shard server (shard_id=113, --prefill-count 0)
+[02:35:22] [aegon-bench-shard-83] READY (listening on :50051)
+[02:35:22] [aegon-bench-shard-83] start done
+[02:35:22] [aegon-bench-shard-85] READY (listening on :50051)
+[02:35:22] [aegon-bench-shard-85] start done
+[02:35:22] [aegon-bench-shard-84] READY (listening on :50051)
+[02:35:22] [aegon-bench-shard-84] start done
+[02:35:22] [aegon-bench-shard-82] READY (listening on :50051)
+[02:35:22] [aegon-bench-shard-82] start done
+[02:35:23] [aegon-bench-shard-114] starting shard server (shard_id=114, --prefill-count 0)
+[02:35:23] [aegon-bench-shard-115] starting shard server (shard_id=115, --prefill-count 0)
+[02:35:23] [aegon-bench-shard-116] starting shard server (shard_id=116, --prefill-count 0)
+[02:35:23] [aegon-bench-shard-117] starting shard server (shard_id=117, --prefill-count 0)
+[02:35:23] [aegon-bench-shard-86] READY (listening on :50051)
+[02:35:23] [aegon-bench-shard-86] start done
+[02:35:23] [aegon-bench-shard-87] READY (listening on :50051)
+[02:35:23] [aegon-bench-shard-87] start done
+[02:35:24] [aegon-bench-shard-118] starting shard server (shard_id=118, --prefill-count 0)
+[02:35:24] [aegon-bench-shard-119] starting shard server (shard_id=119, --prefill-count 0)
+[02:35:25] [aegon-bench-shard-88] spawn OK; polling for :50051
+[02:35:29] [aegon-bench-shard-88] READY (listening on :50051)
+[02:35:29] [aegon-bench-shard-88] start done
+[02:35:30] [aegon-bench-shard-120] starting shard server (shard_id=120, --prefill-count 0)
+[02:35:40] [aegon-bench-shard-89] spawn OK; polling for :50051
+[02:35:44] [aegon-bench-shard-89] READY (listening on :50051)
+[02:35:44] [aegon-bench-shard-89] start done
+[02:35:45] [aegon-bench-shard-121] starting shard server (shard_id=121, --prefill-count 0)
+[02:35:51] [aegon-bench-shard-90] spawn OK; polling for :50051
+[02:35:51] [aegon-bench-shard-91] spawn OK; polling for :50051
+[02:35:52] [aegon-bench-shard-92] spawn OK; polling for :50051
+[02:35:52] [aegon-bench-shard-93] spawn OK; polling for :50051
+[02:35:52] [aegon-bench-shard-94] spawn OK; polling for :50051
+[02:35:52] [aegon-bench-shard-95] spawn OK; polling for :50051
+[02:35:54] [aegon-bench-shard-91] READY (listening on :50051)
+[02:35:54] [aegon-bench-shard-91] start done
+[02:35:54] [aegon-bench-shard-90] READY (listening on :50051)
+[02:35:54] [aegon-bench-shard-90] start done
+[02:35:55] [aegon-bench-shard-95] READY (listening on :50051)
+[02:35:55] [aegon-bench-shard-95] start done
+[02:35:55] [aegon-bench-shard-92] READY (listening on :50051)
+[02:35:55] [aegon-bench-shard-92] start done
+[02:35:55] [aegon-bench-shard-93] READY (listening on :50051)
+[02:35:55] [aegon-bench-shard-93] start done
+[02:35:55] [aegon-bench-shard-94] READY (listening on :50051)
+[02:35:55] [aegon-bench-shard-94] start done
+[02:35:55] [aegon-bench-shard-122] starting shard server (shard_id=122, --prefill-count 0)
+[02:35:55] [aegon-bench-shard-123] starting shard server (shard_id=123, --prefill-count 0)
+[02:35:55] [aegon-bench-shard-124] starting shard server (shard_id=124, --prefill-count 0)
+[02:35:55] [aegon-bench-shard-125] starting shard server (shard_id=125, --prefill-count 0)
+[02:35:55] [aegon-bench-shard-126] starting shard server (shard_id=126, --prefill-count 0)
+[02:35:55] waiting on 128 per-shard starts (parallel)...
+[02:35:55] [aegon-bench-shard-127] starting shard server (shard_id=127, --prefill-count 0)
+[02:39:50] [aegon-bench-shard-96] spawn OK; polling for :50051
+[02:39:50] [aegon-bench-shard-97] spawn OK; polling for :50051
+[02:39:50] [aegon-bench-shard-98] spawn OK; polling for :50051
+[02:39:51] [aegon-bench-shard-100] spawn OK; polling for :50051
+[02:39:51] [aegon-bench-shard-101] spawn OK; polling for :50051
+[02:39:51] [aegon-bench-shard-102] spawn OK; polling for :50051
+[02:39:51] [aegon-bench-shard-103] spawn OK; polling for :50051
+[02:39:51] [aegon-bench-shard-99] spawn OK; polling for :50051
+[02:39:51] [aegon-bench-shard-104] spawn OK; polling for :50051
+[02:39:53] [aegon-bench-shard-98] READY (listening on :50051)
+[02:39:53] [aegon-bench-shard-98] start done
+[02:39:53] [aegon-bench-shard-96] READY (listening on :50051)
+[02:39:53] [aegon-bench-shard-96] start done
+[02:39:53] [aegon-bench-shard-97] READY (listening on :50051)
+[02:39:53] [aegon-bench-shard-97] start done
+[02:39:54] [aegon-bench-shard-104] READY (listening on :50051)
+[02:39:54] [aegon-bench-shard-104] start done
+[02:39:54] [aegon-bench-shard-102] READY (listening on :50051)
+[02:39:54] [aegon-bench-shard-102] start done
+[02:39:54] [aegon-bench-shard-103] READY (listening on :50051)
+[02:39:54] [aegon-bench-shard-103] start done
+[02:39:54] [aegon-bench-shard-99] READY (listening on :50051)
+[02:39:54] [aegon-bench-shard-99] start done
+[02:39:55] [aegon-bench-shard-100] READY (listening on :50051)
+[02:39:55] [aegon-bench-shard-100] start done
+[02:39:55] [aegon-bench-shard-101] READY (listening on :50051)
+[02:39:55] [aegon-bench-shard-101] start done
+[02:39:59] [aegon-bench-shard-105] spawn OK; polling for :50051
+[02:40:02] [aegon-bench-shard-105] READY (listening on :50051)
+[02:40:03] [aegon-bench-shard-105] start done
+[02:40:13] [aegon-bench-shard-106] spawn OK; polling for :50051
+[02:40:13] [aegon-bench-shard-107] spawn OK; polling for :50051
+[02:40:13] [aegon-bench-shard-108] spawn OK; polling for :50051
+[02:40:15] [aegon-bench-shard-109] spawn OK; polling for :50051
+[02:40:16] [aegon-bench-shard-110] spawn OK; polling for :50051
+[02:40:16] [aegon-bench-shard-111] spawn OK; polling for :50051
+[02:40:16] [aegon-bench-shard-107] READY (listening on :50051)
+[02:40:16] [aegon-bench-shard-107] start done
+[02:40:16] [aegon-bench-shard-106] READY (listening on :50051)
+[02:40:16] [aegon-bench-shard-106] start done
+[02:40:17] [aegon-bench-shard-108] READY (listening on :50051)
+[02:40:17] [aegon-bench-shard-108] start done
+[02:40:18] [aegon-bench-shard-109] READY (listening on :50051)
+[02:40:18] [aegon-bench-shard-109] start done
+[02:40:19] [aegon-bench-shard-112] spawn OK; polling for :50051
+[02:40:19] [aegon-bench-shard-110] READY (listening on :50051)
+[02:40:19] [aegon-bench-shard-110] start done
+[02:40:19] [aegon-bench-shard-111] READY (listening on :50051)
+[02:40:19] [aegon-bench-shard-111] start done
+[02:40:21] [aegon-bench-shard-113] spawn OK; polling for :50051
+[02:40:22] [aegon-bench-shard-112] READY (listening on :50051)
+[02:40:22] [aegon-bench-shard-112] start done
+[02:40:23] [aegon-bench-shard-114] spawn OK; polling for :50051
+[02:40:23] [aegon-bench-shard-115] spawn OK; polling for :50051
+[02:40:23] [aegon-bench-shard-116] spawn OK; polling for :50051
+[02:40:23] [aegon-bench-shard-117] spawn OK; polling for :50051
+[02:40:24] [aegon-bench-shard-119] spawn OK; polling for :50051
+[02:40:24] [aegon-bench-shard-118] spawn OK; polling for :50051
+[02:40:25] [aegon-bench-shard-113] READY (listening on :50051)
+[02:40:25] [aegon-bench-shard-113] start done
+[02:40:26] [aegon-bench-shard-115] READY (listening on :50051)
+[02:40:26] [aegon-bench-shard-115] start done
+[02:40:26] [aegon-bench-shard-117] READY (listening on :50051)
+[02:40:26] [aegon-bench-shard-117] start done
+[02:40:26] [aegon-bench-shard-114] READY (listening on :50051)
+[02:40:26] [aegon-bench-shard-114] start done
+[02:40:26] [aegon-bench-shard-116] READY (listening on :50051)
+[02:40:26] [aegon-bench-shard-116] start done
+[02:40:28] [aegon-bench-shard-119] READY (listening on :50051)
+[02:40:28] [aegon-bench-shard-119] start done
+[02:40:28] [aegon-bench-shard-118] READY (listening on :50051)
+[02:40:28] [aegon-bench-shard-118] start done
+[02:40:30] [aegon-bench-shard-120] spawn OK; polling for :50051
+[02:40:34] [aegon-bench-shard-120] READY (listening on :50051)
+[02:40:34] [aegon-bench-shard-120] start done
+[02:40:45] [aegon-bench-shard-121] spawn OK; polling for :50051
+[02:40:49] [aegon-bench-shard-121] READY (listening on :50051)
+[02:40:49] [aegon-bench-shard-121] start done
+[02:40:55] [aegon-bench-shard-122] spawn OK; polling for :50051
+[02:40:55] [aegon-bench-shard-123] spawn OK; polling for :50051
+[02:40:55] [aegon-bench-shard-125] spawn OK; polling for :50051
+[02:40:55] [aegon-bench-shard-124] spawn OK; polling for :50051
+[02:40:55] [aegon-bench-shard-127] spawn OK; polling for :50051
+[02:40:55] [aegon-bench-shard-126] spawn OK; polling for :50051
+[02:40:59] [aegon-bench-shard-123] READY (listening on :50051)
+[02:40:59] [aegon-bench-shard-123] start done
+[02:40:59] [aegon-bench-shard-125] READY (listening on :50051)
+[02:40:59] [aegon-bench-shard-125] start done
+[02:40:59] [aegon-bench-shard-124] READY (listening on :50051)
+[02:40:59] [aegon-bench-shard-124] start done
+[02:40:59] [aegon-bench-shard-122] READY (listening on :50051)
+[02:40:59] [aegon-bench-shard-122] start done
+[02:40:59] [aegon-bench-shard-126] READY (listening on :50051)
+[02:40:59] [aegon-bench-shard-126] start done
+[02:40:59] [aegon-bench-shard-127] READY (listening on :50051)
+[02:40:59] [aegon-bench-shard-127] start done
+[02:40:59] all shards listening on :50051 (--prefill-count 0). Use the bench binaries to drive ReconfigurePrefill.
+[v11c] Tue Jun 23 02:40:59 UTC 2026 restart-coord
+[02:41:03] [aegon-bench-coord] SSH ready after 1 attempt(s)
+[02:41:03] [aegon-bench-coord] wiping /opt/aegon/coord-db (clean RocksDB for the run)
+WARNING: 
+
+To increase the performance of the tunnel, consider installing NumPy. For instructions,
+please see https://cloud.google.com/iap/docs/using-tcp-forwarding#increasing_the_tcp_upload_bandwidth
+
+[02:44:09] [aegon-bench-coord] starting aegon_coordinator_server :50100 (connects to 128 shards via gRPC)
+WARNING: 
+
+To increase the performance of the tunnel, consider installing NumPy. For instructions,
+please see https://cloud.google.com/iap/docs/using-tcp-forwarding#increasing_the_tcp_upload_bandwidth
+
+SPAWNED
+[02:46:10] [aegon-bench-coord] waiting for coord to bind :50100 (setup takes ~3-5 min)
+[02:46:13] [aegon-bench-coord] coord listening on :50100
+[v11c] Tue Jun 23 02:46:13 UTC 2026 lookup-bench  (FILL=1,2,3,4,5,6,7,8,9,10  K=1048576  C=1,4,16,64,256,512,1024)
+[02:46:14] ==== resolved config ====
+[02:46:14]   N_SHARDS               = 128
+[02:46:14]   SHARD_LOG_CAPACITY     = 27 (per shard 2^27 slots)
+[02:46:14]   KZH_K                  = 9
+[02:46:14]   PUBLISH_TRUE_LOG_CAP   = 32 (derived = 32; addressable = 2^32 entries)
+[02:46:14]   PUBLISH_FILL_PERCENTS  = 1,30,60,90
+[02:46:14]   PUBLISH_BATCH_SIZES    = 4096,8192,16384,32768,65536,131072
+[02:46:14]   PUBLISH_WARMUP_BATCH   = 1048576
+[02:46:14]   COORD_DB_PATH          = /opt/aegon/coord-db (RocksDB on coordinator)
+[02:46:14]   COORD_BOOT_DISK        = 12TB pd-ssd
+[02:46:14]   SHARDS                 = n2-highmem-16 (--no-retain-epoch-polys set)
+[02:46:15]   SHARD_BOOT_DISK        = 1TB pd-ssd
+[02:46:15] ========================
+[02:46:15]   LOOKUP_FILL_PERCENTS   = 1,2,3,4,5,6,7,8,9,10
+[02:46:15]   LOOKUP_TRUE_LOG_CAP    = 32
+[02:46:15]   LOOKUP_PRELOAD_COUNT   = 1000
+[02:46:15] building aegon_lookup_bench (release)
+warning: unused import: `univariate::DenseOrSparsePolynomial`
+ --> akd_core/src/aegon_crypto/arithmetic/multilinear_polynomial.rs:4:5
+  |
+4 |     univariate::DenseOrSparsePolynomial, MultilinearExtension, SparseMultilinearExtension,
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `IntoParallelIterator`
+  --> akd_core/src/aegon_crypto/arithmetic/multilinear_polynomial.rs:13:30
+   |
+13 |     IndexedParallelIterator, IntoParallelIterator, IntoParallelRefIterator,
+   |                              ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `partially_eval_sparse_poly_on_bool_point`
+  --> akd_core/src/aegon_crypto/pcs/kzhk/mod.rs:75:50
+   |
+75 |         partially_eval_dense_poly_on_bool_point, partially_eval_sparse_poly_on_bool_point,
+   |                                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `default`
+  --> akd_core/src/aegon_crypto/pcs/mod.rs:11:27
+   |
+11 | use std::{borrow::Borrow, default, fmt::Debug, hash::Hash};
+   |                           ^^^^^^^
+
+warning: unused import: `MultilinearExtension`
+  --> akd_core/src/aegon_crypto/arithmetic/virtual_polynomial.rs:15:43
+   |
+15 | use ark_poly::{DenseMultilinearExtension, MultilinearExtension, Polynomial};
+   |                                           ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `Write`
+ --> akd_core/src/aegon_crypto/poly.rs:6:80
+  |
+6 |     CanonicalDeserialize, CanonicalSerialize, Read, SerializationError, Valid, Write,
+  |                                                                                ^^^^^
+
+warning: unused import: `Read`
+ --> akd_core/src/aegon_crypto/poly.rs:6:47
+  |
+6 |     CanonicalDeserialize, CanonicalSerialize, Read, SerializationError, Valid, Write,
+  |                                               ^^^^
+
+warning: unused import: `CanonicalSerialize`
+ --> akd_core/src/aegon_crypto/poly.rs:6:27
+  |
+6 |     CanonicalDeserialize, CanonicalSerialize, Read, SerializationError, Valid, Write,
+  |                           ^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `CanonicalDeserialize`
+ --> akd_core/src/aegon_crypto/poly.rs:6:5
+  |
+6 |     CanonicalDeserialize, CanonicalSerialize, Read, SerializationError, Valid, Write,
+  |     ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `Read`
+  --> akd_core/src/aegon_crypto/pcs/kzhk/mod.rs:64:32
+   |
+64 |     io::{BufReader, BufWriter, Read, Write},
+   |                                ^^^^
+
+warning: unused variable: `prover_param`
+   --> akd_core/src/aegon_crypto/pcs/mod.rs:147:9
+    |
+147 |         prover_param: impl Borrow<Self::ProverParam>,
+    |         ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_prover_param`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `polynomial`
+   --> akd_core/src/aegon_crypto/pcs/mod.rs:148:9
+    |
+148 |         polynomial: &Self::Polynomial,
+    |         ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_polynomial`
+
+warning: unused variable: `com`
+   --> akd_core/src/aegon_crypto/pcs/mod.rs:149:9
+    |
+149 |         com: &Self::Commitment,
+    |         ^^^ help: if this is intentional, prefix it with an underscore: `_com`
+
+warning: unused variable: `state`
+   --> akd_core/src/aegon_crypto/pcs/mod.rs:150:9
+    |
+150 |         state: &mut Self::State,
+    |         ^^^^^ help: if this is intentional, prefix it with an underscore: `_state`
+
+warning: unused variable: `commitment`
+   --> akd_core/src/aegon_crypto/pcs/mod.rs:197:9
+    |
+197 |         commitment: &Self::Commitment,
+    |         ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_commitment`
+
+warning: variable does not need to be mutable
+   --> akd_core/src/aegon_crypto/poly.rs:151:23
+    |
+151 |     fn relabel(&self, mut a: usize, mut b: usize, k: usize) -> Self {
+    |                       ----^
+    |                       |
+    |                       help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> akd_core/src/aegon_crypto/poly.rs:151:37
+    |
+151 |     fn relabel(&self, mut a: usize, mut b: usize, k: usize) -> Self {
+    |                                     ----^
+    |                                     |
+    |                                     help: remove this `mut`
+
+warning: function `test_single_helper` is never used
+ --> akd_core/src/aegon_crypto/pcs/kzhk/test.rs:6:4
+  |
+6 | fn test_single_helper(
+  |    ^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `akd_core` (lib) generated 18 warnings (run `cargo fix --lib -p akd_core` to apply 11 suggestions)
+warning: unexpected `cfg` condition value: `parallel`
+   --> akd/src/aegon/distributed_srs.rs:254:19
+    |
+254 |             #[cfg(feature = "parallel")]
+    |                   ^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: expected values for `feature` are: `bench`, `default`, `experimental`, `greedy_lookup_preload`, `mimalloc_alloc`, `parallel_vrf`, `preload_history`, `public_auditing`, `public_tests`, `rand`, `runtime_metrics`, `serde_serialization`, `slow_internal_db`, `tracing`, `tracing_instrument`, and `whatsapp_v1`
+    = help: consider adding `parallel` as a feature in `Cargo.toml`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+    = note: `#[warn(unexpected_cfgs)]` on by default
+
+warning: unexpected `cfg` condition value: `parallel`
+   --> akd/src/aegon/distributed_srs.rs:269:23
+    |
+269 |             #[cfg(not(feature = "parallel"))]
+    |                       ^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: expected values for `feature` are: `bench`, `default`, `experimental`, `greedy_lookup_preload`, `mimalloc_alloc`, `parallel_vrf`, `preload_history`, `public_auditing`, `public_tests`, `rand`, `runtime_metrics`, `serde_serialization`, `slow_internal_db`, `tracing`, `tracing_instrument`, and `whatsapp_v1`
+    = help: consider adding `parallel` as a feature in `Cargo.toml`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `parallel`
+   --> akd/src/aegon/distributed_srs.rs:303:11
+    |
+303 |     #[cfg(feature = "parallel")]
+    |           ^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: expected values for `feature` are: `bench`, `default`, `experimental`, `greedy_lookup_preload`, `mimalloc_alloc`, `parallel_vrf`, `preload_history`, `public_auditing`, `public_tests`, `rand`, `runtime_metrics`, `serde_serialization`, `slow_internal_db`, `tracing`, `tracing_instrument`, and `whatsapp_v1`
+    = help: consider adding `parallel` as a feature in `Cargo.toml`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `parallel`
+   --> akd/src/aegon/distributed_srs.rs:317:15
+    |
+317 |     #[cfg(not(feature = "parallel"))]
+    |               ^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: expected values for `feature` are: `bench`, `default`, `experimental`, `greedy_lookup_preload`, `mimalloc_alloc`, `parallel_vrf`, `preload_history`, `public_auditing`, `public_tests`, `rand`, `runtime_metrics`, `serde_serialization`, `slow_internal_db`, `tracing`, `tracing_instrument`, and `whatsapp_v1`
+    = help: consider adding `parallel` as a feature in `Cargo.toml`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unused import: `tokio::runtime::Runtime`
+  --> akd/src/aegon/masking.rs:34:5
+   |
+34 | use tokio::runtime::Runtime;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `Channel`
+  --> akd/src/aegon/masking.rs:36:24
+   |
+36 | use tonic::transport::{Channel, Server};
+   |                        ^^^^^^^
+
+warning: unused import: `HashMap`
+  --> akd/src/aegon/sharded.rs:22:24
+   |
+22 | use std::collections::{HashMap, HashSet};
+   |                        ^^^^^^^
+
+warning: unused imports: `key_history_openings_local`, `key_history_openings`, `key_label_placement`, `key_value_history`, and `key_value`
+  --> akd/src/aegon/sharded.rs:39:40
+   |
+39 |     key_coord_state, key_epoch_commit, key_history_openings, key_history_openings_local,
+   |                                        ^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^
+40 |     key_label_placement, key_shard_fullness, key_value, key_value_history, Db, DbOp,
+   |     ^^^^^^^^^^^^^^^^^^^                      ^^^^^^^^^  ^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `RandPair` and `ValueChangeEntry`
+  --> akd/src/aegon/sharded.rs:47:51
+   |
+47 |     AegonPcs, AuditState, EpochCommitment, Label, RandPair,
+   |                                                   ^^^^^^^^
+48 |     Value, ValueChangeEntry,
+   |            ^^^^^^^^^^^^^^^^
+
+warning: unused import: `IntoParallelIterator`
+  --> akd/src/aegon/distributed_srs.rs:54:19
+   |
+54 | use rayon::iter::{IntoParallelIterator, ParallelIterator};
+   |                   ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `ParallelIterator`
+  --> akd/src/aegon/distributed_srs.rs:54:41
+   |
+54 | use rayon::iter::{IntoParallelIterator, ParallelIterator};
+   |                                         ^^^^^^^^^^^^^^^^
+
+warning: variable does not need to be mutable
+   --> akd/src/aegon/db.rs:703:13
+    |
+703 |         let mut load_list = |key: &[u8]| -> Result<Vec<Vec<u8>>, AegonError> {
+    |             ----^^^^^^^^^
+    |             |
+    |             help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: methods `exists`, `exists_many`, and `smembers` are never used
+   --> akd/src/aegon/db.rs:342:8
+    |
+335 | pub(crate) trait Db: Send + Sync {
+    |                  -- methods in this trait
+...
+342 |     fn exists(&self, key: &[u8]) -> Result<bool, AegonError>;
+    |        ^^^^^^
+...
+348 |     fn exists_many(&self, keys: &[Vec<u8>]) -> Result<Vec<bool>, AegonError>;
+    |        ^^^^^^^^^^^
+...
+351 |     fn smembers(&self, key: &[u8]) -> Result<Vec<Vec<u8>>, AegonError>;
+    |        ^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: associated function `set_member_prefix` is never used
+   --> akd/src/aegon/db.rs:671:8
+    |
+551 | impl RocksDb {
+    | ------------ associated function in this implementation
+...
+671 |     fn set_member_prefix(set_key: &[u8]) -> Vec<u8> {
+    |        ^^^^^^^^^^^^^^^^^
+
+warning: function `key_history_openings` is never used
+    --> akd/src/aegon/db.rs:1013:15
+     |
+1013 | pub(crate) fn key_history_openings(epoch: u64, shard_id: u32) -> Vec<u8> {
+     |               ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `derive_eval_point` is never used
+  --> akd/src/aegon/fs.rs:47:15
+   |
+47 | pub(crate) fn derive_eval_point<E, P>(
+   |               ^^^^^^^^^^^^^^^^^
+
+warning: function `vrf_alpha` is never used
+   --> akd/src/aegon/hash.rs:236:4
+    |
+236 | fn vrf_alpha(ctr: u64, label: &[u8]) -> Vec<u8> {
+    |    ^^^^^^^^^
+
+warning: function `open_at_point` is never used
+    --> akd/src/aegon/server.rs:2942:4
+     |
+2942 | fn open_at_point<E, P>(
+     |    ^^^^^^^^^^^^^
+
+warning: function `commit_with_aux` is never used
+    --> akd/src/aegon/server.rs:3026:4
+     |
+3026 | fn commit_with_aux<E, P>(
+     |    ^^^^^^^^^^^^^^^
+
+warning: function `update_rand` is never used
+    --> akd/src/aegon/server.rs:3137:4
+     |
+3137 | fn update_rand<F: ark_ff::Field>(
+     |    ^^^^^^^^^^^
+
+warning: field `shard_dims` is never read
+    --> akd/src/aegon/sharded.rs:1128:5
+     |
+1116 | pub struct ShardedAegon<E, P, H = Sha256Hash>
+     |            ------------ field in this struct
+...
+1128 |     shard_dims: Vec<usize>,
+     |     ^^^^^^^^^^
+
+warning: function `bool_index_to_usize_dims` is never used
+    --> akd/src/aegon/sharded.rs:3825:4
+     |
+3825 | fn bool_index_to_usize_dims(bits: &[bool], dims: &[usize]) -> usize {
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `tic_toc` is never used
+  --> akd/src/append_only_zks.rs:39:10
+   |
+39 | async fn tic_toc<T>(f: impl core::future::Future<Output = T>) -> (T, Option<f64>) {
+   |          ^^^^^^^
+
+warning: enum `AzksElementSet` is never used
+  --> akd/src/append_only_zks.rs:76:17
+   |
+76 | pub(crate) enum AzksElementSet {
+   |                 ^^^^^^^^^^^^^^
+
+warning: methods `partition`, `get_longest_common_prefix`, and `contains_prefix` are never used
+   --> akd/src/append_only_zks.rs:111:19
+    |
+107 | impl AzksElementSet {
+    | ------------------- methods in this implementation
+...
+111 |     pub(crate) fn partition(self, prefix_label: NodeLabel) -> (AzksElementSet, AzksElementSet) {
+    |                   ^^^^^^^^^
+...
+161 |     pub(crate) fn get_longest_common_prefix<TC: Configuration>(&self) -> NodeLabel {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+185 |     pub(crate) fn contains_prefix(&self, prefix_label: &NodeLabel) -> bool {
+    |                   ^^^^^^^^^^^^^^^
+
+warning: method `get_parallel_levels` is never used
+   --> akd/src/append_only_zks.rs:248:8
+    |
+247 | impl AzksParallelismOption {
+    | -------------------------- method in this implementation
+248 |     fn get_parallel_levels(&self) -> Option<u8> {
+    |        ^^^^^^^^^^^^^^^^^^^
+
+warning: multiple associated items are never used
+    --> akd/src/append_only_zks.rs:352:25
+     |
+ 319 | impl Azks {
+     | --------- associated items in this implementation
+...
+ 352 |     pub(crate) async fn recursive_batch_insert_nodes<TC: Configuration, S: Database + 'static>(
+     |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 498 |     async fn get_next_node_in_child_path_from_cache<S: Database + Send + Sync>(
+     |              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 536 |     pub(crate) async fn build_lookup_maximal_node_set<S: Database + Send + Sync>(
+     |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 572 |     pub(crate) async fn greedy_preload_lookup_nodes<S: Database + Send + Sync>(
+     |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 618 |     pub(crate) async fn preload_lookup_nodes<S: Database + Send + Sync + 'static>(
+     |                         ^^^^^^^^^^^^^^^^^^^^
+...
+ 646 |     pub(crate) async fn preload_nodes<S: Database + 'static>(
+     |                         ^^^^^^^^^^^^^
+...
+ 683 |     async fn recursive_preload_nodes<S: Database + 'static>(
+     |              ^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 814 |     async fn preload_audit_nodes<S: Database + 'static>(
+     |              ^^^^^^^^^^^^^^^^^^^
+...
+ 845 |     async fn recursive_preload_audit_nodes<S: Database + 'static>(
+     |              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 934 |     async fn get_append_only_proof_helper<TC: Configuration, S: Database + 'static>(
+     |              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+1065 |     pub(crate) async fn get_root_hash_safe<TC: Configuration, S: Database>(
+     |                         ^^^^^^^^^^^^^^^^^^
+...
+1089 |     fn increment_epoch(&mut self) {
+     |        ^^^^^^^^^^^^^^^
+...
+1095 |     async fn get_child_azks_element_in_dir<TC: Configuration, S: Database>(
+     |              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+1113 |     async fn get_lcp_node_label_with_membership_proof<TC: Configuration, S: Database>(
+     |              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type alias `AppendOnlyHelper` is never used
+    --> akd/src/append_only_zks.rs:1191:6
+     |
+1191 | type AppendOnlyHelper = (Vec<AzksElement>, Vec<AzksElement>);
+     |      ^^^^^^^^^^^^^^^^
+
+warning: method `retrieve_azks` is never used
+   --> akd/src/directory.rs:338:25
+    |
+123 | / impl<TC, S, V> Directory<TC, S, V>
+124 | | where
+125 | |     TC: Configuration,
+126 | |     S: Database + 'static,
+127 | |     V: VRFKeyStorage,
+    | |_____________________- method in this implementation
+...
+338 |       pub(crate) async fn retrieve_azks(&self) -> Result<Azks, AkdError> {
+    |                           ^^^^^^^^^^^^^
+
+warning: function `get_marker_version` is never used
+   --> akd/src/directory.rs:502:15
+    |
+502 | pub(crate) fn get_marker_version(version: u64) -> u64 {
+    |               ^^^^^^^^^^^^^^^^^^
+
+warning: fields `value_state`, `marker_version`, `existent_label`, `marker_label`, and `non_existent_label` are never read
+  --> akd/src/helper_structs.rs:32:16
+   |
+31 | pub struct LookupInfo {
+   |            ---------- fields in this struct
+32 |     pub(crate) value_state: ValueState,
+   |                ^^^^^^^^^^^
+33 |     pub(crate) marker_version: u64,
+   |                ^^^^^^^^^^^^^^
+34 |     pub(crate) existent_label: NodeLabel,
+   |                ^^^^^^^^^^^^^^
+35 |     pub(crate) marker_label: NodeLabel,
+   |                ^^^^^^^^^^^^
+36 |     pub(crate) non_existent_label: NodeLabel,
+   |                ^^^^^^^^^^^^^^^^^^
+   |
+   = note: `LookupInfo` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: associated function `new` is never used
+   --> akd/src/storage/types.rs:104:19
+    |
+103 | impl ValueState {
+    | --------------- associated function in this implementation
+104 |     pub(crate) fn new(
+    |                   ^^^
+
+warning: associated items `determine_node_to_get`, `write_to_storage`, `get_appropriate_tree_node_from_storage`, and `batch_get_appropriate_tree_node_from_storage` are never used
+   --> akd/src/tree_node.rs:137:19
+    |
+133 | impl TreeNodeWithPreviousValue {
+    | ------------------------------ associated items in this implementation
+...
+137 |     pub(crate) fn determine_node_to_get(
+    |                   ^^^^^^^^^^^^^^^^^^^^^
+...
+173 |     pub(crate) async fn write_to_storage<S: Database>(
+    |                         ^^^^^^^^^^^^^^^^
+...
+180 |     pub(crate) async fn get_appropriate_tree_node_from_storage<S: Database>(
+    |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+193 |     pub(crate) async fn batch_get_appropriate_tree_node_from_storage<S: Database>(
+    |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: associated items `write_to_storage`, `get_from_storage`, and `batch_get_from_storage` are never used
+   --> akd/src/tree_node.rs:272:25
+    |
+268 | impl TreeNode {
+    | ------------- associated items in this implementation
+...
+272 |     pub(crate) async fn write_to_storage<S: Database>(
+    |                         ^^^^^^^^^^^^^^^^
+...
+320 |     pub(crate) async fn get_from_storage<S: Database>(
+    |                         ^^^^^^^^^^^^^^^^
+...
+333 |     pub(crate) async fn batch_get_from_storage<S: Database>(
+    |                         ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: associated items `new`, `update_hash`, `set_child`, `get_child_node`, `get_child_label`, and `get_latest_epoch` are never used
+   --> akd/src/tree_node.rs:359:8
+    |
+357 | impl TreeNode {
+    | ------------- associated items in this implementation
+358 |     /// Creates a new TreeNode and writes it to the storage.
+359 |     fn new(
+    |        ^^^
+...
+380 |     pub(crate) async fn update_hash<TC: Configuration, S: Database>(
+    |                         ^^^^^^^^^^^
+...
+413 |     pub(crate) fn set_child(&mut self, child_node: &mut TreeNode) -> Result<(), TreeNodeError> {
+    |                   ^^^^^^^^^
+...
+447 |     pub(crate) async fn get_child_node<S: Database>(
+    |                         ^^^^^^^^^^^^^^
+...
+468 |     pub(crate) fn get_child_label(&self, direction: Direction) -> Option<NodeLabel> {
+    |                   ^^^^^^^^^^^^^^^
+...
+477 |     pub(crate) fn get_latest_epoch(&self) -> u64 {
+    |                   ^^^^^^^^^^^^^^^^
+
+warning: enum `NodeHashingMode` is never used
+   --> akd/src/tree_node.rs:485:17
+    |
+485 | pub(crate) enum NodeHashingMode {
+    |                 ^^^^^^^^^^^^^^^
+
+warning: function `node_to_label` is never used
+   --> akd/src/tree_node.rs:492:15
+    |
+492 | pub(crate) fn node_to_label<TC: Configuration>(input: &Option<TreeNode>) -> NodeLabel {
+    |               ^^^^^^^^^^^^^
+
+warning: function `node_to_azks_value` is never used
+   --> akd/src/tree_node.rs:499:15
+    |
+499 | pub(crate) fn node_to_azks_value<TC: Configuration>(
+    |               ^^^^^^^^^^^^^^^^^^
+
+warning: function `new_root_node` is never used
+   --> akd/src/tree_node.rs:518:15
+    |
+518 | pub(crate) fn new_root_node<TC: Configuration>() -> TreeNode {
+    |               ^^^^^^^^^^^^^
+
+warning: function `new_interior_node` is never used
+   --> akd/src/tree_node.rs:532:15
+    |
+532 | pub(crate) fn new_interior_node<TC: Configuration>(label: NodeLabel, birth_epoch: u64) -> TreeNode {
+    |               ^^^^^^^^^^^^^^^^^
+
+warning: function `new_leaf_node` is never used
+   --> akd/src/tree_node.rs:544:15
+    |
+544 | pub(crate) fn new_leaf_node<TC: Configuration>(
+    |               ^^^^^^^^^^^^^
+
+warning: missing documentation for a module
+   --> akd/src/aegon/mod.rs:21:1
+    |
+ 21 | pub mod error;
+    | ^^^^^^^^^^^^^
+    |
+note: the lint level is defined here
+   --> akd/src/lib.rs:525:9
+    |
+525 | #![warn(missing_docs)]
+    |         ^^^^^^^^^^^^
+
+warning: missing documentation for a module
+  --> akd/src/aegon/mod.rs:33:1
+   |
+33 | pub mod types;
+   | ^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> akd/src/aegon/config.rs:158:5
+    |
+158 |     pub _e: PhantomData<E>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> akd/src/aegon/config.rs:201:5
+    |
+201 |     pub log_capacity: usize,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> akd/src/aegon/config.rs:202:5
+    |
+202 |     pub verifier_param: P::VerifierParam,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> akd/src/aegon/config.rs:203:5
+    |
+203 |     pub _e: PhantomData<E>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for an associated function
+   --> akd/src/aegon/config.rs:222:5
+    |
+222 |     pub fn new(log_capacity: usize, verifier_param: P::VerifierParam) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a module
+  --> akd/src/aegon/coordinator_grpc.rs:42:1
+   |
+42 | pub mod proto {
+   | ^^^^^^^^^^^^^
+
+warning: missing documentation for an associated function
+   --> akd/src/aegon/coordinator_grpc.rs:150:5
+    |
+150 |     pub fn new(state: ShardedAegon<E, P, H>) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> akd/src/aegon/coordinator_grpc.rs:580:5
+    |
+580 |     pub endpoint: String,
+    |     ^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> akd/src/aegon/coordinator_grpc.rs:581:5
+    |
+581 |     pub verifier_ctx: ShardedVerifierContext<E, P>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> akd/src/aegon/coordinator_grpc.rs:582:5
+    |
+582 |     pub tls_ca_pem: Option<Vec<u8>>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> akd/src/aegon/coordinator_grpc.rs:583:5
+    |
+583 |     pub tls_domain: Option<String>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> akd/src/aegon/coordinator_grpc.rs:584:5
+    |
+584 |     pub connect_timeout: Option<std::time::Duration>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for an associated function
+   --> akd/src/aegon/coordinator_grpc.rs:588:5
+    |
+588 |     pub fn new(endpoint: String, verifier_ctx: ShardedVerifierContext<E, P>) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+   --> akd/src/aegon/coordinator_grpc.rs:598:5
+    |
+598 |     pub fn with_tls_ca(mut self, ca_pem: Vec<u8>) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+   --> akd/src/aegon/coordinator_grpc.rs:603:5
+    |
+603 |     pub fn with_tls_domain(mut self, domain: impl Into<String>) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+ --> /home/alrshir/aegon/target/release/build/akd-6adfeaf30b2ccd5f/out/aegon.coordinator.v1.rs:3:1
+  |
+3 | pub struct LookupLabelRequest {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+  --> /home/alrshir/aegon/target/release/build/akd-6adfeaf30b2ccd5f/out/aegon.coordinator.v1.rs:11:1
+   |
+11 | pub struct LookupLabelResponse {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+  --> /home/alrshir/aegon/target/release/build/akd-6adfeaf30b2ccd5f/out/aegon.coordinator.v1.rs:32:1
+   |
+32 | pub struct LookupValueRequest {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+  --> /home/alrshir/aegon/target/release/build/akd-6adfeaf30b2ccd5f/out/aegon.coordinator.v1.rs:40:1
+   |
+40 | pub struct LookupValueResponse {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> /home/alrshir/aegon/target/release/build/akd-6adfeaf30b2ccd5f/out/aegon.coordinator.v1.rs:53:5
+   |
+53 |     pub server_processing_micros: u64,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+  --> /home/alrshir/aegon/target/release/build/akd-6adfeaf30b2ccd5f/out/aegon.coordinator.v1.rs:56:1
+   |
+56 | pub struct CommitmentResponse {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> /home/alrshir/aegon/target/release/build/akd-6adfeaf30b2ccd5f/out/aegon.coordinator.v1.rs:63:5
+   |
+63 |     pub server_processing_micros: u64,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+  --> /home/alrshir/aegon/target/release/build/akd-6adfeaf30b2ccd5f/out/aegon.coordinator.v1.rs:77:1
+   |
+77 | pub struct LookupHistoryRequest {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+  --> /home/alrshir/aegon/target/release/build/akd-6adfeaf30b2ccd5f/out/aegon.coordinator.v1.rs:83:1
+   |
+83 | pub struct LookupHistoryResponse {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> /home/alrshir/aegon/target/release/build/akd-6adfeaf30b2ccd5f/out/aegon.coordinator.v1.rs:94:5
+   |
+94 |     pub server_processing_micros: u64,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+  --> /home/alrshir/aegon/target/release/build/akd-6adfeaf30b2ccd5f/out/aegon.coordinator.v1.rs:97:1
+   |
+97 | pub struct LookupLabelHistoryRequest {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> /home/alrshir/aegon/target/release/build/akd-6adfeaf30b2ccd5f/out/aegon.coordinator.v1.rs:99:5
+   |
+99 |     pub label: ::prost::alloc::vec::Vec<u8>,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+   --> /home/alrshir/aegon/target/release/build/akd-6adfeaf30b2ccd5f/out/aegon.coordinator.v1.rs:102:1
+    |
+102 | pub struct LookupLabelHistoryResponse {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /home/alrshir/aegon/target/release/build/akd-6adfeaf30b2ccd5f/out/aegon.coordinator.v1.rs:113:5
+    |
+113 |     pub server_processing_micros: u64,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+   --> /home/alrshir/aegon/target/release/build/akd-6adfeaf30b2ccd5f/out/aegon.coordinator.v1.rs:116:1
+    |
+116 | pub struct Empty {}
+    | ^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+   --> /home/alrshir/aegon/target/release/build/akd-6adfeaf30b2ccd5f/out/aegon.coordinator.v1.rs:118:1
+    |
+118 | pub struct PublishRequest {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+   --> /home/alrshir/aegon/target/release/build/akd-6adfeaf30b2ccd5f/out/aegon.coordinator.v1.rs:127:1
+    |
+127 | pub struct PublishResponse {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /home/alrshir/aegon/target/release/build/akd-6adfeaf30b2ccd5f/out/aegon.coordinator.v1.rs:133:5
+    |
+133 |     pub server_processing_micros: u64,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /home/alrshir/aegon/target/release/build/akd-6adfeaf30b2ccd5f/out/aegon.coordinator.v1.rs:144:5
+    |
+144 |     pub value_commitment_bytes: u64,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /home/alrshir/aegon/target/release/build/akd-6adfeaf30b2ccd5f/out/aegon.coordinator.v1.rs:146:5
+    |
+146 |     pub rand_index_commitment_bytes: u64,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /home/alrshir/aegon/target/release/build/akd-6adfeaf30b2ccd5f/out/aegon.coordinator.v1.rs:148:5
+    |
+148 |     pub rand_value_commitment_bytes: u64,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /home/alrshir/aegon/target/release/build/akd-6adfeaf30b2ccd5f/out/aegon.coordinator.v1.rs:150:5
+    |
+150 |     pub total_commitment_bytes: u64,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+   --> /home/alrshir/aegon/target/release/build/akd-6adfeaf30b2ccd5f/out/aegon.coordinator.v1.rs:153:1
+    |
+153 | pub struct AuditChainRequest {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+   --> /home/alrshir/aegon/target/release/build/akd-6adfeaf30b2ccd5f/out/aegon.coordinator.v1.rs:162:1
+    |
+162 | pub struct AuditChainResponse {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /home/alrshir/aegon/target/release/build/akd-6adfeaf30b2ccd5f/out/aegon.coordinator.v1.rs:164:5
+    |
+164 |     pub samples: ::prost::alloc::vec::Vec<AuditSample>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+   --> /home/alrshir/aegon/target/release/build/akd-6adfeaf30b2ccd5f/out/aegon.coordinator.v1.rs:167:1
+    |
+167 | pub struct AuditSample {
+    | ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /home/alrshir/aegon/target/release/build/akd-6adfeaf30b2ccd5f/out/aegon.coordinator.v1.rs:169:5
+    |
+169 |     pub prev_epoch: u64,
+    |     ^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /home/alrshir/aegon/target/release/build/akd-6adfeaf30b2ccd5f/out/aegon.coordinator.v1.rs:171:5
+    |
+171 |     pub next_epoch: u64,
+    |     ^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> akd/src/aegon/db.rs:74:11
+   |
+74 |     Set { key: Vec<u8>, value: Vec<u8> },
+   |           ^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> akd/src/aegon/db.rs:74:25
+   |
+74 |     Set { key: Vec<u8>, value: Vec<u8> },
+   |                         ^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> akd/src/aegon/db.rs:76:12
+   |
+76 |     SAdd { key: Vec<u8>, member: Vec<u8> },
+   |            ^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> akd/src/aegon/db.rs:76:26
+   |
+76 |     SAdd { key: Vec<u8>, member: Vec<u8> },
+   |                          ^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> akd/src/aegon/db.rs:82:13
+   |
+82 |     LPush { key: Vec<u8>, member: Vec<u8> },
+   |             ^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> akd/src/aegon/db.rs:82:27
+   |
+82 |     LPush { key: Vec<u8>, member: Vec<u8> },
+   |                           ^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> akd/src/aegon/db.rs:86:13
+   |
+86 |     LTrim { key: Vec<u8>, start: isize, stop: isize },
+   |             ^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> akd/src/aegon/db.rs:86:27
+   |
+86 |     LTrim { key: Vec<u8>, start: isize, stop: isize },
+   |                           ^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> akd/src/aegon/db.rs:86:41
+   |
+86 |     LTrim { key: Vec<u8>, start: isize, stop: isize },
+   |                                         ^^^^^^^^^^^
+
+warning: missing documentation for a module
+  --> akd/src/aegon/distributed_srs.rs:74:1
+   |
+74 | pub mod proto {
+   | ^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> akd/src/aegon/distributed_srs.rs:99:5
+   |
+99 |     pub g: E::G1Affine,
+   |     ^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> akd/src/aegon/distributed_srs.rs:100:5
+    |
+100 |     pub h: E::G1Affine,
+    |     ^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> akd/src/aegon/distributed_srs.rs:101:5
+    |
+101 |     pub v: E::G2Affine,
+    |     ^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+   --> akd/src/aegon/distributed_srs.rs:139:5
+    |
+139 |     pub fn k(&self) -> usize {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+   --> akd/src/aegon/distributed_srs.rs:143:5
+    |
+143 |     pub fn num_vars(&self) -> usize {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for an associated function
+   --> akd/src/aegon/distributed_srs.rs:156:5
+    |
+156 |     pub fn decode(bytes: &[u8]) -> Result<Self, AegonError> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> akd/src/aegon/distributed_srs.rs:169:5
+    |
+169 |     pub t: usize,
+    |     ^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> akd/src/aegon/distributed_srs.rs:170:5
+    |
+170 |     pub shape: Vec<usize>,
+    |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> akd/src/aegon/distributed_srs.rs:171:5
+    |
+171 |     pub strides: Vec<usize>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> akd/src/aegon/distributed_srs.rs:172:5
+    |
+172 |     pub len: usize,
+    |     ^^^^^^^^^^^^^^
+
+warning: missing documentation for an associated function
+   --> akd/src/aegon/distributed_srs.rs:176:5
+    |
+176 |     pub fn all(dimensions: &[usize]) -> Vec<HtGeometry> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> akd/src/aegon/distributed_srs.rs:593:5
+    |
+593 |     pub shard_id: u32,
+    |     ^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> akd/src/aegon/distributed_srs.rs:594:5
+    |
+594 |     pub log_capacity: u32,
+    |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> akd/src/aegon/distributed_srs.rs:595:5
+    |
+595 |     pub k: u32,
+    |     ^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> akd/src/aegon/distributed_srs.rs:596:5
+    |
+596 |     pub setup_seed: u64,
+    |     ^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> akd/src/aegon/distributed_srs.rs:597:5
+    |
+597 |     pub cache_dir: PathBuf,
+    |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+   --> akd/src/aegon/distributed_srs.rs:620:5
+    |
+620 |     pub fn as_str(self) -> &'static str {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> akd/src/aegon/distributed_srs.rs:638:5
+    |
+638 |     pub shard_id: u32,
+    |     ^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> akd/src/aegon/distributed_srs.rs:639:5
+    |
+639 |     pub cache_hit: bool,
+    |     ^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> akd/src/aegon/distributed_srs.rs:640:5
+    |
+640 |     pub phases: Vec<PhaseEntry>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> akd/src/aegon/distributed_srs.rs:641:5
+    |
+641 |     pub inbound_slab_bytes: u64,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> akd/src/aegon/distributed_srs.rs:642:5
+    |
+642 |     pub outbound_slab_bytes: u64,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> akd/src/aegon/distributed_srs.rs:643:5
+    |
+643 |     pub pk_bytes: u64,
+    |     ^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> akd/src/aegon/distributed_srs.rs:644:5
+    |
+644 |     pub vk_bytes: u64,
+    |     ^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> akd/src/aegon/distributed_srs.rs:645:5
+    |
+645 |     pub universal_bytes: u64,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> akd/src/aegon/distributed_srs.rs:646:5
+    |
+646 |     pub compute_secs: f64,
+    |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> akd/src/aegon/distributed_srs.rs:647:5
+    |
+647 |     pub communication_secs: f64,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for an associated function
+   --> akd/src/aegon/distributed_srs.rs:719:5
+    |
+719 |     pub fn new(config: SrsBootstrapConfig) -> Arc<Self> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+   --> akd/src/aegon/distributed_srs.rs:748:5
+    |
+748 |     pub fn config(&self) -> &SrsBootstrapConfig {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+   --> akd/src/aegon/distributed_srs.rs:956:5
+    |
+956 |     pub async fn phase(&self) -> Phase {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+   --> akd/src/aegon/distributed_srs.rs:960:5
+    |
+960 |     pub async fn status(&self) -> String {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for an associated function
+   --> akd/src/aegon/distributed_srs.rs:976:5
+    |
+976 |     pub fn new(state: Arc<SrsBootstrapState<E>>) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+ --> /home/alrshir/aegon/target/release/build/akd-6adfeaf30b2ccd5f/out/aegon.srs.v1.rs:3:1
+  |
+3 | pub struct BootstrapSrsRequest {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> /home/alrshir/aegon/target/release/build/akd-6adfeaf30b2ccd5f/out/aegon.srs.v1.rs:22:5
+   |
+22 |     pub log_capacity: u32,
+   |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+  --> /home/alrshir/aegon/target/release/build/akd-6adfeaf30b2ccd5f/out/aegon.srs.v1.rs:34:1
+   |
+34 | pub struct BootstrapSrsResponse {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+  --> /home/alrshir/aegon/target/release/build/akd-6adfeaf30b2ccd5f/out/aegon.srs.v1.rs:42:1
+   |
+42 | pub struct GetSrsSlabRequest {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> /home/alrshir/aegon/target/release/build/akd-6adfeaf30b2ccd5f/out/aegon.srs.v1.rs:53:5
+   |
+53 |     pub range_end: u64,
+   |     ^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+  --> /home/alrshir/aegon/target/release/build/akd-6adfeaf30b2ccd5f/out/aegon.srs.v1.rs:56:1
+   |
+56 | pub struct SrsSlabChunk {
+   | ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+  --> /home/alrshir/aegon/target/release/build/akd-6adfeaf30b2ccd5f/out/aegon.srs.v1.rs:69:1
+   |
+69 | pub struct WaitForReadyRequest {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+  --> /home/alrshir/aegon/target/release/build/akd-6adfeaf30b2ccd5f/out/aegon.srs.v1.rs:76:1
+   |
+76 | pub struct WaitForReadyResponse {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+  --> /home/alrshir/aegon/target/release/build/akd-6adfeaf30b2ccd5f/out/aegon.srs.v1.rs:86:1
+   |
+86 | pub struct GetMetricsRequest {}
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+   --> /home/alrshir/aegon/target/release/build/akd-6adfeaf30b2ccd5f/out/aegon.srs.v1.rs:107:1
+    |
+107 | pub struct GetMetricsResponse {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /home/alrshir/aegon/target/release/build/akd-6adfeaf30b2ccd5f/out/aegon.srs.v1.rs:109:5
+    |
+109 |     pub shard_id: u32,
+    |     ^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /home/alrshir/aegon/target/release/build/akd-6adfeaf30b2ccd5f/out/aegon.srs.v1.rs:135:5
+    |
+135 |     pub vk_bytes: u64,
+    |     ^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /home/alrshir/aegon/target/release/build/akd-6adfeaf30b2ccd5f/out/aegon.srs.v1.rs:137:5
+    |
+137 |     pub universal_bytes: u64,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for an enum
+ --> akd/src/aegon/error.rs:4:1
+  |
+4 | pub enum AegonError {
+  | ^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a variant
+ --> akd/src/aegon/error.rs:6:5
+  |
+6 |     UnknownLabel(Vec<u8>),
+  |     ^^^^^^^^^^^^
+
+warning: missing documentation for a variant
+ --> akd/src/aegon/error.rs:9:5
+  |
+9 |     DuplicateLabel(Vec<u8>),
+  |     ^^^^^^^^^^^^^^
+
+warning: missing documentation for a variant
+  --> akd/src/aegon/error.rs:12:5
+   |
+12 |     DictionaryFull { capacity: usize },
+   |     ^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> akd/src/aegon/error.rs:12:22
+   |
+12 |     DictionaryFull { capacity: usize },
+   |                      ^^^^^^^^^^^^^^^
+
+warning: missing documentation for a variant
+  --> akd/src/aegon/error.rs:15:5
+   |
+15 |     InvalidEpoch(u64),
+   |     ^^^^^^^^^^^^
+
+warning: missing documentation for a variant
+  --> akd/src/aegon/error.rs:18:5
+   |
+18 |     Config(String),
+   |     ^^^^^^
+
+warning: missing documentation for a variant
+  --> akd/src/aegon/error.rs:21:5
+   |
+21 |     Pcs(akd_core::aegon_crypto::pcs::prelude::PCSError),
+   |     ^^^
+
+warning: missing documentation for a variant
+  --> akd/src/aegon/error.rs:24:5
+   |
+24 |     Transcript(akd_core::aegon_crypto::transcript::TranscriptError),
+   |     ^^^^^^^^^^
+
+warning: missing documentation for a variant
+  --> akd/src/aegon/error.rs:27:5
+   |
+27 |     Verification(&'static str),
+   |     ^^^^^^^^^^^^
+
+warning: missing documentation for a variant
+  --> akd/src/aegon/error.rs:30:5
+   |
+30 |     Database(String),
+   |     ^^^^^^^^
+
+warning: missing documentation for a function
+  --> akd/src/aegon/instrument.rs:12:1
+   |
+12 | pub fn set_rss_log(enabled: bool) {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a function
+  --> akd/src/aegon/instrument.rs:16:1
+   |
+16 | pub fn rss_log_enabled() -> bool {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a function
+  --> akd/src/aegon/instrument.rs:56:1
+   |
+56 | pub fn publish_profile_enabled() -> bool {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a module
+  --> akd/src/aegon/masking.rs:43:1
+   |
+43 | pub mod proto {
+   | ^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+   --> akd/src/aegon/masking.rs:454:1
+    |
+454 | pub struct MaskingClientPool<E, P>
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+   --> akd/src/aegon/masking.rs:489:5
+    |
+489 |     pub fn fetch_package(&self, num_vars: usize) -> Result<P::MaskingPackage, AegonError> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+ --> /home/alrshir/aegon/target/release/build/akd-6adfeaf30b2ccd5f/out/aegon.masking.v1.rs:3:1
+  |
+3 | pub struct MaskingPackageRequest {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+  --> /home/alrshir/aegon/target/release/build/akd-6adfeaf30b2ccd5f/out/aegon.masking.v1.rs:11:1
+   |
+11 | pub struct MaskingPackageResponse {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+   --> akd/src/aegon/server.rs:173:1
+    |
+173 | pub struct Aegon<E, P, H = Sha256Hash>
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> akd/src/aegon/server.rs:293:5
+    |
+293 |     pub epoch: u64,
+    |     ^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> akd/src/aegon/server.rs:294:5
+    |
+294 |     pub index_poly_evals: Vec<(u64, E::ScalarField)>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> akd/src/aegon/server.rs:295:5
+    |
+295 |     pub value_poly_evals: Vec<(u64, E::ScalarField)>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> akd/src/aegon/server.rs:296:5
+    |
+296 |     pub rand_index_poly_evals: Vec<(u64, E::ScalarField)>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> akd/src/aegon/server.rs:297:5
+    |
+297 |     pub rand_value_poly_evals: Vec<(u64, E::ScalarField)>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> akd/src/aegon/server.rs:298:5
+    |
+298 |     pub index_commitment: P::Commitment,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> akd/src/aegon/server.rs:299:5
+    |
+299 |     pub index_state: P::State,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> akd/src/aegon/server.rs:300:5
+    |
+300 |     pub value_commitment: P::Commitment,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> akd/src/aegon/server.rs:301:5
+    |
+301 |     pub value_state: P::State,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> akd/src/aegon/server.rs:302:5
+    |
+302 |     pub rand_index_commitment: P::Commitment,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> akd/src/aegon/server.rs:303:5
+    |
+303 |     pub rand_index_state: P::State,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> akd/src/aegon/server.rs:304:5
+    |
+304 |     pub rand_value_commitment: P::Commitment,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> akd/src/aegon/server.rs:305:5
+    |
+305 |     pub rand_value_state: P::State,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> akd/src/aegon/server.rs:306:5
+    |
+306 |     pub r_index: E::ScalarField,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> akd/src/aegon/server.rs:307:5
+    |
+307 |     pub r_value: E::ScalarField,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> akd/src/aegon/server.rs:308:5
+    |
+308 |     pub label_table_entries: Vec<(Vec<u8>, Vec<bool>, u64)>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+   --> akd/src/aegon/server.rs:638:5
+    |
+638 |     pub fn verifier_param(&self) -> P::VerifierParam {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+    --> akd/src/aegon/server.rs:1067:5
+     |
+1067 |     pub fn log_capacity(&self) -> usize {
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+    --> akd/src/aegon/server.rs:1070:5
+     |
+1070 |     pub fn dims(&self) -> &[usize] {
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+    --> akd/src/aegon/server.rs:1073:5
+     |
+1073 |     pub fn epoch(&self) -> u64 {
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+    --> akd/src/aegon/server.rs:1084:5
+     |
+1084 |     pub fn current_commitment(&self) -> EpochCommitment<E, P> {
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+    --> akd/src/aegon/server.rs:2813:5
+     |
+2813 |     pub fn lookup(&self, label: &Label) -> Result<LookupProof<E, P>, AegonError> {
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a module
+  --> akd/src/aegon/shard_grpc.rs:47:1
+   |
+47 | pub mod proto {
+   | ^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+   --> akd/src/aegon/shard_grpc.rs:108:5
+    |
+108 | /     fn publish_phase_1_at_slots(
+109 | |         &mut self,
+110 | |         batch: &[ShardWrite<E::ScalarField>],
+111 | |     ) -> Result<(P::Commitment, P::Commitment), AegonError>;
+    | |____________________________________________________________^
+
+warning: missing documentation for a method
+   --> akd/src/aegon/shard_grpc.rs:130:5
+    |
+130 |     fn is_index_slot_occupied(&self, slot_bits: &[bool]) -> bool;
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+   --> akd/src/aegon/shard_grpc.rs:132:5
+    |
+132 | /     fn open_index_at_slot(
+133 | |         &self,
+134 | |         slot_bits: &[bool],
+135 | |     ) -> Result<(E::ScalarField, P::Proof), AegonError>;
+    | |________________________________________________________^
+
+warning: missing documentation for a method
+   --> akd/src/aegon/shard_grpc.rs:137:5
+    |
+137 | /     fn open_value_at_slot(
+138 | |         &self,
+139 | |         slot_bits: &[bool],
+140 | |     ) -> Result<(E::ScalarField, P::Proof), AegonError>;
+    | |________________________________________________________^
+
+warning: missing documentation for a method
+   --> akd/src/aegon/shard_grpc.rs:142:5
+    |
+142 | /     fn open_rand_index_at_slot_in_epoch(
+143 | |         &self,
+144 | |         slot_bits: &[bool],
+145 | |         epoch: u64,
+146 | |     ) -> Result<(E::ScalarField, P::Proof), AegonError>;
+    | |________________________________________________________^
+
+warning: missing documentation for a method
+   --> akd/src/aegon/shard_grpc.rs:148:5
+    |
+148 | /     fn open_rand_value_at_slot_in_epoch(
+149 | |         &self,
+150 | |         slot_bits: &[bool],
+151 | |         epoch: u64,
+152 | |     ) -> Result<(E::ScalarField, P::Proof), AegonError>;
+    | |________________________________________________________^
+
+warning: missing documentation for a method
+   --> akd/src/aegon/shard_grpc.rs:181:5
+    |
+181 |     fn current_commitment(&self) -> EpochCommitment<E, P>;
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+   --> akd/src/aegon/shard_grpc.rs:188:5
+    |
+188 |     fn log_capacity(&self) -> usize;
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for an associated function
+   --> akd/src/aegon/shard_grpc.rs:653:5
+    |
+653 |     pub fn new(aegon: Aegon<E, P, H>) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+    --> akd/src/aegon/shard_grpc.rs:1185:5
+     |
+1185 |     pub max_attempts: usize,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+    --> akd/src/aegon/shard_grpc.rs:1186:5
+     |
+1186 |     pub initial_backoff: Duration,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+    --> akd/src/aegon/shard_grpc.rs:1187:5
+     |
+1187 |     pub max_backoff: Duration,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for an associated function
+    --> akd/src/aegon/shard_grpc.rs:1201:5
+     |
+1201 |     pub fn off() -> Self {
+     |     ^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+    --> akd/src/aegon/shard_grpc.rs:1212:5
+     |
+1212 |     pub endpoint: String,
+     |     ^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+    --> akd/src/aegon/shard_grpc.rs:1213:5
+     |
+1213 |     pub verifier_context: VerifierContext<E, P>,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+    --> akd/src/aegon/shard_grpc.rs:1214:5
+     |
+1214 |     pub log_capacity: usize,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+    --> akd/src/aegon/shard_grpc.rs:1221:5
+     |
+1221 |     pub retry: RetryPolicy,
+     |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+    --> akd/src/aegon/shard_grpc.rs:1222:5
+     |
+1222 |     pub connect_timeout: Option<Duration>,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for an associated function
+    --> akd/src/aegon/shard_grpc.rs:1226:5
+     |
+1226 | /     pub fn new(
+1227 | |         endpoint: String,
+1228 | |         verifier_context: VerifierContext<E, P>,
+1229 | |         log_capacity: usize,
+1230 | |     ) -> Self {
+     | |_____________^
+
+warning: missing documentation for a method
+    --> akd/src/aegon/shard_grpc.rs:1242:5
+     |
+1242 |     pub fn with_tls_ca(mut self, ca_pem: Vec<u8>) -> Self {
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+    --> akd/src/aegon/shard_grpc.rs:1247:5
+     |
+1247 |     pub fn with_tls_domain(mut self, domain: impl Into<String>) -> Self {
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+    --> akd/src/aegon/shard_grpc.rs:1252:5
+     |
+1252 |     pub fn with_retry(mut self, retry: RetryPolicy) -> Self {
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+    --> akd/src/aegon/shard_grpc.rs:1258:1
+     |
+1258 | pub struct GrpcShardClient<E, P>
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+ --> /home/alrshir/aegon/target/release/build/akd-6adfeaf30b2ccd5f/out/aegon.shard.v1.rs:3:1
+  |
+3 | pub struct ReconfigurePrefillRequest {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+  --> /home/alrshir/aegon/target/release/build/akd-6adfeaf30b2ccd5f/out/aegon.shard.v1.rs:15:1
+   |
+15 | pub struct ReconfigurePrefillResponse {}
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+  --> /home/alrshir/aegon/target/release/build/akd-6adfeaf30b2ccd5f/out/aegon.shard.v1.rs:17:1
+   |
+17 | pub struct RemaskValueHistoryEntryRequest {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+  --> /home/alrshir/aegon/target/release/build/akd-6adfeaf30b2ccd5f/out/aegon.shard.v1.rs:23:1
+   |
+23 | pub struct RemaskValueHistoryEntryResponse {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+  --> /home/alrshir/aegon/target/release/build/akd-6adfeaf30b2ccd5f/out/aegon.shard.v1.rs:32:1
+   |
+32 | pub struct PublishPhase1Request {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+  --> /home/alrshir/aegon/target/release/build/akd-6adfeaf30b2ccd5f/out/aegon.shard.v1.rs:41:1
+   |
+41 | pub struct PublishPhase1Response {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> /home/alrshir/aegon/target/release/build/akd-6adfeaf30b2ccd5f/out/aegon.shard.v1.rs:43:5
+   |
+43 |     pub index_commitment: ::prost::alloc::vec::Vec<u8>,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> /home/alrshir/aegon/target/release/build/akd-6adfeaf30b2ccd5f/out/aegon.shard.v1.rs:45:5
+   |
+45 |     pub value_commitment: ::prost::alloc::vec::Vec<u8>,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+  --> /home/alrshir/aegon/target/release/build/akd-6adfeaf30b2ccd5f/out/aegon.shard.v1.rs:48:1
+   |
+48 | pub struct PublishBatchRequest {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+  --> /home/alrshir/aegon/target/release/build/akd-6adfeaf30b2ccd5f/out/aegon.shard.v1.rs:57:1
+   |
+57 | pub struct PublishBatchResponse {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+  --> /home/alrshir/aegon/target/release/build/akd-6adfeaf30b2ccd5f/out/aegon.shard.v1.rs:89:1
+   |
+89 | pub struct FindLabelSlotRequest {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+  --> /home/alrshir/aegon/target/release/build/akd-6adfeaf30b2ccd5f/out/aegon.shard.v1.rs:96:1
+   |
+96 | pub struct FindLabelSlotResponse {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+   --> /home/alrshir/aegon/target/release/build/akd-6adfeaf30b2ccd5f/out/aegon.shard.v1.rs:113:1
+    |
+113 | pub struct PublishPhase2AndPersistRequest {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /home/alrshir/aegon/target/release/build/akd-6adfeaf30b2ccd5f/out/aegon.shard.v1.rs:120:5
+    |
+120 |     pub r_value: ::prost::alloc::vec::Vec<u8>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+   --> /home/alrshir/aegon/target/release/build/akd-6adfeaf30b2ccd5f/out/aegon.shard.v1.rs:128:1
+    |
+128 | pub struct PublishPhase2AndPersistResponse {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+   --> /home/alrshir/aegon/target/release/build/akd-6adfeaf30b2ccd5f/out/aegon.shard.v1.rs:136:1
+    |
+136 | pub struct SlotRequest {
+    | ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+   --> /home/alrshir/aegon/target/release/build/akd-6adfeaf30b2ccd5f/out/aegon.shard.v1.rs:142:1
+    |
+142 | pub struct SlotEpochRequest {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /home/alrshir/aegon/target/release/build/akd-6adfeaf30b2ccd5f/out/aegon.shard.v1.rs:144:5
+    |
+144 |     pub slot_bits: ::prost::alloc::vec::Vec<u8>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /home/alrshir/aegon/target/release/build/akd-6adfeaf30b2ccd5f/out/aegon.shard.v1.rs:146:5
+    |
+146 |     pub epoch: u64,
+    |     ^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+   --> /home/alrshir/aegon/target/release/build/akd-6adfeaf30b2ccd5f/out/aegon.shard.v1.rs:149:1
+    |
+149 | pub struct SlotOccupiedResponse {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /home/alrshir/aegon/target/release/build/akd-6adfeaf30b2ccd5f/out/aegon.shard.v1.rs:151:5
+    |
+151 |     pub occupied: bool,
+    |     ^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+   --> /home/alrshir/aegon/target/release/build/akd-6adfeaf30b2ccd5f/out/aegon.shard.v1.rs:154:1
+    |
+154 | pub struct OpenResponse {
+    | ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+   --> /home/alrshir/aegon/target/release/build/akd-6adfeaf30b2ccd5f/out/aegon.shard.v1.rs:163:1
+    |
+163 | pub struct CommitmentResponse {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /home/alrshir/aegon/target/release/build/akd-6adfeaf30b2ccd5f/out/aegon.shard.v1.rs:165:5
+    |
+165 |     pub epoch_commitment: ::prost::alloc::vec::Vec<u8>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+   --> /home/alrshir/aegon/target/release/build/akd-6adfeaf30b2ccd5f/out/aegon.shard.v1.rs:168:1
+    |
+168 | pub struct GetVerifierContextResponse {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /home/alrshir/aegon/target/release/build/akd-6adfeaf30b2ccd5f/out/aegon.shard.v1.rs:175:5
+    |
+175 |     pub log_capacity: u64,
+    |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+   --> /home/alrshir/aegon/target/release/build/akd-6adfeaf30b2ccd5f/out/aegon.shard.v1.rs:178:1
+    |
+178 | pub struct Empty {}
+    | ^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+   --> /home/alrshir/aegon/target/release/build/akd-6adfeaf30b2ccd5f/out/aegon.shard.v1.rs:180:1
+    |
+180 | pub struct ApplyPersistenceOpsRequest {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+   --> /home/alrshir/aegon/target/release/build/akd-6adfeaf30b2ccd5f/out/aegon.shard.v1.rs:190:1
+    |
+190 | pub struct ApplyPersistenceOpsResponse {}
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+   --> /home/alrshir/aegon/target/release/build/akd-6adfeaf30b2ccd5f/out/aegon.shard.v1.rs:192:1
+    |
+192 | pub struct FetchValueRequest {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+   --> /home/alrshir/aegon/target/release/build/akd-6adfeaf30b2ccd5f/out/aegon.shard.v1.rs:198:1
+    |
+198 | pub struct FetchValueResponse {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /home/alrshir/aegon/target/release/build/akd-6adfeaf30b2ccd5f/out/aegon.shard.v1.rs:205:5
+    |
+205 |     pub value: ::prost::alloc::vec::Vec<u8>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+   --> /home/alrshir/aegon/target/release/build/akd-6adfeaf30b2ccd5f/out/aegon.shard.v1.rs:208:1
+    |
+208 | pub struct FetchValueHistoryRequest {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /home/alrshir/aegon/target/release/build/akd-6adfeaf30b2ccd5f/out/aegon.shard.v1.rs:210:5
+    |
+210 |     pub label: ::prost::alloc::vec::Vec<u8>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+   --> /home/alrshir/aegon/target/release/build/akd-6adfeaf30b2ccd5f/out/aegon.shard.v1.rs:213:1
+    |
+213 | pub struct FetchValueHistoryResponse {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+   --> /home/alrshir/aegon/target/release/build/akd-6adfeaf30b2ccd5f/out/aegon.shard.v1.rs:220:1
+    |
+220 | pub struct FetchLabelPlacementRequest {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /home/alrshir/aegon/target/release/build/akd-6adfeaf30b2ccd5f/out/aegon.shard.v1.rs:222:5
+    |
+222 |     pub label: ::prost::alloc::vec::Vec<u8>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+   --> /home/alrshir/aegon/target/release/build/akd-6adfeaf30b2ccd5f/out/aegon.shard.v1.rs:225:1
+    |
+225 | pub struct FetchLabelPlacementResponse {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /home/alrshir/aegon/target/release/build/akd-6adfeaf30b2ccd5f/out/aegon.shard.v1.rs:227:5
+    |
+227 |     pub found: bool,
+    |     ^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+   --> /home/alrshir/aegon/target/release/build/akd-6adfeaf30b2ccd5f/out/aegon.shard.v1.rs:234:1
+    |
+234 | pub struct FetchHistoryOpeningsRequest {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /home/alrshir/aegon/target/release/build/akd-6adfeaf30b2ccd5f/out/aegon.shard.v1.rs:236:5
+    |
+236 |     pub epoch: u64,
+    |     ^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+   --> /home/alrshir/aegon/target/release/build/akd-6adfeaf30b2ccd5f/out/aegon.shard.v1.rs:239:1
+    |
+239 | pub struct FetchHistoryOpeningsResponse {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /home/alrshir/aegon/target/release/build/akd-6adfeaf30b2ccd5f/out/aegon.shard.v1.rs:241:5
+    |
+241 |     pub found: bool,
+    |     ^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> akd/src/aegon/sharded.rs:69:14
+   |
+69 |     Remote { endpoints: Vec<String> },
+   |              ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> akd/src/aegon/sharded.rs:138:5
+    |
+138 |     pub _e: PhantomData<E>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+   --> akd/src/aegon/sharded.rs:149:5
+    |
+149 |     pub fn n_shards(&self) -> usize {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for an associated function
+   --> akd/src/aegon/sharded.rs:290:5
+    |
+290 |     pub fn new() -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+   --> akd/src/aegon/sharded.rs:381:5
+    |
+381 |     pub fn build(self) -> Result<ShardedAegonConfig<E, P>, AegonError> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> akd/src/aegon/sharded.rs:520:5
+    |
+520 |     pub epoch: u64,
+    |     ^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> akd/src/aegon/sharded.rs:521:5
+    |
+521 |     pub merkle_root: EpochDigest,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> akd/src/aegon/sharded.rs:522:5
+    |
+522 |     pub per_shard: Vec<EpochCommitment<E, P>>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> akd/src/aegon/sharded.rs:649:5
+    |
+649 |     pub shard_id: u32,
+    |     ^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> akd/src/aegon/sharded.rs:650:5
+    |
+650 |     pub slot_bits: Vec<bool>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> akd/src/aegon/sharded.rs:663:5
+    |
+663 |     pub shard_id: u32,
+    |     ^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> akd/src/aegon/sharded.rs:664:5
+    |
+664 |     pub slot_bits: Vec<bool>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> akd/src/aegon/sharded.rs:665:5
+    |
+665 |     pub leaf: EpochCommitment<E, P>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> akd/src/aegon/sharded.rs:666:5
+    |
+666 |     pub merkle_path: Vec<EpochDigest>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> akd/src/aegon/sharded.rs:667:5
+    |
+667 |     pub evaluation: E::ScalarField,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> akd/src/aegon/sharded.rs:668:5
+    |
+668 |     pub proof: P::Proof,
+    |     ^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> akd/src/aegon/sharded.rs:704:5
+    |
+704 |     pub rand_value_pre_proof: P::Proof,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> akd/src/aegon/sharded.rs:707:5
+    |
+707 |     pub rand_value_post_proof: P::Proof,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> akd/src/aegon/sharded.rs:711:5
+    |
+711 |     pub value_post_proof: P::Proof,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> akd/src/aegon/sharded.rs:739:5
+    |
+739 |     pub label: Vec<u8>,
+    |     ^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> akd/src/aegon/sharded.rs:740:5
+    |
+740 |     pub entries: Vec<StoredValueHistoryEntry<E, P>>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> akd/src/aegon/sharded.rs:777:5
+    |
+777 |     pub rand_index_proof: P::Proof,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> akd/src/aegon/sharded.rs:801:5
+    |
+801 |     pub label: Vec<u8>,
+    |     ^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> akd/src/aegon/sharded.rs:815:5
+    |
+815 |     pub shard_id: u32,
+    |     ^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> akd/src/aegon/sharded.rs:816:5
+    |
+816 |     pub slot_bits: Vec<bool>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> akd/src/aegon/sharded.rs:820:5
+    |
+820 |     pub rand_index_current_proof: P::Proof,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> akd/src/aegon/sharded.rs:857:5
+    |
+857 |     pub rand_value_current_proof: P::Proof,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> akd/src/aegon/sharded.rs:922:5
+    |
+922 |     pub proof: P::Proof,
+    |     ^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> akd/src/aegon/sharded.rs:952:5
+    |
+952 |     pub route: Vec<ShardRoutingProbe>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> akd/src/aegon/sharded.rs:953:5
+    |
+953 |     pub dest_shard_id: u32,
+    |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> akd/src/aegon/sharded.rs:954:5
+    |
+954 |     pub dest_leaf: EpochCommitment<E, P>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> akd/src/aegon/sharded.rs:955:5
+    |
+955 |     pub dest_merkle_path: Vec<EpochDigest>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> akd/src/aegon/sharded.rs:956:5
+    |
+956 |     pub slots: Vec<ShardSlotProbe<E, P>>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> akd/src/aegon/sharded.rs:976:5
+    |
+976 |     pub label_proof: ShardedLabelProofTwoLayer<E, P>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> akd/src/aegon/sharded.rs:980:5
+    |
+980 |     pub value_proof: P::Proof,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+    --> akd/src/aegon/sharded.rs:1005:5
+     |
+1005 |     pub rand_index_s0_eval: E::ScalarField,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+    --> akd/src/aegon/sharded.rs:1006:5
+     |
+1006 |     pub rand_index_s0_proof: P::Proof,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+    --> akd/src/aegon/sharded.rs:1007:5
+     |
+1007 |     pub rand_index_s1_eval: E::ScalarField,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+    --> akd/src/aegon/sharded.rs:1008:5
+     |
+1008 |     pub rand_index_s1_proof: P::Proof,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+    --> akd/src/aegon/sharded.rs:1039:5
+     |
+1039 |     pub route: Vec<ShardRoutingProbe>,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+    --> akd/src/aegon/sharded.rs:1040:5
+     |
+1040 |     pub dest_shard_id: u32,
+     |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+    --> akd/src/aegon/sharded.rs:1041:5
+     |
+1041 |     pub dest_leaf_s0: EpochCommitment<E, P>,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+    --> akd/src/aegon/sharded.rs:1042:5
+     |
+1042 |     pub dest_leaf_s1: EpochCommitment<E, P>,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+    --> akd/src/aegon/sharded.rs:1043:5
+     |
+1043 |     pub dest_merkle_path_s0: Vec<EpochDigest>,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+    --> akd/src/aegon/sharded.rs:1044:5
+     |
+1044 |     pub dest_merkle_path_s1: Vec<EpochDigest>,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+    --> akd/src/aegon/sharded.rs:1045:5
+     |
+1045 |     pub slots: Vec<ShardSlotRandPair<E, P>>,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+    --> akd/src/aegon/sharded.rs:1046:5
+     |
+1046 |     pub value_rand_s0_eval: E::ScalarField,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+    --> akd/src/aegon/sharded.rs:1047:5
+     |
+1047 |     pub value_rand_s0_proof: P::Proof,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+    --> akd/src/aegon/sharded.rs:1048:5
+     |
+1048 |     pub value_rand_s1_eval: E::ScalarField,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+    --> akd/src/aegon/sharded.rs:1049:5
+     |
+1049 |     pub value_rand_s1_proof: P::Proof,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+    --> akd/src/aegon/sharded.rs:1078:5
+     |
+1078 |     pub log_n_shards: usize,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for an associated function
+    --> akd/src/aegon/sharded.rs:1087:5
+     |
+1087 |     pub fn new(inner: VerifierContext<E, P>, log_n_shards: usize) -> Self {
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+    --> akd/src/aegon/sharded.rs:1104:5
+     |
+1104 |     pub fn shard_log_capacity(&self) -> usize {
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+    --> akd/src/aegon/sharded.rs:1108:5
+     |
+1108 |     pub fn total_log_capacity(&self) -> usize {
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+    --> akd/src/aegon/sharded.rs:1573:5
+     |
+1573 |     pub fn shard_fullness_proof(&self, shard_id: usize) -> Option<&[u8]> {
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+    --> akd/src/aegon/sharded.rs:1579:5
+     |
+1579 |     pub fn n_shards(&self) -> usize {
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+    --> akd/src/aegon/sharded.rs:1583:5
+     |
+1583 |     pub fn log_n_shards(&self) -> usize {
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+    --> akd/src/aegon/sharded.rs:1587:5
+     |
+1587 |     pub fn shard_log_capacity(&self) -> usize {
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+    --> akd/src/aegon/sharded.rs:1591:5
+     |
+1591 |     pub fn log_capacity(&self) -> usize {
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+    --> akd/src/aegon/sharded.rs:1595:5
+     |
+1595 |     pub fn epoch(&self) -> u64 {
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+    --> akd/src/aegon/sharded.rs:1620:5
+     |
+1620 |     pub fn current_commitment(&self) -> ShardedEpochCommitment<E, P> {
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+    --> akd/src/aegon/sharded.rs:1627:5
+     |
+1627 |     pub fn epoch_commitment(&self, epoch: u64) -> Option<ShardedEpochCommitment<E, P>> {
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+    --> akd/src/aegon/sharded.rs:2967:5
+     |
+2967 |     pub entry_roots: Vec<(EpochDigest, EpochDigest)>,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+    --> akd/src/aegon/sharded.rs:2968:5
+     |
+2968 |     pub live_root: Option<EpochDigest>,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a function
+    --> akd/src/aegon/sharded.rs:2971:1
+     |
+2971 | / pub fn verify_lookup_history<E, P, H>(
+2972 | |     ctx: &ShardedVerifierContext<E, P>,
+2973 | |     history: &ShardedValueHistory<E, P>,
+2974 | | ) -> Result<VerifiedLookupHistory, AegonError>
+...    |
+2977 | |     P: AegonPcs<E>,
+2978 | |     H: HashSuite<E::ScalarField>,
+     | |_________________________________^
+
+warning: missing documentation for a struct field
+    --> akd/src/aegon/sharded.rs:3131:5
+     |
+3131 |     pub placement_root: Option<EpochDigest>,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+    --> akd/src/aegon/sharded.rs:3132:5
+     |
+3132 |     pub live_root: Option<EpochDigest>,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> akd/src/aegon/sigma.rs:93:5
+   |
+93 |     pub r_commit: P::Commitment,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> akd/src/aegon/sigma.rs:94:5
+   |
+94 |     pub response: E::ScalarField,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a type alias
+  --> akd/src/aegon/types.rs:11:1
+   |
+11 | pub type Label = Vec<u8>;
+   | ^^^^^^^^^^^^^^
+
+warning: missing documentation for a type alias
+  --> akd/src/aegon/types.rs:12:1
+   |
+12 | pub type Value = Vec<u8>;
+   | ^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> akd/src/aegon/types.rs:54:5
+   |
+54 |     pub epoch: u64,
+   |     ^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> akd/src/aegon/types.rs:55:5
+   |
+55 |     pub index_commitment: P::Commitment,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> akd/src/aegon/types.rs:56:5
+   |
+56 |     pub value_commitment: P::Commitment,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> akd/src/aegon/types.rs:57:5
+   |
+57 |     pub rand_index_commitment: P::Commitment,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> akd/src/aegon/types.rs:58:5
+   |
+58 |     pub rand_value_commitment: P::Commitment,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> akd/src/aegon/types.rs:65:5
+   |
+65 |     pub _e: PhantomData<E>,
+   |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> akd/src/aegon/types.rs:87:5
+   |
+87 |     pub ctr0: u64,
+   |     ^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> akd/src/aegon/types.rs:88:5
+   |
+88 |     pub probes: Vec<(E::ScalarField, P::Proof)>,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> akd/src/aegon/types.rs:89:5
+   |
+89 |     pub value_evaluation: E::ScalarField,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> akd/src/aegon/types.rs:90:5
+   |
+90 |     pub value_proof: P::Proof,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+  --> akd/src/aegon/types.rs:94:5
+   |
+94 |     pub fn num_probes(&self) -> usize {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> akd/src/aegon/types.rs:107:5
+    |
+107 |     pub r_index: F,
+    |     ^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> akd/src/aegon/types.rs:108:5
+    |
+108 |     pub r_value: F,
+    |     ^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> akd/src/aegon/types.rs:127:5
+    |
+127 |     pub eval_s0: E::ScalarField,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> akd/src/aegon/types.rs:128:5
+    |
+128 |     pub proof_s0: P::Proof,
+    |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> akd/src/aegon/types.rs:129:5
+    |
+129 |     pub eval_s1: E::ScalarField,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> akd/src/aegon/types.rs:130:5
+    |
+130 |     pub proof_s1: P::Proof,
+    |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> akd/src/aegon/types.rs:147:5
+    |
+147 |     pub ctr0: u64,
+    |     ^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> akd/src/aegon/types.rs:148:5
+    |
+148 |     pub index_witnesses: Vec<RandPair<E, P>>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> akd/src/aegon/types.rs:149:5
+    |
+149 |     pub value_witness: RandPair<E, P>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> akd/src/aegon/types.rs:180:5
+    |
+180 |     pub rand_index_pre_proof: P::Proof,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> akd/src/aegon/types.rs:184:5
+    |
+184 |     pub rand_value_pre_proof: P::Proof,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> akd/src/aegon/types.rs:189:5
+    |
+189 |     pub rand_index_post_proof: P::Proof,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> akd/src/aegon/types.rs:194:5
+    |
+194 |     pub rand_value_post_proof: P::Proof,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> akd/src/aegon/types.rs:198:5
+    |
+198 |     pub value_post_proof: P::Proof,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> akd/src/aegon/types.rs:230:5
+    |
+230 |     pub rand_value_pre_proof: P::Proof,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> akd/src/aegon/types.rs:233:5
+    |
+233 |     pub rand_value_post_proof: P::Proof,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> akd/src/aegon/types.rs:237:5
+    |
+237 |     pub value_post_proof: P::Proof,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> akd/src/aegon/types.rs:251:5
+    |
+251 |     pub entries: Vec<HistoryOpeningEntry<E, P>>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> akd/src/aegon/types.rs:252:5
+    |
+252 |     pub value_changes: Vec<ValueChangeEntry<E, P>>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `akd` (lib) generated 351 warnings (run `cargo fix --lib -p akd` to apply 6 suggestions)
+    Finished `release` profile [optimized] target(s) in 0.33s
+[02:49:16] [aegon-bench-client] uploading aegon_lookup_bench
+WARNING: 
+
+To increase the performance of the tunnel, consider installing NumPy. For instructions,
+please see https://cloud.google.com/iap/docs/using-tcp-forwarding#increasing_the_tcp_upload_bandwidth
+
+WARNING: 
+
+To increase the performance of the tunnel, consider installing NumPy. For instructions,
+please see https://cloud.google.com/iap/docs/using-tcp-forwarding#increasing_the_tcp_upload_bandwidth
+
+[02:49:26] [aegon-bench-client] wiping /opt/aegon/coord-db (single wipe; no inter-fill resets)
+WARNING: 
+
+To increase the performance of the tunnel, consider installing NumPy. For instructions,
+please see https://cloud.google.com/iap/docs/using-tcp-forwarding#increasing_the_tcp_upload_bandwidth
+
+[02:49:29] [aegon-bench-client] bench mode: in-process coord (connects to shards directly)
+[02:49:29] [aegon-bench-client] starting aegon_lookup_bench as systemd unit 'aegon-lookup-bench'
+WARNING: 
+
+To increase the performance of the tunnel, consider installing NumPy. For instructions,
+please see https://cloud.google.com/iap/docs/using-tcp-forwarding#increasing_the_tcp_upload_bandwidth
+
+Running as unit: aegon-lookup-bench.service; invocation ID: c6b999a9555546458de37a8d90e0d93d
+LAUNCHED
+[02:49:32] [aegon-bench-client] polling aegon-lookup-bench + streaming /tmp/aegon-lookup-bench.log -> /home/alrshir/aegon/bench-results/lookup/lookup-bench.log (resilient to SSH death)
+bench: mode=remote n_shards=128 (shard_log_capacity=27, kzh_k=9, log_n_shards=7)
+bench: setup OK in 564.9 ms (ECVRF prover attached)
+bench: client connecting to http://127.0.0.1:50190 ...
+--- preload level 1/10: target=42949672 (current=0) ---
+  published 1048576 labels (0..1048576) in 45023.4 ms
+  published 1048576 labels (1048576..2097152) in 49549.7 ms
+  published 1048576 labels (2097152..3145728) in 48811.2 ms
+  published 1048576 labels (3145728..4194304) in 48824.4 ms
+  published 1048576 labels (4194304..5242880) in 48940.6 ms
+  published 1048576 labels (5242880..6291456) in 48931.4 ms
+  published 1048576 labels (6291456..7340032) in 49058.5 ms
+  published 1048576 labels (7340032..8388608) in 48666.7 ms
+  published 1048576 labels (8388608..9437184) in 49201.0 ms
+  published 1048576 labels (9437184..10485760) in 49419.8 ms
+  published 1048576 labels (9437184..10485760) in 49419.8 ms
+  published 1048576 labels (10485760..11534336) in 48685.2 ms
+  published 1048576 labels (11534336..12582912) in 48640.2 ms
+  published 1048576 labels (12582912..13631488) in 48573.8 ms
+  published 1048576 labels (13631488..14680064) in 48797.3 ms
+  published 1048576 labels (14680064..15728640) in 49781.3 ms
+  published 1048576 labels (15728640..16777216) in 47917.8 ms
+  published 1048576 labels (16777216..17825792) in 48916.6 ms
+  published 1048576 labels (17825792..18874368) in 48874.8 ms
+  published 1048576 labels (18874368..19922944) in 49348.2 ms
+  published 1048576 labels (19922944..20971520) in 48884.1 ms
+  published 1048576 labels (20971520..22020096) in 48684.5 ms
+  published 1048576 labels (22020096..23068672) in 48940.6 ms
+  published 1048576 labels (23068672..24117248) in 49364.0 ms
+  published 1048576 labels (24117248..25165824) in 48428.7 ms
+  published 1048576 labels (25165824..26214400) in 48609.1 ms
+  published 1048576 labels (26214400..27262976) in 49445.0 ms
+  published 1048576 labels (27262976..28311552) in 48978.1 ms
+  published 1048576 labels (28311552..29360128) in 49291.2 ms
+  published 1048576 labels (29360128..30408704) in 49778.2 ms
+  published 1048576 labels (30408704..31457280) in 49396.1 ms
+  published 1048576 labels (31457280..32505856) in 49283.4 ms
+  published 1048576 labels (32505856..33554432) in 49482.8 ms
+  published 1048576 labels (33554432..34603008) in 49745.2 ms
+  published 1048576 labels (34603008..35651584) in 48563.3 ms
+  published 1048576 labels (35651584..36700160) in 49033.5 ms
+  published 1048576 labels (36700160..37748736) in 49183.5 ms
+  published 1048576 labels (37748736..38797312) in 48546.1 ms
+  published 1048576 labels (38797312..39845888) in 49337.5 ms
+  published 1048576 labels (39845888..40894464) in 48829.1 ms
+  published 1048576 labels (40894464..41943040) in 48942.8 ms
+  published 1006632 labels (41943040..42949672) in 47144.7 ms
+  level=42949672: bench RSS = 1118 MB (1144992 KB)
+  sample 0: server[lbl/val/vh/lh]=23.28/4.62/0.61/1.05ms client[lbl/val/vh/lh]=2.09/4.02/0.60/1.01ms totals[lbl/val/vh/lh]=5173/5356/29/9958B (vh_entries=0)
+  sample 9: server[lbl/val/vh/lh]=2.35/18.60/15.41/1.27ms client[lbl/val/vh/lh]=1.91/3.24/8.41/1.15ms totals[lbl/val/vh/lh]=5173/5356/19950/9958B (vh_entries=1)
+  published 1006632 labels (41943040..42949672) in 47144.7 ms
+  level=42949672: bench RSS = 1118 MB (1144992 KB)
+  sample 0: server[lbl/val/vh/lh]=23.28/4.62/0.61/1.05ms client[lbl/val/vh/lh]=2.09/4.02/0.60/1.01ms totals[lbl/val/vh/lh]=5173/5356/29/9958B (vh_entries=0)
+  sample 9: server[lbl/val/vh/lh]=2.35/18.60/15.41/1.27ms client[lbl/val/vh/lh]=1.91/3.24/8.41/1.15ms totals[lbl/val/vh/lh]=5173/5356/19950/9958B (vh_entries=1)
+  sample 19: server[lbl/val/vh/lh]=2.22/9.15/22.63/1.06ms client[lbl/val/vh/lh]=1.64/3.71/9.88/2.17ms totals[lbl/val/vh/lh]=5173/5356/19950/9958B (vh_entries=1)
+  sample 29: server[lbl/val/vh/lh]=1.89/3.77/8.17/1.04ms client[lbl/val/vh/lh]=1.38/3.29/8.17/0.95ms totals[lbl/val/vh/lh]=5173/5356/19950/9958B (vh_entries=1)
+  sample 39: server[lbl/val/vh/lh]=2.26/16.96/18.72/1.84ms client[lbl/val/vh/lh]=1.63/2.88/8.35/1.19ms totals[lbl/val/vh/lh]=5173/5356/19950/9958B (vh_entries=1)
+  sample 49: server[lbl/val/vh/lh]=1.90/3.38/11.25/1.17ms client[lbl/val/vh/lh]=1.77/5.06/10.28/1.43ms totals[lbl/val/vh/lh]=5173/5356/19950/9958B (vh_entries=1)
+  sample 59: server[lbl/val/vh/lh]=1.67/4.52/8.74/1.03ms client[lbl/val/vh/lh]=1.57/4.03/7.54/2.41ms totals[lbl/val/vh/lh]=5173/5356/19950/9958B (vh_entries=1)
+  sample 69: server[lbl/val/vh/lh]=2.00/4.78/8.84/1.53ms client[lbl/val/vh/lh]=1.70/2.90/9.40/1.32ms totals[lbl/val/vh/lh]=5173/5356/19950/9958B (vh_entries=1)
+  sample 79: server[lbl/val/vh/lh]=1.91/4.48/8.55/1.36ms client[lbl/val/vh/lh]=1.91/2.95/8.95/1.46ms totals[lbl/val/vh/lh]=5173/5356/19950/9958B (vh_entries=1)
+  sample 89: server[lbl/val/vh/lh]=2.33/19.03/13.59/1.78ms client[lbl/val/vh/lh]=1.72/3.59/8.87/2.53ms totals[lbl/val/vh/lh]=5173/5356/19950/9958B (vh_entries=1)
+  sample 99: server[lbl/val/vh/lh]=2.07/4.08/11.27/1.52ms client[lbl/val/vh/lh]=1.87/4.31/10.44/2.37ms totals[lbl/val/vh/lh]=5173/5356/19950/9958B (vh_entries=1)
+  audit sample 0: epoch 40->41 verify=68.067ms fetch=0.024ms proof_bytes=51376
+  audit sample 19: epoch 40->41 verify=68.183ms fetch=0.031ms proof_bytes=51376
+  audit sample 39: epoch 40->41 verify=68.211ms fetch=0.032ms proof_bytes=51376
+  audit sample 59: epoch 40->41 verify=68.615ms fetch=0.043ms proof_bytes=51376
+  audit sample 79: epoch 40->41 verify=68.599ms fetch=0.026ms proof_bytes=51376
+  audit sample 99: epoch 40->41 verify=68.303ms fetch=0.049ms proof_bytes=51376
+[lookup-bench] CHECKPOINT: persisted level 1/10 lookup+audit (/tmp/aegon-lookup-bench.json)
+  throughput_sweep: kind=value concurrency=1 window=20s warmup=3s rpc_timeout=10s
+    qps=144  n=2881  attempts=3161  errs=0 (0.0%)  p50=5.9ms  p90=6.8ms  p99=20.7ms
+  throughput_sweep: kind=value concurrency=4 window=20s warmup=3s rpc_timeout=10s
+    qps=119  n=2381  attempts=2754  errs=0 (0.0%)  p50=7.0ms  p90=101.5ms  p99=113.0ms
+  throughput_sweep: kind=value concurrency=16 window=20s warmup=3s rpc_timeout=10s
+    qps=119  n=2381  attempts=2764  errs=0 (0.0%)  p50=130.5ms  p90=188.2ms  p99=235.8ms
+  throughput_sweep: kind=value concurrency=64 window=20s warmup=3s rpc_timeout=10s
+    qps=120  n=2393  attempts=2815  errs=0 (0.0%)  p50=534.1ms  p90=597.4ms  p99=638.7ms
+  throughput_sweep: kind=value concurrency=256 window=20s warmup=3s rpc_timeout=10s
+    qps=119  n=2384  attempts=2997  errs=0 (0.0%)  p50=2148.1ms  p90=2201.9ms  p99=2247.3ms
+  throughput_sweep: kind=value concurrency=512 window=20s warmup=3s rpc_timeout=10s
+    qps=119  n=2380  attempts=3257  errs=0 (0.0%)  p50=4288.0ms  p90=4346.8ms  p99=4394.5ms
+  throughput_sweep: kind=value concurrency=1024 window=20s warmup=3s rpc_timeout=10s
+    qps=119  n=2386  attempts=3774  errs=0 (0.0%)  p50=8547.6ms  p90=8632.9ms  p99=8695.8ms
+  publish_bench: batch=4096 samples=3
+  publish_bench: batch=8192 samples=3
+  publish_bench: batch=16384 samples=3
+  publish_bench: batch=32768 samples=3
+  publish_bench: batch=65536 samples=3
+  publish_bench: batch=131072 samples=3
+[lookup-bench] flushed /tmp/aegon-lookup-bench.json (1 level(s) so far)
+--- preload level 2/10: target=85899345 (current=42949672) ---
+  published 1048576 labels (42949672..43998248) in 49341.3 ms
+  published 1048576 labels (43998248..45046824) in 49244.3 ms
+  published 1048576 labels (45046824..46095400) in 49307.4 ms
+  published 1048576 labels (46095400..47143976) in 49544.3 ms
+  published 1048576 labels (47143976..48192552) in 49230.5 ms
+  published 1048576 labels (48192552..49241128) in 50030.5 ms
+  published 1048576 labels (49241128..50289704) in 49867.4 ms
+  published 1048576 labels (50289704..51338280) in 49166.7 ms
+  published 1048576 labels (51338280..52386856) in 49054.3 ms
+  published 1048576 labels (52386856..53435432) in 49217.0 ms
+  published 1048576 labels (53435432..54484008) in 48596.6 ms
+  published 1048576 labels (54484008..55532584) in 49334.5 ms
+  published 1048576 labels (55532584..56581160) in 49264.7 ms
+  published 1048576 labels (56581160..57629736) in 48631.2 ms
+  published 1048576 labels (57629736..58678312) in 49172.2 ms
+  published 1048576 labels (58678312..59726888) in 49564.2 ms
+  published 1048576 labels (59726888..60775464) in 49159.6 ms
+  published 1048576 labels (60775464..61824040) in 49327.2 ms
+  published 1048576 labels (61824040..62872616) in 48885.3 ms
+  published 1048576 labels (62872616..63921192) in 49179.3 ms
+  published 1048576 labels (63921192..64969768) in 49557.2 ms
+  published 1048576 labels (64969768..66018344) in 49454.7 ms
+  published 1048576 labels (66018344..67066920) in 49247.4 ms
+  published 1048576 labels (67066920..68115496) in 49070.6 ms
+  published 1048576 labels (68115496..69164072) in 49910.1 ms
+  published 1048576 labels (69164072..70212648) in 50162.2 ms
+  published 1048576 labels (70212648..71261224) in 49054.4 ms
+  published 1048576 labels (71261224..72309800) in 49404.3 ms
+  published 1048576 labels (72309800..73358376) in 49371.8 ms
+  published 1048576 labels (73358376..74406952) in 49294.1 ms
+  published 1048576 labels (74406952..75455528) in 49583.7 ms
+  published 1048576 labels (75455528..76504104) in 50112.5 ms
+  published 1048576 labels (76504104..77552680) in 48525.0 ms
+  published 1048576 labels (77552680..78601256) in 48846.2 ms
+  published 1048576 labels (78601256..79649832) in 48977.8 ms
+  published 1048576 labels (79649832..80698408) in 48901.2 ms
+  published 1048576 labels (80698408..81746984) in 49410.0 ms
+  published 1048576 labels (81746984..82795560) in 48994.7 ms
+  published 1048576 labels (82795560..83844136) in 49031.5 ms
+  published 1048576 labels (83844136..84892712) in 50391.9 ms
+  published 1006633 labels (84892712..85899345) in 47336.5 ms
+  level=85899345: bench RSS = 1223 MB (1252964 KB)
+  sample 0: server[lbl/val/vh/lh]=24.53/3.98/11.37/1.20ms client[lbl/val/vh/lh]=1.78/4.00/11.71/1.10ms totals[lbl/val/vh/lh]=5173/5356/19950/9958B (vh_entries=1)
+  sample 9: server[lbl/val/vh/lh]=2.74/21.95/14.90/1.40ms client[lbl/val/vh/lh]=2.14/5.16/13.85/2.73ms totals[lbl/val/vh/lh]=5173/5356/19950/9958B (vh_entries=1)
+  sample 19: server[lbl/val/vh/lh]=1.66/4.73/9.35/1.15ms client[lbl/val/vh/lh]=1.67/3.41/8.19/1.06ms totals[lbl/val/vh/lh]=5173/5356/19950/9958B (vh_entries=1)
+  sample 29: server[lbl/val/vh/lh]=1.51/3.14/8.48/1.08ms client[lbl/val/vh/lh]=1.49/3.23/8.95/1.97ms totals[lbl/val/vh/lh]=5173/5356/19950/9958B (vh_entries=1)
+  sample 39: server[lbl/val/vh/lh]=2.10/30.80/9.03/1.36ms client[lbl/val/vh/lh]=1.81/3.94/8.54/1.23ms totals[lbl/val/vh/lh]=5213/5396/19990/9998B (vh_entries=1)
+  sample 49: server[lbl/val/vh/lh]=26.79/4.01/10.30/0.99ms client[lbl/val/vh/lh]=1.61/3.67/8.10/1.71ms totals[lbl/val/vh/lh]=5173/5356/19950/9958B (vh_entries=1)
+  sample 59: server[lbl/val/vh/lh]=20.73/5.06/17.71/1.42ms client[lbl/val/vh/lh]=1.83/4.95/10.60/1.29ms totals[lbl/val/vh/lh]=5173/5356/19950/9958B (vh_entries=1)
+  sample 69: server[lbl/val/vh/lh]=16.35/13.05/8.09/1.17ms client[lbl/val/vh/lh]=1.80/3.56/7.85/1.54ms totals[lbl/val/vh/lh]=5173/5356/19950/9958B (vh_entries=1)
+  sample 79: server[lbl/val/vh/lh]=31.38/5.15/9.90/1.37ms client[lbl/val/vh/lh]=1.93/4.00/9.07/2.19ms totals[lbl/val/vh/lh]=5173/5356/19950/9958B (vh_entries=1)
+  sample 89: server[lbl/val/vh/lh]=1.80/3.17/7.84/1.27ms client[lbl/val/vh/lh]=1.53/2.72/9.29/1.85ms totals[lbl/val/vh/lh]=5173/5356/19950/9958B (vh_entries=1)
+  sample 99: server[lbl/val/vh/lh]=1.97/3.80/8.65/1.43ms client[lbl/val/vh/lh]=1.63/3.67/8.70/2.15ms totals[lbl/val/vh/lh]=5173/5356/19950/9958B (vh_entries=1)
+  audit sample 0: epoch 99->100 verify=68.599ms fetch=0.026ms proof_bytes=51376
+  audit sample 19: epoch 99->100 verify=68.644ms fetch=0.035ms proof_bytes=51376
+  audit sample 39: epoch 99->100 verify=68.896ms fetch=0.061ms proof_bytes=51376
+  audit sample 59: epoch 99->100 verify=68.648ms fetch=0.024ms proof_bytes=51376
+  audit sample 79: epoch 99->100 verify=68.582ms fetch=0.028ms proof_bytes=51376
+  audit sample 99: epoch 99->100 verify=68.822ms fetch=0.045ms proof_bytes=51376
+[lookup-bench] CHECKPOINT: persisted level 2/10 lookup+audit (/tmp/aegon-lookup-bench.json)
+  throughput_sweep: kind=value concurrency=1 window=20s warmup=3s rpc_timeout=10s
+    qps=145  n=2891  attempts=3129  errs=0 (0.0%)  p50=5.9ms  p90=6.8ms  p99=22.3ms
+  throughput_sweep: kind=value concurrency=4 window=20s warmup=3s rpc_timeout=10s
+    qps=120  n=2391  attempts=2756  errs=0 (0.0%)  p50=6.9ms  p90=100.0ms  p99=114.2ms
+  throughput_sweep: kind=value concurrency=16 window=20s warmup=3s rpc_timeout=10s
+    qps=119  n=2390  attempts=2760  errs=0 (0.0%)  p50=130.5ms  p90=189.1ms  p99=240.1ms
+  throughput_sweep: kind=value concurrency=64 window=20s warmup=3s rpc_timeout=10s
+    qps=119  n=2387  attempts=2810  errs=0 (0.0%)  p50=536.4ms  p90=595.8ms  p99=642.4ms
+  throughput_sweep: kind=value concurrency=256 window=20s warmup=3s rpc_timeout=10s
+    qps=120  n=2394  attempts=3012  errs=0 (0.0%)  p50=2143.7ms  p90=2198.0ms  p99=2242.8ms
+  throughput_sweep: kind=value concurrency=512 window=20s warmup=3s rpc_timeout=10s
+    qps=120  n=2400  attempts=3276  errs=0 (0.0%)  p50=4269.0ms  p90=4336.4ms  p99=4377.9ms
+  throughput_sweep: kind=value concurrency=1024 window=20s warmup=3s rpc_timeout=10s
+    qps=119  n=2375  attempts=3758  errs=0 (0.0%)  p50=8598.3ms  p90=8679.4ms  p99=8738.8ms
+  publish_bench: batch=4096 samples=3
+  publish_bench: batch=8192 samples=3
+  publish_bench: batch=16384 samples=3
+  publish_bench: batch=32768 samples=3
+  publish_bench: batch=65536 samples=3
+  publish_bench: batch=131072 samples=3
+[lookup-bench] flushed /tmp/aegon-lookup-bench.json (2 level(s) so far)
+--- preload level 3/10: target=128849018 (current=85899345) ---
+[lookup-bench] flushed /tmp/aegon-lookup-bench.json (2 level(s) so far)
+--- preload level 3/10: target=128849018 (current=85899345) ---
+  published 1048576 labels (85899345..86947921) in 49252.1 ms
+  published 1048576 labels (86947921..87996497) in 50108.8 ms
+  published 1048576 labels (87996497..89045073) in 48864.0 ms
+  published 1048576 labels (89045073..90093649) in 49948.8 ms
+  published 1048576 labels (90093649..91142225) in 49405.5 ms
+  published 1048576 labels (91142225..92190801) in 49170.3 ms
+  published 1048576 labels (92190801..93239377) in 48767.1 ms
+  published 1048576 labels (92190801..93239377) in 48767.1 ms
+  published 1048576 labels (93239377..94287953) in 49466.3 ms
+  published 1048576 labels (94287953..95336529) in 49189.6 ms
+  published 1048576 labels (95336529..96385105) in 49779.4 ms
+  published 1048576 labels (96385105..97433681) in 48858.9 ms
+  published 1048576 labels (97433681..98482257) in 49763.6 ms
+  published 1048576 labels (98482257..99530833) in 49486.3 ms
+  published 1048576 labels (99530833..100579409) in 49968.3 ms
+  published 1048576 labels (99530833..100579409) in 49968.3 ms
+  published 1048576 labels (100579409..101627985) in 49943.6 ms
+  published 1048576 labels (101627985..102676561) in 49652.0 ms
+  published 1048576 labels (102676561..103725137) in 49521.6 ms
+  published 1048576 labels (103725137..104773713) in 49252.9 ms
+  published 1048576 labels (104773713..105822289) in 48738.5 ms
+  published 1048576 labels (105822289..106870865) in 49287.8 ms
+  published 1048576 labels (106870865..107919441) in 49406.8 ms
+  published 1048576 labels (106870865..107919441) in 49406.8 ms
+  published 1048576 labels (107919441..108968017) in 49073.5 ms
+  published 1048576 labels (108968017..110016593) in 49617.7 ms
+  published 1048576 labels (110016593..111065169) in 49463.8 ms
+  published 1048576 labels (111065169..112113745) in 49485.8 ms
+  published 1048576 labels (112113745..113162321) in 49301.8 ms
+  published 1048576 labels (113162321..114210897) in 49241.2 ms
+  published 1048576 labels (114210897..115259473) in 48844.0 ms
+  published 1048576 labels (114210897..115259473) in 48844.0 ms
+  published 1048576 labels (115259473..116308049) in 49616.8 ms
+  published 1048576 labels (116308049..117356625) in 49082.5 ms
+  published 1048576 labels (117356625..118405201) in 49253.8 ms
+  published 1048576 labels (118405201..119453777) in 49110.7 ms
+  published 1048576 labels (119453777..120502353) in 48951.9 ms
+  published 1048576 labels (120502353..121550929) in 49028.4 ms
+  published 1048576 labels (121550929..122599505) in 49226.3 ms
+  published 1048576 labels (121550929..122599505) in 49226.3 ms
+  published 1048576 labels (122599505..123648081) in 49362.1 ms
+  published 1048576 labels (123648081..124696657) in 49505.3 ms
+  published 1048576 labels (124696657..125745233) in 49459.5 ms
+  published 1048576 labels (125745233..126793809) in 49551.2 ms
+  published 1048576 labels (126793809..127842385) in 49267.2 ms
+  published 1006633 labels (127842385..128849018) in 47164.0 ms
+  level=128849018: bench RSS = 1249 MB (1279684 KB)
+  sample 0: server[lbl/val/vh/lh]=24.07/9.67/10.51/1.20ms client[lbl/val/vh/lh]=2.04/3.83/9.53/1.62ms totals[lbl/val/vh/lh]=5213/5396/20110/10038B (vh_entries=1)
+  sample 9: server[lbl/val/vh/lh]=21.22/11.68/9.53/1.90ms client[lbl/val/vh/lh]=1.81/4.04/8.89/1.32ms totals[lbl/val/vh/lh]=5173/5356/19950/9958B (vh_entries=1)
+  sample 19: server[lbl/val/vh/lh]=27.30/4.27/9.13/1.16ms client[lbl/val/vh/lh]=2.06/6.14/7.96/1.47ms totals[lbl/val/vh/lh]=5173/5356/19950/9958B (vh_entries=1)
+  sample 29: server[lbl/val/vh/lh]=2.30/31.05/8.52/1.07ms client[lbl/val/vh/lh]=1.70/3.56/8.36/1.35ms totals[lbl/val/vh/lh]=5173/5356/19950/9958B (vh_entries=1)
+  sample 39: server[lbl/val/vh/lh]=1.87/4.11/9.91/1.49ms client[lbl/val/vh/lh]=1.82/3.49/12.51/1.31ms totals[lbl/val/vh/lh]=5173/5356/19950/9958B (vh_entries=1)
+  sample 49: server[lbl/val/vh/lh]=1.85/4.26/10.25/1.10ms client[lbl/val/vh/lh]=1.70/3.61/8.23/1.89ms totals[lbl/val/vh/lh]=5173/5356/19950/9958B (vh_entries=1)
+  sample 59: server[lbl/val/vh/lh]=23.66/10.00/10.18/1.41ms client[lbl/val/vh/lh]=2.07/3.99/10.12/2.04ms totals[lbl/val/vh/lh]=5173/5356/19950/9958B (vh_entries=1)
+  sample 69: server[lbl/val/vh/lh]=6.95/23.58/8.89/1.09ms client[lbl/val/vh/lh]=1.93/3.35/10.98/1.67ms totals[lbl/val/vh/lh]=5173/5356/19950/9958B (vh_entries=1)
+  sample 79: server[lbl/val/vh/lh]=1.84/4.33/8.87/1.21ms client[lbl/val/vh/lh]=1.76/4.19/9.24/1.74ms totals[lbl/val/vh/lh]=5173/5356/19950/9958B (vh_entries=1)
+  sample 89: server[lbl/val/vh/lh]=2.33/4.38/8.58/1.12ms client[lbl/val/vh/lh]=1.62/3.07/7.97/2.35ms totals[lbl/val/vh/lh]=5173/5356/19950/9958B (vh_entries=1)
+  sample 99: server[lbl/val/vh/lh]=2.94/28.48/8.97/1.11ms client[lbl/val/vh/lh]=1.94/3.67/8.69/1.14ms totals[lbl/val/vh/lh]=5173/5356/19950/9958B (vh_entries=1)
+  audit sample 0: epoch 158->159 verify=68.363ms fetch=0.030ms proof_bytes=51376
+  audit sample 19: epoch 158->159 verify=68.263ms fetch=0.029ms proof_bytes=51376
+  audit sample 39: epoch 158->159 verify=69.281ms fetch=0.065ms proof_bytes=51376
+  audit sample 59: epoch 158->159 verify=68.416ms fetch=0.038ms proof_bytes=51376
+  audit sample 79: epoch 158->159 verify=68.594ms fetch=0.065ms proof_bytes=51376
+  audit sample 99: epoch 158->159 verify=68.404ms fetch=0.055ms proof_bytes=51376
+[lookup-bench] CHECKPOINT: persisted level 3/10 lookup+audit (/tmp/aegon-lookup-bench.json)
+  throughput_sweep: kind=value concurrency=1 window=20s warmup=3s rpc_timeout=10s
+    qps=144  n=2880  attempts=3132  errs=0 (0.0%)  p50=5.8ms  p90=6.9ms  p99=22.7ms
+  throughput_sweep: kind=value concurrency=4 window=20s warmup=3s rpc_timeout=10s
+    qps=119  n=2385  attempts=2751  errs=0 (0.0%)  p50=7.3ms  p90=95.3ms  p99=112.2ms
+  throughput_sweep: kind=value concurrency=16 window=20s warmup=3s rpc_timeout=10s
+    qps=119  n=2381  attempts=2756  errs=0 (0.0%)  p50=130.8ms  p90=190.9ms  p99=235.0ms
+  throughput_sweep: kind=value concurrency=64 window=20s warmup=3s rpc_timeout=10s
+    qps=119  n=2385  attempts=2806  errs=0 (0.0%)  p50=535.6ms  p90=596.5ms  p99=634.7ms
+  throughput_sweep: kind=value concurrency=256 window=20s warmup=3s rpc_timeout=10s
+    qps=119  n=2374  attempts=2996  errs=0 (0.0%)  p50=2143.6ms  p90=2208.3ms  p99=2256.2ms
+  throughput_sweep: kind=value concurrency=512 window=20s warmup=3s rpc_timeout=10s
+    qps=119  n=2389  attempts=3258  errs=0 (0.0%)  p50=4278.7ms  p90=4345.7ms  p99=4383.7ms
+  throughput_sweep: kind=value concurrency=1024 window=20s warmup=3s rpc_timeout=10s
+    qps=119  n=2379  attempts=3767  errs=0 (0.0%)  p50=8556.2ms  p90=8636.5ms  p99=8698.9ms
+  publish_bench: batch=4096 samples=3
+  publish_bench: batch=8192 samples=3
+  publish_bench: batch=16384 samples=3
+  publish_bench: batch=32768 samples=3
+  publish_bench: batch=65536 samples=3
+  publish_bench: batch=131072 samples=3
+[lookup-bench] flushed /tmp/aegon-lookup-bench.json (3 level(s) so far)
+--- preload level 4/10: target=171798691 (current=128849018) ---
+  published 1048576 labels (128849018..129897594) in 48463.3 ms
+  published 1048576 labels (129897594..130946170) in 49123.4 ms
+  published 1048576 labels (130946170..131994746) in 49504.5 ms
+  published 1048576 labels (131994746..133043322) in 49735.7 ms
+  published 1048576 labels (133043322..134091898) in 49277.2 ms
+  published 1048576 labels (134091898..135140474) in 49536.5 ms
+  published 1048576 labels (134091898..135140474) in 49536.5 ms
+  published 1048576 labels (135140474..136189050) in 50365.2 ms
+  published 1048576 labels (136189050..137237626) in 50064.8 ms
+  published 1048576 labels (137237626..138286202) in 49326.0 ms
+  published 1048576 labels (138286202..139334778) in 49879.5 ms
+  published 1048576 labels (139334778..140383354) in 49589.6 ms
+  published 1048576 labels (140383354..141431930) in 49433.5 ms
+  published 1048576 labels (141431930..142480506) in 48643.3 ms
+  published 1048576 labels (142480506..143529082) in 48897.4 ms
+  published 1048576 labels (143529082..144577658) in 48897.2 ms
+  published 1048576 labels (144577658..145626234) in 49154.6 ms
+  published 1048576 labels (145626234..146674810) in 49522.5 ms
+  published 1048576 labels (146674810..147723386) in 49331.4 ms
+  published 1048576 labels (147723386..148771962) in 49289.1 ms
+  published 1048576 labels (148771962..149820538) in 49459.1 ms
+  published 1048576 labels (149820538..150869114) in 49288.9 ms
+  published 1048576 labels (150869114..151917690) in 49588.4 ms
+  published 1048576 labels (151917690..152966266) in 49736.9 ms
+  published 1048576 labels (152966266..154014842) in 49190.1 ms
+  published 1048576 labels (154014842..155063418) in 49469.0 ms
+  published 1048576 labels (155063418..156111994) in 49379.3 ms
+  published 1048576 labels (156111994..157160570) in 49289.1 ms
+  published 1048576 labels (157160570..158209146) in 48936.7 ms
+  published 1048576 labels (158209146..159257722) in 49536.4 ms
+  published 1048576 labels (159257722..160306298) in 49341.7 ms
+  published 1048576 labels (160306298..161354874) in 49841.3 ms
+  published 1048576 labels (161354874..162403450) in 49240.3 ms
+  published 1048576 labels (162403450..163452026) in 49814.9 ms
+  published 1048576 labels (163452026..164500602) in 49740.3 ms
+  published 1048576 labels (164500602..165549178) in 49482.9 ms
+  published 1048576 labels (165549178..166597754) in 49704.0 ms
+  published 1048576 labels (166597754..167646330) in 49627.7 ms
+  published 1048576 labels (167646330..168694906) in 48998.6 ms
+  published 1048576 labels (168694906..169743482) in 48893.5 ms
+  published 1048576 labels (169743482..170792058) in 49878.8 ms
+  published 1006633 labels (170792058..171798691) in 47600.5 ms
+  level=171798691: bench RSS = 1254 MB (1285076 KB)
+  sample 0: server[lbl/val/vh/lh]=27.15/5.16/10.24/1.49ms client[lbl/val/vh/lh]=1.90/4.67/10.12/1.35ms totals[lbl/val/vh/lh]=5173/5356/19950/9958B (vh_entries=1)
+  sample 9: server[lbl/val/vh/lh]=3.29/27.70/10.46/1.45ms client[lbl/val/vh/lh]=2.02/4.02/8.13/1.25ms totals[lbl/val/vh/lh]=5173/5356/19950/9958B (vh_entries=1)
+  sample 19: server[lbl/val/vh/lh]=11.09/4.07/23.49/1.28ms client[lbl/val/vh/lh]=1.95/3.81/9.42/2.04ms totals[lbl/val/vh/lh]=5173/5356/19950/9958B (vh_entries=1)
+  sample 29: server[lbl/val/vh/lh]=2.44/22.63/10.84/2.16ms client[lbl/val/vh/lh]=1.99/3.99/11.73/1.30ms totals[lbl/val/vh/lh]=5213/5396/20110/10038B (vh_entries=1)
+  sample 39: server[lbl/val/vh/lh]=12.58/17.25/8.75/1.47ms client[lbl/val/vh/lh]=1.82/4.30/9.09/2.07ms totals[lbl/val/vh/lh]=5213/5396/20110/10038B (vh_entries=1)
+  sample 49: server[lbl/val/vh/lh]=1.89/4.03/9.33/1.10ms client[lbl/val/vh/lh]=1.71/3.57/9.08/1.02ms totals[lbl/val/vh/lh]=5173/5356/19950/9958B (vh_entries=1)
+  sample 59: server[lbl/val/vh/lh]=2.21/4.29/9.64/1.62ms client[lbl/val/vh/lh]=2.31/3.79/11.38/2.03ms totals[lbl/val/vh/lh]=5173/5356/19950/9958B (vh_entries=1)
+  sample 69: server[lbl/val/vh/lh]=2.48/20.55/16.68/1.64ms client[lbl/val/vh/lh]=1.93/5.39/11.61/1.57ms totals[lbl/val/vh/lh]=5173/5356/19950/9958B (vh_entries=1)
+  sample 79: server[lbl/val/vh/lh]=19.98/12.19/9.00/1.32ms client[lbl/val/vh/lh]=1.85/3.42/8.43/2.46ms totals[lbl/val/vh/lh]=5173/5356/19950/9958B (vh_entries=1)
+  sample 89: server[lbl/val/vh/lh]=19.65/14.62/11.36/1.24ms client[lbl/val/vh/lh]=1.93/4.75/9.32/1.26ms totals[lbl/val/vh/lh]=5213/5396/20110/10038B (vh_entries=1)
+  sample 99: server[lbl/val/vh/lh]=2.25/4.06/9.85/1.41ms client[lbl/val/vh/lh]=2.13/4.83/11.29/2.32ms totals[lbl/val/vh/lh]=5173/5356/19950/9958B (vh_entries=1)
+  audit sample 0: epoch 217->218 verify=67.722ms fetch=0.034ms proof_bytes=51376
+  audit sample 19: epoch 217->218 verify=67.811ms fetch=0.051ms proof_bytes=51376
+  audit sample 39: epoch 217->218 verify=67.783ms fetch=0.050ms proof_bytes=51376
+  audit sample 59: epoch 217->218 verify=67.793ms fetch=0.047ms proof_bytes=51376
+  audit sample 79: epoch 217->218 verify=67.655ms fetch=0.040ms proof_bytes=51376
+  audit sample 99: epoch 217->218 verify=67.775ms fetch=0.066ms proof_bytes=51376
+[lookup-bench] CHECKPOINT: persisted level 4/10 lookup+audit (/tmp/aegon-lookup-bench.json)
+  throughput_sweep: kind=value concurrency=1 window=20s warmup=3s rpc_timeout=10s
+    qps=145  n=2891  attempts=3156  errs=0 (0.0%)  p50=5.9ms  p90=6.8ms  p99=24.6ms
+  throughput_sweep: kind=value concurrency=4 window=20s warmup=3s rpc_timeout=10s
+    qps=120  n=2402  attempts=2763  errs=0 (0.0%)  p50=7.0ms  p90=101.9ms  p99=112.7ms
+  throughput_sweep: kind=value concurrency=16 window=20s warmup=3s rpc_timeout=10s
+    qps=119  n=2381  attempts=2767  errs=0 (0.0%)  p50=130.1ms  p90=193.4ms  p99=237.0ms
+  throughput_sweep: kind=value concurrency=64 window=20s warmup=3s rpc_timeout=10s
+    qps=120  n=2394  attempts=2823  errs=0 (0.0%)  p50=536.7ms  p90=591.9ms  p99=635.9ms
+  throughput_sweep: kind=value concurrency=256 window=20s warmup=3s rpc_timeout=10s
+    qps=119  n=2387  attempts=3019  errs=0 (0.0%)  p50=2136.0ms  p90=2199.5ms  p99=2239.0ms
+  throughput_sweep: kind=value concurrency=512 window=20s warmup=3s rpc_timeout=10s
+    qps=120  n=2396  attempts=3270  errs=0 (0.0%)  p50=4279.0ms  p90=4345.5ms  p99=4379.5ms
+  throughput_sweep: kind=value concurrency=1024 window=20s warmup=3s rpc_timeout=10s
+    qps=120  n=2401  attempts=3781  errs=0 (0.0%)  p50=8529.9ms  p90=8615.5ms  p99=8676.5ms
+  publish_bench: batch=4096 samples=3
+  publish_bench: batch=8192 samples=3
+    qps=120  n=2401  attempts=3781  errs=0 (0.0%)  p50=8529.9ms  p90=8615.5ms  p99=8676.5ms
+  publish_bench: batch=4096 samples=3
+  publish_bench: batch=8192 samples=3
+  publish_bench: batch=16384 samples=3
+  publish_bench: batch=32768 samples=3
+  publish_bench: batch=65536 samples=3
+  publish_bench: batch=131072 samples=3
+[lookup-bench] flushed /tmp/aegon-lookup-bench.json (4 level(s) so far)
+--- preload level 5/10: target=214748364 (current=171798691) ---
+  published 1048576 labels (171798691..172847267) in 49133.5 ms
+  published 1048576 labels (172847267..173895843) in 49279.1 ms
+  published 1048576 labels (173895843..174944419) in 49724.9 ms
+  published 1048576 labels (174944419..175992995) in 49726.3 ms
+  published 1048576 labels (175992995..177041571) in 49188.7 ms
+  published 1048576 labels (177041571..178090147) in 48741.5 ms
+  published 1048576 labels (178090147..179138723) in 50105.7 ms
+  published 1048576 labels (179138723..180187299) in 50324.8 ms
+  published 1048576 labels (180187299..181235875) in 49491.4 ms
+  published 1048576 labels (181235875..182284451) in 49230.4 ms
+  published 1048576 labels (182284451..183333027) in 49196.0 ms
+  published 1048576 labels (183333027..184381603) in 49237.3 ms
+  published 1048576 labels (184381603..185430179) in 49499.5 ms
+  published 1048576 labels (185430179..186478755) in 49297.4 ms
+  published 1048576 labels (186478755..187527331) in 49512.6 ms
+  published 1048576 labels (187527331..188575907) in 49235.2 ms
+  published 1048576 labels (188575907..189624483) in 49450.2 ms
+  published 1048576 labels (189624483..190673059) in 49684.7 ms
+  published 1048576 labels (190673059..191721635) in 49636.8 ms
+  published 1048576 labels (191721635..192770211) in 49302.8 ms
+  published 1048576 labels (192770211..193818787) in 49510.8 ms
+  published 1048576 labels (193818787..194867363) in 49405.7 ms
+  published 1048576 labels (194867363..195915939) in 49128.0 ms
+  published 1048576 labels (195915939..196964515) in 49542.4 ms
+  published 1048576 labels (196964515..198013091) in 49740.5 ms
+  published 1048576 labels (198013091..199061667) in 49537.6 ms
+  published 1048576 labels (199061667..200110243) in 49299.7 ms
+  published 1048576 labels (199061667..200110243) in 49299.7 ms
+  published 1048576 labels (200110243..201158819) in 49418.3 ms
+  published 1048576 labels (201158819..202207395) in 49515.1 ms
+  published 1048576 labels (202207395..203255971) in 49902.2 ms
+  published 1048576 labels (203255971..204304547) in 49562.5 ms
+  published 1048576 labels (204304547..205353123) in 50071.9 ms
+  published 1048576 labels (205353123..206401699) in 49819.8 ms
+  published 1048576 labels (206401699..207450275) in 49322.1 ms
+  published 1048576 labels (206401699..207450275) in 49322.1 ms
+  published 1048576 labels (207450275..208498851) in 49724.9 ms
+  published 1048576 labels (208498851..209547427) in 49502.2 ms
+  published 1048576 labels (209547427..210596003) in 49097.6 ms
+  published 1048576 labels (210596003..211644579) in 49582.0 ms
+  published 1048576 labels (211644579..212693155) in 49646.3 ms
+  published 1048576 labels (212693155..213741731) in 50105.6 ms
+  published 1006633 labels (213741731..214748364) in 47614.2 ms
+  level=214748364: bench RSS = 1270 MB (1300700 KB)
+  sample 0: server[lbl/val/vh/lh]=4.24/8.60/28.83/1.58ms client[lbl/val/vh/lh]=2.21/3.04/10.64/1.50ms totals[lbl/val/vh/lh]=5173/5356/19950/9958B (vh_entries=1)
+  sample 9: server[lbl/val/vh/lh]=2.79/25.91/8.75/1.52ms client[lbl/val/vh/lh]=1.83/4.54/9.64/2.10ms totals[lbl/val/vh/lh]=5213/5396/19990/9998B (vh_entries=1)
+  sample 19: server[lbl/val/vh/lh]=3.05/33.52/17.29/1.44ms client[lbl/val/vh/lh]=1.92/3.75/12.04/1.12ms totals[lbl/val/vh/lh]=5173/5356/19950/9958B (vh_entries=1)
+  sample 29: server[lbl/val/vh/lh]=23.58/4.25/11.66/1.28ms client[lbl/val/vh/lh]=1.78/3.39/9.61/1.86ms totals[lbl/val/vh/lh]=5173/5356/19950/9958B (vh_entries=1)
+  sample 39: server[lbl/val/vh/lh]=20.52/9.66/10.64/1.56ms client[lbl/val/vh/lh]=2.01/3.21/11.85/1.42ms totals[lbl/val/vh/lh]=5173/5356/19950/9958B (vh_entries=1)
+  sample 49: server[lbl/val/vh/lh]=17.48/10.77/9.08/1.13ms client[lbl/val/vh/lh]=1.92/4.36/8.62/1.12ms totals[lbl/val/vh/lh]=5173/5356/19950/9958B (vh_entries=1)
+  sample 59: server[lbl/val/vh/lh]=22.58/6.13/8.68/1.29ms client[lbl/val/vh/lh]=1.78/3.12/8.80/1.96ms totals[lbl/val/vh/lh]=5173/5356/19950/9958B (vh_entries=1)
+  sample 69: server[lbl/val/vh/lh]=1.96/4.03/9.99/1.62ms client[lbl/val/vh/lh]=1.91/3.74/8.97/2.17ms totals[lbl/val/vh/lh]=5173/5356/19950/9958B (vh_entries=1)
+  sample 79: server[lbl/val/vh/lh]=1.87/5.26/8.86/1.06ms client[lbl/val/vh/lh]=1.78/3.62/8.99/1.15ms totals[lbl/val/vh/lh]=5173/5356/19950/9958B (vh_entries=1)
+  sample 89: server[lbl/val/vh/lh]=1.83/2.84/8.65/1.09ms client[lbl/val/vh/lh]=1.55/2.87/8.69/2.07ms totals[lbl/val/vh/lh]=5173/5356/19950/9958B (vh_entries=1)
+  sample 99: server[lbl/val/vh/lh]=1.82/3.74/9.74/1.05ms client[lbl/val/vh/lh]=1.84/3.74/9.69/1.81ms totals[lbl/val/vh/lh]=5173/5356/19950/9958B (vh_entries=1)
+  audit sample 0: epoch 276->277 verify=68.514ms fetch=0.034ms proof_bytes=51376
+  audit sample 19: epoch 276->277 verify=68.139ms fetch=0.048ms proof_bytes=51376
+  audit sample 39: epoch 276->277 verify=68.266ms fetch=0.055ms proof_bytes=51376
+  audit sample 59: epoch 276->277 verify=68.365ms fetch=0.038ms proof_bytes=51376
+  audit sample 79: epoch 276->277 verify=68.227ms fetch=0.032ms proof_bytes=51376
+  audit sample 99: epoch 276->277 verify=68.097ms fetch=0.046ms proof_bytes=51376
+[lookup-bench] CHECKPOINT: persisted level 5/10 lookup+audit (/tmp/aegon-lookup-bench.json)
+  throughput_sweep: kind=value concurrency=1 window=20s warmup=3s rpc_timeout=10s
+    qps=145  n=2891  attempts=3143  errs=0 (0.0%)  p50=5.9ms  p90=6.8ms  p99=22.0ms
+  throughput_sweep: kind=value concurrency=4 window=20s warmup=3s rpc_timeout=10s
+    qps=120  n=2395  attempts=2762  errs=0 (0.0%)  p50=7.3ms  p90=99.4ms  p99=112.0ms
+  throughput_sweep: kind=value concurrency=16 window=20s warmup=3s rpc_timeout=10s
+    qps=119  n=2390  attempts=2761  errs=0 (0.0%)  p50=131.1ms  p90=193.2ms  p99=238.2ms
+  throughput_sweep: kind=value concurrency=64 window=20s warmup=3s rpc_timeout=10s
+    qps=120  n=2391  attempts=2826  errs=0 (0.0%)  p50=533.0ms  p90=589.8ms  p99=638.7ms
+  throughput_sweep: kind=value concurrency=256 window=20s warmup=3s rpc_timeout=10s
+    qps=120  n=2394  attempts=3006  errs=0 (0.0%)  p50=2145.9ms  p90=2197.6ms  p99=2243.4ms
+  throughput_sweep: kind=value concurrency=512 window=20s warmup=3s rpc_timeout=10s
+    qps=120  n=2396  attempts=3267  errs=0 (0.0%)  p50=4285.7ms  p90=4351.6ms  p99=4399.7ms
+  throughput_sweep: kind=value concurrency=1024 window=20s warmup=3s rpc_timeout=10s
+    qps=119  n=2384  attempts=3774  errs=0 (0.0%)  p50=8557.7ms  p90=8642.1ms  p99=8700.2ms
+  publish_bench: batch=4096 samples=3
+  publish_bench: batch=8192 samples=3
+  publish_bench: batch=16384 samples=3
+  publish_bench: batch=32768 samples=3
+  publish_bench: batch=65536 samples=3
+  publish_bench: batch=131072 samples=3
+[lookup-bench] flushed /tmp/aegon-lookup-bench.json (5 level(s) so far)
+--- preload level 6/10: target=257698037 (current=214748364) ---
+  published 1048576 labels (214748364..215796940) in 50069.4 ms
+  published 1048576 labels (215796940..216845516) in 49522.4 ms
+  published 1048576 labels (216845516..217894092) in 49635.0 ms
+error: publish failed at level=257698037, batch 217894092..218942668: configuration error: grpc: tcp connect error (The service is currently unavailable)
+[06:03:23] [aegon-bench-client] aegon-lookup-bench final state: 'failed' (started=33403 bytes printed)
+[06:03:29] retrieving /tmp/aegon-lookup-bench.json -> /home/alrshir/aegon/bench-results/lookup/combined.json (regardless of exit status)
+WARNING: 
+
+To increase the performance of the tunnel, consider installing NumPy. For instructions,
+please see https://cloud.google.com/iap/docs/using-tcp-forwarding#increasing_the_tcp_upload_bandwidth
+
+[06:03:32] lookup-bench JSON fetched: /home/alrshir/aegon/bench-results/lookup/combined.json
+[06:03:32] [aegon-bench-client] lookup-bench unit exited non-zero (status=1); see /home/alrshir/aegon/bench-results/lookup/lookup-bench.log

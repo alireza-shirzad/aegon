@@ -1,0 +1,622 @@
+{
+  "params": {
+    "audit_samples": 0,
+    "endpoints": [],
+    "fill_percents": [
+      1,
+      30,
+      60,
+      90
+    ],
+    "initial_prefill_count": 0,
+    "kzh_k": 0,
+    "log_n_shards": 0,
+    "mode": "akd-mysql",
+    "n_shards": 1,
+    "prefill_seed": 1,
+    "preload_counts": [
+      42949672,
+      1288490188,
+      2576980377,
+      3865470566
+    ],
+    "private": true,
+    "publish_batch_size": 131072,
+    "publish_batch_sizes": [
+      4096,
+      8192,
+      16384,
+      32768,
+      65536,
+      131072
+    ],
+    "publish_samples_per_batch": 0,
+    "samples_per_level": 0,
+    "shard_log_capacity": 32,
+    "true_log_capacity": 32,
+    "_note": "AKD-large publish medians are EXTRAPOLATED, not bench-measured. Method: linear fit on AKD-medium publish curve (y = a*bs + b, R^2 > 0.999 per fill), then multiplied by per-fill small->medium growth ratio at the bs=64 overlap (carries forward the empirical size-vs-latency growth from log_cap 22 -> 26 -> 32). Real bench could not be run (out of credits).",
+    "_method_ratios_bs64": {
+      "1": 1.3245,
+      "30": 1.9732,
+      "60": 1.8708,
+      "90": 1.7318
+    },
+    "_method_medium_fits": {
+      "1": {
+        "slope_ms_per_update": 0.7914,
+        "intercept_ms": 72.72
+      },
+      "30": {
+        "slope_ms_per_update": 1.3878,
+        "intercept_ms": 143.57
+      },
+      "60": {
+        "slope_ms_per_update": 1.4638,
+        "intercept_ms": 145.19
+      },
+      "90": {
+        "slope_ms_per_update": 1.6045,
+        "intercept_ms": 162.17
+      }
+    },
+    "_lookup_note": "AKD-large lookup samples are EXTRAPOLATED from small+medium (large = 2*medium - small per metric and fill, since AKD lookup scales linearly in log_cap and small/medium are at log_cap=20/26 so the small->medium delta corresponds to log_cap+6, the same as medium->large at log_cap=32). Bench could not be run."
+  },
+  "levels": [
+    {
+      "audit": {
+        "samples": [
+          {
+            "sample_idx": 0,
+            "prev_epoch": 0,
+            "next_epoch": 1,
+            "server_fetch_ns": 0,
+            "audit_invariance_ns": 438698434,
+            "audit_proof_bytes": 119990392,
+            "_source": "extrapolated_from_small_medium: large = medium^2 / small at this fill"
+          }
+        ]
+      },
+      "concurrency_sweep": [],
+      "current_count_after_topup": 42949672,
+      "lookup": {
+        "samples": [
+          {
+            "sample_idx": 0,
+            "audit_invariance_ns": 0,
+            "audit_proof_bytes": 0,
+            "next_epoch": 0,
+            "prev_epoch": 0,
+            "server_fetch_ns": 0,
+            "server_lookup_label_ns": 9732542.0,
+            "client_lookup_label_ns": 9732542.0,
+            "label_lookup_proof_bytes": 18254,
+            "server_lookup_value_ns": 9732542.0,
+            "client_lookup_value_ns": 9732542.0,
+            "value_lookup_proof_bytes": 18254,
+            "server_lookup_history_ns": 3258707.5,
+            "client_lookup_history_ns": 3258707.5,
+            "value_history_lookup_proof_bytes": 24836,
+            "server_lookup_label_history_ns": 3258707.5,
+            "client_lookup_label_history_ns": 3258707.5,
+            "label_history_lookup_proof_bytes": 24836
+          }
+        ]
+      },
+      "preload_count": 42949672,
+      "preload_publish_ms_total": null,
+      "publish_bench": {
+        "batches": [
+          {
+            "batch_size": 4096,
+            "fastest_ms": 4389.654417241126,
+            "index_commitment_bytes": 0,
+            "mean_ms": 4389.654417241126,
+            "median_ms": 4389.654417241126,
+            "rand_index_commitment_bytes": 0,
+            "rand_value_commitment_bytes": 0,
+            "samples_ms": [
+              4389.654417241126
+            ],
+            "slowest_ms": 4389.654417241126,
+            "value_commitment_bytes": 0,
+            "_source": "extrapolated_from_small_medium"
+          },
+          {
+            "batch_size": 8192,
+            "fastest_ms": 8682.986009769445,
+            "index_commitment_bytes": 0,
+            "mean_ms": 8682.986009769445,
+            "median_ms": 8682.986009769445,
+            "rand_index_commitment_bytes": 0,
+            "rand_value_commitment_bytes": 0,
+            "samples_ms": [
+              8682.986009769445
+            ],
+            "slowest_ms": 8682.986009769445,
+            "value_commitment_bytes": 0,
+            "_source": "extrapolated_from_small_medium"
+          },
+          {
+            "batch_size": 16384,
+            "fastest_ms": 17269.649194826085,
+            "index_commitment_bytes": 0,
+            "mean_ms": 17269.649194826085,
+            "median_ms": 17269.649194826085,
+            "rand_index_commitment_bytes": 0,
+            "rand_value_commitment_bytes": 0,
+            "samples_ms": [
+              17269.649194826085
+            ],
+            "slowest_ms": 17269.649194826085,
+            "value_commitment_bytes": 0,
+            "_source": "extrapolated_from_small_medium"
+          },
+          {
+            "batch_size": 32768,
+            "fastest_ms": 34442.97556493936,
+            "index_commitment_bytes": 0,
+            "mean_ms": 34442.97556493936,
+            "median_ms": 34442.97556493936,
+            "rand_index_commitment_bytes": 0,
+            "rand_value_commitment_bytes": 0,
+            "samples_ms": [
+              34442.97556493936
+            ],
+            "slowest_ms": 34442.97556493936,
+            "value_commitment_bytes": 0,
+            "_source": "extrapolated_from_small_medium"
+          },
+          {
+            "batch_size": 65536,
+            "fastest_ms": 68789.62830516593,
+            "index_commitment_bytes": 0,
+            "mean_ms": 68789.62830516593,
+            "median_ms": 68789.62830516593,
+            "rand_index_commitment_bytes": 0,
+            "rand_value_commitment_bytes": 0,
+            "samples_ms": [
+              68789.62830516593
+            ],
+            "slowest_ms": 68789.62830516593,
+            "value_commitment_bytes": 0,
+            "_source": "extrapolated_from_small_medium"
+          },
+          {
+            "batch_size": 131072,
+            "fastest_ms": 137482.93378561904,
+            "index_commitment_bytes": 0,
+            "mean_ms": 137482.93378561904,
+            "median_ms": 137482.93378561904,
+            "rand_index_commitment_bytes": 0,
+            "rand_value_commitment_bytes": 0,
+            "samples_ms": [
+              137482.93378561904
+            ],
+            "slowest_ms": 137482.93378561904,
+            "value_commitment_bytes": 0,
+            "_source": "extrapolated_from_small_medium"
+          }
+        ]
+      },
+      "rss_kb": null
+    },
+    {
+      "audit": {
+        "samples": [
+          {
+            "sample_idx": 0,
+            "prev_epoch": 0,
+            "next_epoch": 1,
+            "server_fetch_ns": 0,
+            "audit_invariance_ns": 5815214649,
+            "audit_proof_bytes": 636700364,
+            "_source": "extrapolated_from_small_medium: large = medium^2 / small at this fill"
+          }
+        ]
+      },
+      "concurrency_sweep": [],
+      "current_count_after_topup": 1288490188,
+      "lookup": {
+        "samples": [
+          {
+            "sample_idx": 0,
+            "audit_invariance_ns": 0,
+            "audit_proof_bytes": 0,
+            "next_epoch": 0,
+            "prev_epoch": 0,
+            "server_fetch_ns": 0,
+            "server_lookup_label_ns": 24853241.0,
+            "client_lookup_label_ns": 24853241.0,
+            "label_lookup_proof_bytes": 21670,
+            "server_lookup_value_ns": 24853241.0,
+            "client_lookup_value_ns": 24853241.0,
+            "value_lookup_proof_bytes": 21670,
+            "server_lookup_history_ns": 40929398.5,
+            "client_lookup_history_ns": 40929398.5,
+            "value_history_lookup_proof_bytes": 28748,
+            "server_lookup_label_history_ns": 40929398.5,
+            "client_lookup_label_history_ns": 40929398.5,
+            "label_history_lookup_proof_bytes": 28748
+          }
+        ]
+      },
+      "preload_count": 1288490188,
+      "preload_publish_ms_total": null,
+      "publish_bench": {
+        "batches": [
+          {
+            "batch_size": 4096,
+            "fastest_ms": 11500.067903826617,
+            "index_commitment_bytes": 0,
+            "mean_ms": 11500.067903826617,
+            "median_ms": 11500.067903826617,
+            "rand_index_commitment_bytes": 0,
+            "rand_value_commitment_bytes": 0,
+            "samples_ms": [
+              11500.067903826617
+            ],
+            "slowest_ms": 11500.067903826617,
+            "value_commitment_bytes": 0,
+            "_source": "extrapolated_from_small_medium"
+          },
+          {
+            "batch_size": 8192,
+            "fastest_ms": 22716.850181259535,
+            "index_commitment_bytes": 0,
+            "mean_ms": 22716.850181259535,
+            "median_ms": 22716.850181259535,
+            "rand_index_commitment_bytes": 0,
+            "rand_value_commitment_bytes": 0,
+            "samples_ms": [
+              22716.850181259535
+            ],
+            "slowest_ms": 22716.850181259535,
+            "value_commitment_bytes": 0,
+            "_source": "extrapolated_from_small_medium"
+          },
+          {
+            "batch_size": 16384,
+            "fastest_ms": 45150.41473612538,
+            "index_commitment_bytes": 0,
+            "mean_ms": 45150.41473612538,
+            "median_ms": 45150.41473612538,
+            "rand_index_commitment_bytes": 0,
+            "rand_value_commitment_bytes": 0,
+            "samples_ms": [
+              45150.41473612538
+            ],
+            "slowest_ms": 45150.41473612538,
+            "value_commitment_bytes": 0,
+            "_source": "extrapolated_from_small_medium"
+          },
+          {
+            "batch_size": 32768,
+            "fastest_ms": 90017.54384585706,
+            "index_commitment_bytes": 0,
+            "mean_ms": 90017.54384585706,
+            "median_ms": 90017.54384585706,
+            "rand_index_commitment_bytes": 0,
+            "rand_value_commitment_bytes": 0,
+            "samples_ms": [
+              90017.54384585706
+            ],
+            "slowest_ms": 90017.54384585706,
+            "value_commitment_bytes": 0,
+            "_source": "extrapolated_from_small_medium"
+          },
+          {
+            "batch_size": 65536,
+            "fastest_ms": 179751.8020653204,
+            "index_commitment_bytes": 0,
+            "mean_ms": 179751.8020653204,
+            "median_ms": 179751.8020653204,
+            "rand_index_commitment_bytes": 0,
+            "rand_value_commitment_bytes": 0,
+            "samples_ms": [
+              179751.8020653204
+            ],
+            "slowest_ms": 179751.8020653204,
+            "value_commitment_bytes": 0,
+            "_source": "extrapolated_from_small_medium"
+          },
+          {
+            "batch_size": 131072,
+            "fastest_ms": 359220.3185042471,
+            "index_commitment_bytes": 0,
+            "mean_ms": 359220.3185042471,
+            "median_ms": 359220.3185042471,
+            "rand_index_commitment_bytes": 0,
+            "rand_value_commitment_bytes": 0,
+            "samples_ms": [
+              359220.3185042471
+            ],
+            "slowest_ms": 359220.3185042471,
+            "value_commitment_bytes": 0,
+            "_source": "extrapolated_from_small_medium"
+          }
+        ]
+      },
+      "rss_kb": null
+    },
+    {
+      "audit": {
+        "samples": [
+          {
+            "sample_idx": 0,
+            "prev_epoch": 0,
+            "next_epoch": 1,
+            "server_fetch_ns": 0,
+            "audit_invariance_ns": 31099984300,
+            "audit_proof_bytes": 2565546733,
+            "_source": "extrapolated_from_small_medium: large = medium^2 / small at this fill"
+          }
+        ]
+      },
+      "concurrency_sweep": [],
+      "current_count_after_topup": 2576980377,
+      "lookup": {
+        "samples": [
+          {
+            "sample_idx": 0,
+            "audit_invariance_ns": 0,
+            "audit_proof_bytes": 0,
+            "next_epoch": 0,
+            "prev_epoch": 0,
+            "server_fetch_ns": 0,
+            "server_lookup_label_ns": 25656883.0,
+            "client_lookup_label_ns": 25656883.0,
+            "label_lookup_proof_bytes": 22362,
+            "server_lookup_value_ns": 25656883.0,
+            "client_lookup_value_ns": 25656883.0,
+            "value_lookup_proof_bytes": 22362,
+            "server_lookup_history_ns": 48610635.5,
+            "client_lookup_history_ns": 48610635.5,
+            "value_history_lookup_proof_bytes": 41908,
+            "server_lookup_label_history_ns": 48610635.5,
+            "client_lookup_label_history_ns": 48610635.5,
+            "label_history_lookup_proof_bytes": 41908
+          }
+        ]
+      },
+      "preload_count": 2576980377,
+      "preload_publish_ms_total": null,
+      "publish_bench": {
+        "batches": [
+          {
+            "batch_size": 4096,
+            "fastest_ms": 11488.60833335343,
+            "index_commitment_bytes": 0,
+            "mean_ms": 11488.60833335343,
+            "median_ms": 11488.60833335343,
+            "rand_index_commitment_bytes": 0,
+            "rand_value_commitment_bytes": 0,
+            "samples_ms": [
+              11488.60833335343
+            ],
+            "slowest_ms": 11488.60833335343,
+            "value_commitment_bytes": 0,
+            "_source": "extrapolated_from_small_medium"
+          },
+          {
+            "batch_size": 8192,
+            "fastest_ms": 22705.595495131263,
+            "index_commitment_bytes": 0,
+            "mean_ms": 22705.595495131263,
+            "median_ms": 22705.595495131263,
+            "rand_index_commitment_bytes": 0,
+            "rand_value_commitment_bytes": 0,
+            "samples_ms": [
+              22705.595495131263
+            ],
+            "slowest_ms": 22705.595495131263,
+            "value_commitment_bytes": 0,
+            "_source": "extrapolated_from_small_medium"
+          },
+          {
+            "batch_size": 16384,
+            "fastest_ms": 45139.569818686934,
+            "index_commitment_bytes": 0,
+            "mean_ms": 45139.569818686934,
+            "median_ms": 45139.569818686934,
+            "rand_index_commitment_bytes": 0,
+            "rand_value_commitment_bytes": 0,
+            "samples_ms": [
+              45139.569818686934
+            ],
+            "slowest_ms": 45139.569818686934,
+            "value_commitment_bytes": 0,
+            "_source": "extrapolated_from_small_medium"
+          },
+          {
+            "batch_size": 32768,
+            "fastest_ms": 90007.51846579828,
+            "index_commitment_bytes": 0,
+            "mean_ms": 90007.51846579828,
+            "median_ms": 90007.51846579828,
+            "rand_index_commitment_bytes": 0,
+            "rand_value_commitment_bytes": 0,
+            "samples_ms": [
+              90007.51846579828
+            ],
+            "slowest_ms": 90007.51846579828,
+            "value_commitment_bytes": 0,
+            "_source": "extrapolated_from_small_medium"
+          },
+          {
+            "batch_size": 65536,
+            "fastest_ms": 179743.41576002096,
+            "index_commitment_bytes": 0,
+            "mean_ms": 179743.41576002096,
+            "median_ms": 179743.41576002096,
+            "rand_index_commitment_bytes": 0,
+            "rand_value_commitment_bytes": 0,
+            "samples_ms": [
+              179743.41576002096
+            ],
+            "slowest_ms": 179743.41576002096,
+            "value_commitment_bytes": 0,
+            "_source": "extrapolated_from_small_medium"
+          },
+          {
+            "batch_size": 131072,
+            "fastest_ms": 359215.21034846635,
+            "index_commitment_bytes": 0,
+            "mean_ms": 359215.21034846635,
+            "median_ms": 359215.21034846635,
+            "rand_index_commitment_bytes": 0,
+            "rand_value_commitment_bytes": 0,
+            "samples_ms": [
+              359215.21034846635
+            ],
+            "slowest_ms": 359215.21034846635,
+            "value_commitment_bytes": 0,
+            "_source": "extrapolated_from_small_medium"
+          }
+        ]
+      },
+      "rss_kb": null
+    },
+    {
+      "audit": {
+        "samples": [
+          {
+            "sample_idx": 0,
+            "prev_epoch": 0,
+            "next_epoch": 1,
+            "server_fetch_ns": 0,
+            "audit_invariance_ns": 23980742961,
+            "audit_proof_bytes": 2719347718,
+            "_source": "extrapolated_from_small_medium: large = medium^2 / small at this fill"
+          }
+        ]
+      },
+      "concurrency_sweep": [],
+      "current_count_after_topup": 3865470566,
+      "lookup": {
+        "samples": [
+          {
+            "sample_idx": 0,
+            "audit_invariance_ns": 0,
+            "audit_proof_bytes": 0,
+            "next_epoch": 0,
+            "prev_epoch": 0,
+            "server_fetch_ns": 0,
+            "server_lookup_label_ns": 32498859.5,
+            "client_lookup_label_ns": 32498859.5,
+            "label_lookup_proof_bytes": 23042,
+            "server_lookup_value_ns": 32498859.5,
+            "client_lookup_value_ns": 32498859.5,
+            "value_lookup_proof_bytes": 23042,
+            "server_lookup_history_ns": 58759093.0,
+            "client_lookup_history_ns": 58759093.0,
+            "value_history_lookup_proof_bytes": 42820,
+            "server_lookup_label_history_ns": 58759093.0,
+            "client_lookup_label_history_ns": 58759093.0,
+            "label_history_lookup_proof_bytes": 42820
+          }
+        ]
+      },
+      "preload_count": 3865470566,
+      "preload_publish_ms_total": null,
+      "publish_bench": {
+        "batches": [
+          {
+            "batch_size": 4096,
+            "fastest_ms": 11662.398096871148,
+            "index_commitment_bytes": 0,
+            "mean_ms": 11662.398096871148,
+            "median_ms": 11662.398096871148,
+            "rand_index_commitment_bytes": 0,
+            "rand_value_commitment_bytes": 0,
+            "samples_ms": [
+              11662.398096871148
+            ],
+            "slowest_ms": 11662.398096871148,
+            "value_commitment_bytes": 0,
+            "_source": "extrapolated_from_small_medium"
+          },
+          {
+            "batch_size": 8192,
+            "fastest_ms": 23043.9414653477,
+            "index_commitment_bytes": 0,
+            "mean_ms": 23043.9414653477,
+            "median_ms": 23043.9414653477,
+            "rand_index_commitment_bytes": 0,
+            "rand_value_commitment_bytes": 0,
+            "samples_ms": [
+              23043.9414653477
+            ],
+            "slowest_ms": 23043.9414653477,
+            "value_commitment_bytes": 0,
+            "_source": "extrapolated_from_small_medium"
+          },
+          {
+            "batch_size": 16384,
+            "fastest_ms": 45807.0282023008,
+            "index_commitment_bytes": 0,
+            "mean_ms": 45807.0282023008,
+            "median_ms": 45807.0282023008,
+            "rand_index_commitment_bytes": 0,
+            "rand_value_commitment_bytes": 0,
+            "samples_ms": [
+              45807.0282023008
+            ],
+            "slowest_ms": 45807.0282023008,
+            "value_commitment_bytes": 0,
+            "_source": "extrapolated_from_small_medium"
+          },
+          {
+            "batch_size": 32768,
+            "fastest_ms": 91333.20167620698,
+            "index_commitment_bytes": 0,
+            "mean_ms": 91333.20167620698,
+            "median_ms": 91333.20167620698,
+            "rand_index_commitment_bytes": 0,
+            "rand_value_commitment_bytes": 0,
+            "samples_ms": [
+              91333.20167620698
+            ],
+            "slowest_ms": 91333.20167620698,
+            "value_commitment_bytes": 0,
+            "_source": "extrapolated_from_small_medium"
+          },
+          {
+            "batch_size": 65536,
+            "fastest_ms": 182385.54862401937,
+            "index_commitment_bytes": 0,
+            "mean_ms": 182385.54862401937,
+            "median_ms": 182385.54862401937,
+            "rand_index_commitment_bytes": 0,
+            "rand_value_commitment_bytes": 0,
+            "samples_ms": [
+              182385.54862401937
+            ],
+            "slowest_ms": 182385.54862401937,
+            "value_commitment_bytes": 0,
+            "_source": "extrapolated_from_small_medium"
+          },
+          {
+            "batch_size": 131072,
+            "fastest_ms": 364490.24251964415,
+            "index_commitment_bytes": 0,
+            "mean_ms": 364490.24251964415,
+            "median_ms": 364490.24251964415,
+            "rand_index_commitment_bytes": 0,
+            "rand_value_commitment_bytes": 0,
+            "samples_ms": [
+              364490.24251964415
+            ],
+            "slowest_ms": 364490.24251964415,
+            "value_commitment_bytes": 0,
+            "_source": "extrapolated_from_small_medium"
+          }
+        ]
+      },
+      "rss_kb": null
+    }
+  ],
+  "_setup_note": "AKD has no trusted setup. The only key material is the VRF keypair (Ed25519-based in WhatsApp's AKD deployment): 32 B secret key on the server, 32 B public key on the client. Setup = one keypair generation, ~1 ms.",
+  "setup_secs": 0.001,
+  "prover_key_bytes": 32,
+  "verifier_key_bytes": 32
+}

@@ -1,0 +1,8 @@
+[2026-05-20T00:31:13+0000] host: instance-20260503-131121
+[2026-05-20T00:31:13+0000] PROJECT=jbonneau-mwalfish-9a0c  N_SHARDS=2  SHARD_LOG_CAPACITY=27  KZH_K=9
+[2026-05-20T00:31:13+0000] PUBLISH_BATCH_SIZES=64,128,256,512,1024,2048
+[2026-05-20T00:31:13+0000] results dir: /home/alrshir/aegon/bench-results
+[2026-05-20T00:31:13+0000] ==== medium-publish-bench START ====
+[2026-05-20T00:36:31+0000] ==== medium-publish-bench FAILED rc=1 after 318s ====
+[2026-05-20T00:36:31+0000] WARN: publish-bench failed; continuing with lookup-bench
+[2026-05-20T00:36:31+0000] ==== medium-lookup-bench START ====

@@ -1,0 +1,50 @@
+Aegon
+Copyright (c) The Aegon Authors.
+
+Licensed under the MIT License. See LICENSE.
+
+"The Aegon Authors" are the authors of the accompanying paper:
+Hossein Hafezi, Alireza Shirzad, Benedikt Bunz, Kevin Lewi, Dillon George,
+and Joseph Bonneau, "Aegon: Self-Auditable Key Transparency",
+Cryptology ePrint Archive, Paper 2026/1681. https://eprint.iacr.org/2026/1681
+
+================================================================================
+Derived works and third-party code
+================================================================================
+
+1. facebook/akd
+   Copyright (c) Meta Platforms, Inc. and affiliates.
+   Licensed by its authors under MIT OR Apache-2.0. This repository exercises
+   the MIT option. Source: https://github.com/facebook/akd
+
+   Aegon began as a fork of the `akd` and `akd_core` crates. The AKD
+   directory, its SEEMless/Merkle append-only-tree backend, its storage and
+   configuration layers, its wire types, and its API have since been removed.
+
+   What remains from upstream:
+
+     * The ECVRF implementation (ECVRF-EDWARDS25519-SHA512-TAI, RFC 9381) in
+       `aegon_crypto::ecvrf`, which the AKD authors adapted from Diem's
+       NextGen Crypto module. Modifications made by The Aegon Authors: AKD's
+       `VRFKeyStorage` trait and its test key store were removed, and the
+       `no_std` import shims were dropped.
+     * The `xtask` code-coverage helper.
+
+   Those files carry Meta's copyright header, as MIT requires.
+
+2. EspressoSystems/hyperplonk
+   Copyright (c) 2023 Espresso Systems (espressosys.com)
+   Licensed under the MIT License.
+   Source: https://github.com/EspressoSystems/hyperplonk
+
+   Portions of the multilinear-polynomial arithmetic, the polynomial
+   commitment scheme traits, and the Fiat-Shamir transcript in
+   `aegon_crypto` are derived from the HyperPlonk library.
+   Those files retain the Espresso Systems copyright header.
+
+3. arkworks-rs
+   Licensed by its authors under MIT OR Apache-2.0.
+   Source: https://github.com/arkworks-rs
+
+   Used as a dependency (not vendored). Note that `Cargo.toml` patches
+   several arkworks crates to pinned git revisions; see the comment there.

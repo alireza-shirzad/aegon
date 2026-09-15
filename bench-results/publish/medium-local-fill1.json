@@ -1,0 +1,69 @@
+{
+  "params": {
+    "shard_log_capacity": 27,
+    "true_log_capacity": 26,
+    "kzh_k": 9,
+    "n_shards": 2,
+    "log_n_shards": 1,
+    "samples_per_batch": 3,
+    "setup_seed": 42,
+    "prefill_seed": 1,
+    "endpoints": []
+  },
+  "stages": [
+    {
+      "fill_percent": 1,
+      "prefilled_count": 671088,
+      "batches": {
+      "4096": {
+        "samples_ms": [3223.1183, 3276.4858, 3275.9363],
+        "fastest_ms": 3223.1183,
+        "slowest_ms": 3276.4858,
+        "median_ms": 3275.9363,
+        "mean_ms": 3258.5135,
+        "index_commitment_bytes": 144,
+        "value_commitment_bytes": 144,
+        "rand_index_commitment_bytes": 144,
+        "rand_value_commitment_bytes": 144,
+        "total_commit_bytes": 850
+      },
+      "16384": {
+        "samples_ms": [12393.5419, 12239.7118, 12592.1296],
+        "fastest_ms": 12239.7118,
+        "slowest_ms": 12592.1296,
+        "median_ms": 12393.5419,
+        "mean_ms": 12408.4611,
+        "index_commitment_bytes": 144,
+        "value_commitment_bytes": 144,
+        "rand_index_commitment_bytes": 144,
+        "rand_value_commitment_bytes": 144,
+        "total_commit_bytes": 850
+      },
+      "65536": {
+        "samples_ms": [44960.4784, 45000.2473, 44201.2061],
+        "fastest_ms": 44201.2061,
+        "slowest_ms": 45000.2473,
+        "median_ms": 44960.4784,
+        "mean_ms": 44720.6439,
+        "index_commitment_bytes": 144,
+        "value_commitment_bytes": 144,
+        "rand_index_commitment_bytes": 144,
+        "rand_value_commitment_bytes": 144,
+        "total_commit_bytes": 850
+      },
+      "262144": {
+        "samples_ms": [168613.0578, 128302.0213, 129550.8698],
+        "fastest_ms": 128302.0213,
+        "slowest_ms": 168613.0578,
+        "median_ms": 129550.8698,
+        "mean_ms": 142155.3163,
+        "index_commitment_bytes": 144,
+        "value_commitment_bytes": 144,
+        "rand_index_commitment_bytes": 144,
+        "rand_value_commitment_bytes": 144,
+        "total_commit_bytes": 850
+      }
+      }
+    }
+  ]
+}
