@@ -55,7 +55,7 @@ Here it is step by step.
 let cfg = ShardedAegonConfig::<Bn254, Pcs>::builder()
     .log_capacity(8)                         // 2^8 = 256 users; the shard gets 4x as many slots
     .log_n_shards(0)                         // 2^0 = one shard
-    .private(true)                           // hide values from auditors; needed for IVC
+    .private(true)                           // hiding (zk) KZH-k: hides values from auditors; needed for IVC
     .audit_fs(hooks_for(AuditFs::Poseidon))  // the hash auditors recompute; IVC needs Poseidon
     .db(DbSource::Rocks(db_path))            // where the server stores users' values
     // A throwaway trusted setup made from this seed, fine for a demo; a

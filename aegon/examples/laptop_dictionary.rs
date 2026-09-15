@@ -57,8 +57,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .log_capacity(LOG_CAPACITY)
         // 2^0 = one shard.
         .log_n_shards(0)
-        // Private mode hides users' values from auditors, and gives every
-        // epoch the proof the IVC audit folds.
+        // Private mode: KZH-k commits with its hiding (zk) variant and the
+        // openings are masked, so users' values stay hidden from auditors.
+        // It also publishes the per-epoch blinding proof the IVC audit folds.
         .private(true)
         // The hash auditors recompute. IVC auditing requires Poseidon, and
         // the choice is fixed for the life of the dictionary.

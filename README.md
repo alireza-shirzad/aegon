@@ -128,8 +128,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // headroom: at 2 (four slots per user) the dictionary is at most a
         // quarter full. Default: 2.
         .log_over_provisioning_factor(2)
-        // Hide users' values from auditors. Required for IVC (fast-forward)
-        // auditing. Default: false.
+        // Private mode: commit with the hiding (zk) variant of KZH-k, mask
+        // the openings, and publish the blinding proof each epoch's audit
+        // then requires. It hides users' values from auditors, costs
+        // proving time, and IVC auditing needs it. Default: false.
         .private(false)
         // The hash auditors recompute: Poseidon (supports IVC auditing) or
         // Sha256. Servers and auditors must agree, and it can't change
