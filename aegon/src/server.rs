@@ -748,6 +748,7 @@ where
     /// across the cluster: the shard's seed matches the coordinator's
     /// (driven by the same `AEGON_VRF_SEED` env var in production).
     pub fn set_vrf_prover(&mut self, prover: super::hash::VrfProver) {
+        self.label_vrf_proofs.clear();
         self.vrf_prover = Some(prover);
     }
 
@@ -1816,12 +1817,12 @@ where
         // memory instead of paying ~0.5 ms of ECVRF prove per ctr step
         // on the coord. H_shard proofs come in from the coord (it
         // walks the inter-shard fullness chain); H_slot proofs are
-        // computed locally from each placement's `slot_ctr`. Skipped
-        // when no `vrf_prover` is configured (e.g. tests that don't
+        // generated locally as needed and reused for unchanged placements.
+        // Skipped when no `vrf_prover` is configured (e.g. tests that don't
         // care about proof bytes) or when the coord didn't ship any
         // H_shard proofs.
         //
-        // Slot-proof computation is the dominant cost here: at fill
+        // Generating new slot proofs is the dominant cost here: at fill
         // 1% with `slot_ctr0=0` it's ~0.5 ms per label, so a 1.3 M-
         // label wave is 11 minutes single-threaded. par_iter scales
         // it linearly with the shard's core count.
@@ -1834,13 +1835,27 @@ where
                     .map(|(idx, placement)| {
                         let label = placement.label.clone();
                         let slot_ctr0 = placement.slot_ctr;
-                        let mut slot_proofs: Vec<Vec<u8>> =
-                            Vec::with_capacity((slot_ctr0 as usize) + 1);
-                        for slot_ctr in 0..=slot_ctr0 {
-                            let (_bits, proof_bytes) =
-                                prover.prove_h_slot(slot_ctr, &label, log_capacity);
-                            slot_proofs.push(proof_bytes.to_vec());
-                        }
+                        // Value updates preserve the slot and probe trail.
+                        // Keep refreshing the shard-routing proofs below.
+                        let cached_slot_proofs = if !placement.was_new {
+                            self.label_vrf_proofs
+                                .get(&label)
+                                .filter(|cached| {
+                                    cached.vrf_proofs_slot.len() == slot_ctr0 as usize + 1
+                                })
+                                .map(|cached| cached.vrf_proofs_slot.clone())
+                        } else {
+                            None
+                        };
+                        let slot_proofs = cached_slot_proofs.unwrap_or_else(|| {
+                            let mut proofs = Vec::with_capacity(slot_ctr0 as usize + 1);
+                            for slot_ctr in 0..=slot_ctr0 {
+                                let (_bits, proof_bytes) =
+                                    prover.prove_h_slot(slot_ctr, &label, log_capacity);
+                                proofs.push(proof_bytes.to_vec());
+                            }
+                            proofs
+                        });
                         (
                             label,
                             CachedLabelVrfProofs {
