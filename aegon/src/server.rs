@@ -29,7 +29,7 @@ use std::marker::PhantomData;
 
 use aegon_crypto::pcs::PCSGlobalParam;
 use aegon_crypto::poly::{DenseOrSparseMLE, DenseOrSparseMLERef};
-use aegon_crypto::transcript::IOPTranscript;
+use aegon_crypto::transcript::FsTranscript;
 use ark_ec::pairing::Pairing;
 use ark_ff::{One, UniformRand, Zero};
 use ark_poly::SparseMultilinearExtension;
@@ -1336,12 +1336,12 @@ where
         let prev_r_index = self.r_index;
         let prev_r_value = self.r_value;
         let (new_index_com, new_value_com) = self.publish_phase_1(updates)?;
-        let new_r_index = derive_chain_scalar::<E::ScalarField, P::Commitment>(
+        let new_r_index = derive_chain_scalar::<P::Transcript, E::ScalarField, P::Commitment>(
             b"aegon.fs.r_index",
             prev_r_index,
             &new_index_com,
         );
-        let new_r_value = derive_chain_scalar::<E::ScalarField, P::Commitment>(
+        let new_r_value = derive_chain_scalar::<P::Transcript, E::ScalarField, P::Commitment>(
             b"aegon.fs.r_value",
             prev_r_value,
             &new_value_com,
@@ -2846,7 +2846,7 @@ where
             return Ok(non_zk_proof);
         }
         let point = bool_index_to_point::<E::ScalarField>(slot_bits);
-        let mut tr = IOPTranscript::<E::ScalarField>::new(transcript_label);
+        let mut tr = P::Transcript::new(transcript_label);
         let proof = P::remask_with_package(
             self.prover_param.as_ref(),
             commitment,
@@ -2937,7 +2937,7 @@ where
         let package = source
             .fetch_package(self.log_capacity)
             .map_err(|e| AegonError::Config(format!("masking fetch: {e}")))?;
-        let mut tr = IOPTranscript::<E::ScalarField>::new(transcript_label);
+        let mut tr = P::Transcript::new(transcript_label);
         let (proof, _) = P::open_zk_with_package(
             self.prover_param.as_ref(),
             com,
@@ -3261,7 +3261,7 @@ where
         .get(&usize_idx)
         .copied()
         .unwrap_or_else(<E::ScalarField as Zero>::zero);
-    let mut tr = IOPTranscript::<E::ScalarField>::new(transcript_label);
+    let mut tr = P::Transcript::new(transcript_label);
     let (proof, _) = P::open(
         pp,
         com,
@@ -3508,7 +3508,7 @@ where
     E: Pairing,
     P: AegonPcs<E>,
 {
-    let mut tr0 = IOPTranscript::<E::ScalarField>::new(transcript_label);
+    let mut tr0 = P::Transcript::new(transcript_label);
     let (proof_s0, eval_s0) = P::open(
         pp,
         com_s0,
@@ -3517,7 +3517,7 @@ where
         state_s0,
         &mut tr0,
     )?;
-    let mut tr1 = IOPTranscript::<E::ScalarField>::new(transcript_label);
+    let mut tr1 = P::Transcript::new(transcript_label);
     let (proof_s1, eval_s1) = P::open(
         pp,
         com_s1,

@@ -12,6 +12,11 @@
 mod errors;
 pub use errors::TranscriptError;
 
+#[cfg(feature = "ark_transcript")]
+mod ark_backend;
+#[cfg(feature = "ark_transcript")]
+pub use ark_backend::ArkTranscript;
+
 use ark_ff::PrimeField;
 use ark_serialize::CanonicalSerialize;
 
@@ -28,6 +33,52 @@ fn to_bytes<T: CanonicalSerialize>(value: &T) -> Result<Vec<u8>, TranscriptError
 }
 use merlin::Transcript;
 use std::marker::PhantomData;
+
+/// A Fiat-Shamir transcript producing challenges over the prime field `F`.
+///
+/// Implementations: [`IOPTranscript`] (Merlin, the default) and, behind the
+/// `ark_transcript` feature, `ArkTranscript`. The transcript in use is chosen
+/// by the PCS through `PolynomialCommitmentScheme::Transcript`.
+pub trait FsTranscript<F: PrimeField>: Sized + Send + Sync {
+    /// Create a new transcript.
+    fn new(label: &'static [u8]) -> Self;
+
+    /// Append the message to the transcript.
+    fn append_message(&mut self, label: &'static [u8], msg: &[u8]) -> Result<(), TranscriptError>;
+
+    /// Generate a challenge from the current transcript and append it to the
+    /// transcript. Must fail if the transcript is empty.
+    fn get_and_append_challenge(&mut self, label: &'static [u8]) -> Result<F, TranscriptError>;
+
+    /// Append a field element to the transcript.
+    fn append_field_element(
+        &mut self,
+        label: &'static [u8],
+        field_elem: &F,
+    ) -> Result<(), TranscriptError> {
+        self.append_message(label, &to_bytes(field_elem)?)
+    }
+
+    /// Append a serializable element to the transcript.
+    fn append_serializable_element<S: CanonicalSerialize>(
+        &mut self,
+        label: &'static [u8],
+        group_elem: &S,
+    ) -> Result<(), TranscriptError> {
+        self.append_message(label, &to_bytes(group_elem)?)
+    }
+
+    /// Generate a list of challenges, each appended to the transcript.
+    fn get_and_append_challenge_vectors(
+        &mut self,
+        label: &'static [u8],
+        len: usize,
+    ) -> Result<Vec<F>, TranscriptError> {
+        (0..len)
+            .map(|_| self.get_and_append_challenge(label))
+            .collect()
+    }
+}
 
 /// An IOP transcript consists of a Merlin transcript and a flag `is_empty` to
 /// indicate that if the transcript is empty.
@@ -46,10 +97,9 @@ pub struct IOPTranscript<F: PrimeField> {
     phantom: PhantomData<F>,
 }
 
-// TODO: Make this into a Trait
-impl<F: PrimeField> IOPTranscript<F> {
+impl<F: PrimeField> FsTranscript<F> for IOPTranscript<F> {
     /// Create a new IOP transcript.
-    pub fn new(label: &'static [u8]) -> Self {
+    fn new(label: &'static [u8]) -> Self {
         Self {
             transcript: Transcript::new(label),
             is_empty: true,
@@ -58,7 +108,7 @@ impl<F: PrimeField> IOPTranscript<F> {
     }
 
     // Append the message to the transcript.
-    pub fn append_message(
+    fn append_message(
         &mut self,
         label: &'static [u8],
         msg: &[u8],
@@ -68,30 +118,12 @@ impl<F: PrimeField> IOPTranscript<F> {
         Ok(())
     }
 
-    // Append the message to the transcript.
-    pub fn append_field_element(
-        &mut self,
-        label: &'static [u8],
-        field_elem: &F,
-    ) -> Result<(), TranscriptError> {
-        self.append_message(label, &to_bytes(field_elem)?)
-    }
-
-    // Append the message to the transcript.
-    pub fn append_serializable_element<S: CanonicalSerialize>(
-        &mut self,
-        label: &'static [u8],
-        group_elem: &S,
-    ) -> Result<(), TranscriptError> {
-        self.append_message(label, &to_bytes(group_elem)?)
-    }
-
     // Generate the challenge from the current transcript
     // and append it to the transcript.
     //
     // The output field element is statistical uniform as long
     // as the field has a size less than 2^384.
-    pub fn get_and_append_challenge(&mut self, label: &'static [u8]) -> Result<F, TranscriptError> {
+    fn get_and_append_challenge(&mut self, label: &'static [u8]) -> Result<F, TranscriptError> {
         //  we need to reject when transcript is empty
         if self.is_empty {
             return Err(TranscriptError::InvalidTranscript(
@@ -111,7 +143,7 @@ impl<F: PrimeField> IOPTranscript<F> {
     //
     // The output field element are statistical uniform as long
     // as the field has a size less than 2^384.
-    pub fn get_and_append_challenge_vectors(
+    fn get_and_append_challenge_vectors(
         &mut self,
         label: &'static [u8],
         len: usize,

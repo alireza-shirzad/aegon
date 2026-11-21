@@ -24,7 +24,7 @@
 //! polynomials are unanchored and equality at `s0`/`s1` proves
 //! nothing.
 
-use aegon_crypto::transcript::IOPTranscript;
+use aegon_crypto::transcript::FsTranscript;
 use ark_ec::pairing::Pairing;
 
 use super::config::VerifierContext;
@@ -113,11 +113,11 @@ where
     E: Pairing,
     P: AegonPcs<E>,
 {
-    let mut tr0 = IOPTranscript::<E::ScalarField>::new(transcript_label);
+    let mut tr0 = P::Transcript::new(transcript_label);
     if !P::verify(vk, com_s0, point, &pair.eval_s0, &pair.proof_s0, &mut tr0)? {
         return Ok(false);
     }
-    let mut tr1 = IOPTranscript::<E::ScalarField>::new(transcript_label);
+    let mut tr1 = P::Transcript::new(transcript_label);
     if !P::verify(vk, com_s1, point, &pair.eval_s1, &pair.proof_s1, &mut tr1)? {
         return Ok(false);
     }
