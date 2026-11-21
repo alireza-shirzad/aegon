@@ -819,7 +819,7 @@ cmd_deploy() {
   # (the prev/new state clones in v1 lived 4×1.2 GB at peak; the
   # refactor cut that, but the remaining churn still hands glibc more
   # than it returns to the OS). mimalloc trims aggressively.
-  local cargo_features="--features mimalloc_alloc"
+  local cargo_features="--features mimalloc_alloc,rocksdb"
   if [[ "${TRACING:-0}" == "1" ]]; then
     cargo_features="$cargo_features --features tracing_instrument"
     log "TRACING=1: building with tracing_instrument feature (tracing-tree subscriber)"
@@ -1569,9 +1569,9 @@ cmd_publish_bench() {
   # Build + push the bench binary to the coordinator (idempotent —
   # cached cargo + scp-only-if-different is what `bench-cluster.sh
   # deploy` already does, but this subcommand may run on its own).
-  local cargo_features=""
+  local cargo_features="--features rocksdb"
   if [[ "${TRACING:-0}" == "1" ]]; then
-    cargo_features="--features tracing_instrument"
+    cargo_features="$cargo_features --features tracing_instrument"
   fi
   local local_bin_dir="$REPO_ROOT/target/release"
   local remote_bin_dir="$local_bin_dir"
@@ -1814,9 +1814,9 @@ cmd_migration_bench() {
 
   # Build + push the bench binary (mirrors cmd_publish_bench's
   # Linux/Darwin split).
-  local cargo_features=""
+  local cargo_features="--features rocksdb"
   if [[ "${TRACING:-0}" == "1" ]]; then
-    cargo_features="--features tracing_instrument"
+    cargo_features="$cargo_features --features tracing_instrument"
   fi
   local local_bin_dir="$REPO_ROOT/target/release"
   local remote_bin_dir="$local_bin_dir"
@@ -2157,9 +2157,9 @@ cmd_lookup_bench() {
   # Need the binary on the coord. The default deploy step doesn't push
   # it, so do that here (idempotent — same as cmd_deploy's coord push
   # but for the lookup binary).
-  local cargo_features=""
+  local cargo_features="--features rocksdb"
   if [[ "${TRACING:-0}" == "1" ]]; then
-    cargo_features="--features tracing_instrument"
+    cargo_features="$cargo_features --features tracing_instrument"
   fi
   local local_bin_dir="$REPO_ROOT/target/release"
   local remote_bin_dir="$local_bin_dir"

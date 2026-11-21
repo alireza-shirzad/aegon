@@ -38,7 +38,7 @@ use ark_std::rand::Rng;
 use rayon::prelude::*;
 
 use super::config::{AegonConfig, VerifierContext};
-use super::db::{key_shard_state, DbSource, RedisDb};
+use super::db::{key_shard_state, DbSource};
 use super::error::AegonError;
 use super::fs::derive_chain_scalar;
 use super::hash::{bool_index_to_point, bool_index_to_usize, HashSuite, Sha256Hash};
@@ -3604,8 +3604,8 @@ where
     use super::db::Db;
     let db: Option<Box<dyn Db>> = match db_source {
         DbSource::None => None,
-        DbSource::Redis(url) => Some(Box::new(RedisDb::connect(url)?)),
-        DbSource::Rocks(path) => Some(Box::new(super::db::RocksDb::open(path)?)),
+        DbSource::Redis(url) => Some(super::db::open_redis(url)?),
+        DbSource::Rocks(path) => Some(super::db::open_rocks(path)?),
     };
     let Some(db) = db else { return Ok(None) };
     match db.get(&key_shard_state(shard_id))? {
