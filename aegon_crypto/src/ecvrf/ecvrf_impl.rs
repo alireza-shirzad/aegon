@@ -23,7 +23,7 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
  * flag to this specific crate. See: https://github.com/rust-analyzer/rust-analyzer/issues/7243
  *
  * If you still see the error, you can simply ignore. It's harmless.
-*/
+ */
 use ed25519_dalek::SecretKey as ed25519_PrivateKey;
 use ed25519_dalek::Sha512;
 use ed25519_dalek::SigningKey as ed25519_SigningKey;

@@ -16,6 +16,18 @@ pub use errors::TranscriptError;
 mod ark_backend;
 #[cfg(feature = "ark_transcript")]
 pub use ark_backend::ArkTranscript;
+#[cfg(all(test, feature = "ark_transcript"))]
+mod ark_tests;
+
+#[cfg(not(any(feature = "merlin", feature = "ark_transcript")))]
+compile_error!("aegon_crypto needs a transcript: enable `merlin` or `ark_transcript`");
+
+/// The transcript `KZHK<E>` uses when none is named: [`IOPTranscript`]
+/// with the `merlin` feature, otherwise `ArkTranscript`.
+#[cfg(feature = "merlin")]
+pub type DefaultTranscript<F> = IOPTranscript<F>;
+#[cfg(not(feature = "merlin"))]
+pub type DefaultTranscript<F> = ArkTranscript<F>;
 
 use ark_ff::PrimeField;
 use ark_serialize::CanonicalSerialize;
@@ -31,7 +43,9 @@ fn to_bytes<T: CanonicalSerialize>(value: &T) -> Result<Vec<u8>, TranscriptError
         .map_err(|e| TranscriptError::InvalidTranscript(format!("serialize_compressed: {e}")))?;
     Ok(buf)
 }
+#[cfg(feature = "merlin")]
 use merlin::Transcript;
+#[cfg(feature = "merlin")]
 use std::marker::PhantomData;
 
 /// A Fiat-Shamir transcript producing challenges over the prime field `F`.
@@ -89,6 +103,7 @@ pub trait FsTranscript<F: PrimeField>: Sized + Send + Sync {
 /// The `is_empty` flag is useful in the case where a protocol is initiated by
 /// the verifier, in which case the prover should start its phase by receiving a
 /// `non-empty` transcript.
+#[cfg(feature = "merlin")]
 #[derive(Clone)]
 pub struct IOPTranscript<F: PrimeField> {
     transcript: Transcript,
@@ -97,6 +112,7 @@ pub struct IOPTranscript<F: PrimeField> {
     phantom: PhantomData<F>,
 }
 
+#[cfg(feature = "merlin")]
 impl<F: PrimeField> FsTranscript<F> for IOPTranscript<F> {
     /// Create a new IOP transcript.
     fn new(label: &'static [u8]) -> Self {
@@ -108,11 +124,7 @@ impl<F: PrimeField> FsTranscript<F> for IOPTranscript<F> {
     }
 
     // Append the message to the transcript.
-    fn append_message(
-        &mut self,
-        label: &'static [u8],
-        msg: &[u8],
-    ) -> Result<(), TranscriptError> {
+    fn append_message(&mut self, label: &'static [u8], msg: &[u8]) -> Result<(), TranscriptError> {
         self.transcript.append_message(label, msg);
         self.is_empty = false;
         Ok(())

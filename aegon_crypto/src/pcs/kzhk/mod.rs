@@ -38,7 +38,7 @@
 //!
 //! The unified [`KZHKConfig`] struct (fields `k` and `zk`) selects the
 //! variant when generating the SRS.
-use crate::transcript::{FsTranscript, IOPTranscript};
+use crate::transcript::{DefaultTranscript, FsTranscript};
 use crate::{
     pcs::{
         kzhk::{
@@ -90,8 +90,13 @@ mod test;
 /// functions parameterized by the pairing engine `E`; the `k` field is
 /// unused and kept only for API symmetry.
 #[derive(derivative::Derivative)]
-#[derivative(Clone(bound = ""), Debug(bound = ""), PartialEq(bound = ""), Eq(bound = ""))]
-pub struct KZHK<E: Pairing, T = IOPTranscript<<E as Pairing>::ScalarField>> {
+#[derivative(
+    Clone(bound = ""),
+    Debug(bound = ""),
+    PartialEq(bound = ""),
+    Eq(bound = "")
+)]
+pub struct KZHK<E: Pairing, T = DefaultTranscript<<E as Pairing>::ScalarField>> {
     #[doc(hidden)]
     phantom: PhantomData<(E, fn() -> T)>,
     k: usize,

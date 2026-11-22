@@ -5,6 +5,7 @@
 
 use super::*;
 use crate::pcs::kzhk::structs::KZHKConfig;
+use crate::transcript::IOPTranscript;
 use ark_bn254::{Bn254 as E, Fr};
 use ark_std::{test_rng, vec::Vec, UniformRand};
 
