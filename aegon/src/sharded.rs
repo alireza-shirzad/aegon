@@ -3505,7 +3505,8 @@ where
 }
 
 /// Verify a `ShardedValueHistory` bundle returned by
-/// `ShardedAegon::lookup_history`. Each entry is checked independently:
+/// `ShardedAegon::lookup_history`. Each entry is checked on its own
+/// (steps 1-5), then adjacent entries are chained (step 6):
 ///
 ///   1. Per-shard leaf `entry.prev_shard_commit` re-hashes up to a
 ///      sharded root via `entry.prev_merkle_path` (the "prev root").
@@ -3526,6 +3527,11 @@ where
 ///      `entry.post_shard_commit.value_commitment` with value
 ///      `value_post_eval`.
 ///   5. `H::h_f(entry.value_bytes) == entry.value_post_eval`.
+///   6. For adjacent entries `(newer, older)`: same `(shard, slot)`,
+///      `newer.epoch > older.epoch`, and
+///      `newer.rand_value_pre_eval == older.rand_value_post_eval`.
+///      This is what rules out a value change that the server left
+///      out of the list between two listed changes.
 ///
 /// `Ok(verified_anchors)` is a vector of `(prev_root, post_root)`
 /// pairs parallel to `history.entries` — handy for the caller's
@@ -3633,6 +3639,33 @@ where
             ));
         }
         roots.push((prev_root, post_root));
+    }
+
+    // Chain adjacent entries. `entries` is newest first, so for each
+    // pair `(newer, older)` the slot must be the same, the epochs must
+    // strictly decrease, and `rand_value` at the slot right after the
+    // older change must equal `rand_value` right before the newer one.
+    // `rand_value(slot)` only moves when a publish writes the slot's
+    // value, so equality rules out an unlisted change in between (e.g.
+    // a value swapped and swapped back). Without this, each entry
+    // verifies on its own and a server can omit changes from the list.
+    for pair in history.entries.windows(2) {
+        let (newer, older) = (&pair[0], &pair[1]);
+        if newer.shard_id != older.shard_id || newer.slot_bits != older.slot_bits {
+            return Err(AegonError::Verification(
+                "history entries reference different (shard, slot) pairs",
+            ));
+        }
+        if newer.epoch <= older.epoch {
+            return Err(AegonError::Verification(
+                "history entries are not in strictly decreasing epoch order",
+            ));
+        }
+        if newer.rand_value_pre_eval != older.rand_value_post_eval {
+            return Err(AegonError::Verification(
+                "history chain check failed: rand_value before a listed change differs from rand_value after the previous listed change — an unlisted publish modified this slot in between",
+            ));
+        }
     }
 
     // Freshness attestation. Must be present iff there's at least
