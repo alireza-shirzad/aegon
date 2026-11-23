@@ -889,15 +889,16 @@ pub struct ShardedValueHistory<E: Pairing, P: AegonPcs<E>> {
 /// any external bulletin-board lookup beyond pinning the placement
 /// root against their trusted source.
 ///
-/// Why just one stored opening (vs. value-history's three per
-/// entry): labels are placed exactly once and never mutate
-/// (no rename, no delete in the current system). So the only
-/// non-trivial check is "the slot's `rand_index` hasn't been
-/// disturbed since placement" — which `lookup_label_history` answers
-/// by sending this stored placement opening plus a freshly-computed
-/// opening of the live `rand_index_poly`. The verifier compares
-/// evaluations; if they match, no publish has touched this slot
-/// since the placement epoch.
+/// Why no sliding window (vs. value-history's per-change entries):
+/// labels are placed exactly once and never mutate (no rename, no
+/// delete in the current system). So the check is "`rand_index`
+/// hasn't been disturbed since placement", at the label's slot and
+/// at every earlier position of its open-addressing walk
+/// (`probe_trail`). `lookup_label_history` answers by sending the
+/// stored placement openings plus freshly-computed openings of the
+/// live `rand_index_poly` at the same positions. The verifier
+/// compares evaluations; if they all match, no publish has written
+/// any position that decides where a lookup for this label lands.
 #[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
 pub struct StoredLabelPlacement<E: Pairing, P: AegonPcs<E>> {
     /// Epoch at which this label was placed.
@@ -919,6 +920,46 @@ pub struct StoredLabelPlacement<E: Pairing, P: AegonPcs<E>> {
     /// Merkle path from `placement_shard_commit` (at position
     /// `shard_id`) up to the sharded root at the placement epoch.
     pub placement_merkle_path: Vec<EpochDigest>,
+    /// RFC 9381 ECVRF proof for `H_slot(probe_trail.len(), label)`,
+    /// i.e. for the slot the label landed on. Empty in SHA-256
+    /// deployments.
+    pub slot_vrf_proof: Vec<u8>,
+    /// The intra-shard probe positions the open-addressing walk
+    /// skipped before landing on `slot_bits` (`H_slot(ctr, label)` for
+    /// `ctr = 0 .. slot_ctr`), each with `rand_index` opened at the
+    /// placement epoch. Empty for a first-probe placement.
+    ///
+    /// A lookup stops at the first probe position that holds
+    /// `H_F(label)`, so the label's slot is only stable if these
+    /// earlier positions are never written either. Comparing each of
+    /// these openings with a live one catches a server that writes
+    /// `H_F(label)` into an earlier position and later restores it.
+    pub probe_trail: Vec<StoredProbeOpening<E, P>>,
+}
+
+/// `rand_index` opened at one earlier probe position of a label, at
+/// the label's placement epoch. See [`StoredLabelPlacement::probe_trail`].
+#[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
+pub struct StoredProbeOpening<E: Pairing, P: AegonPcs<E>> {
+    /// Slot bits of this probe position, `H_slot(ctr, label)`.
+    pub slot_bits: Vec<bool>,
+    /// RFC 9381 ECVRF proof for `(ctr, label)`, empty in SHA-256
+    /// deployments.
+    pub vrf_proof: Vec<u8>,
+    /// `rand_index_{epoch}(slot)` at the placement epoch.
+    pub rand_index_eval: E::ScalarField,
+    /// Opening proof against `placement_shard_commit.rand_index_commitment`.
+    pub rand_index_proof: P::Proof,
+}
+
+/// Live `rand_index` opening at one earlier probe position; the
+/// counterpart of a [`StoredProbeOpening`] at the current epoch.
+#[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
+pub struct LiveProbeOpening<E: Pairing, P: AegonPcs<E>> {
+    /// `rand_index_live(slot)` at the probe position.
+    pub rand_index_current_eval: E::ScalarField,
+    /// Opening proof against the live `rand_index_commitment`.
+    pub rand_index_current_proof: P::Proof,
 }
 
 /// `lookup_label_history(label)` response. The label-side analog of
@@ -965,6 +1006,9 @@ pub struct FreshnessAttestationLabel<E: Pairing, P: AegonPcs<E>> {
     /// Merkle path from `shard_commit` (at position `shard_id`) up
     /// to the live sharded root.
     pub merkle_path: Vec<EpochDigest>,
+    /// Live `rand_index` openings at the earlier probe positions,
+    /// parallel to `StoredLabelPlacement::probe_trail`.
+    pub probe_trail: Vec<LiveProbeOpening<E, P>>,
 }
 
 /// "No-change since the most recent history entry" attestation.
@@ -1205,6 +1249,9 @@ pub struct FullLabelHistory<E: Pairing, P: AegonPcs<E>> {
     /// Companion opening proof against the shard's live
     /// `rand_index_commitment`.
     pub freshness_proof: P::Proof,
+    /// Live `rand_index` openings at the earlier probe positions,
+    /// parallel to `placement.probe_trail`.
+    pub trail_freshness: Vec<LiveProbeOpening<E, P>>,
 }
 
 /// Two-layer label-residency proof. Replaces `ShardedLabelProof` in
@@ -2988,6 +3035,27 @@ where
             })?
             .merkle_path(shard_id as usize)
             .to_vec();
+        // The shard stores the slot VRF proofs it cached at placement.
+        // A shard running without a VRF prover of its own leaves them
+        // empty; fill those in here, as the lookup path does.
+        if let Some(prover) = self.vrf_prover.as_ref() {
+            let shard_log_capacity = self.shard_log_capacity();
+            let trail_len = placement.probe_trail.len() as u64;
+            for (ctr, probe) in placement.probe_trail.iter_mut().enumerate() {
+                if probe.vrf_proof.is_empty() {
+                    probe.vrf_proof = prover
+                        .prove_h_slot(ctr as u64, label, shard_log_capacity)
+                        .1
+                        .to_vec();
+                }
+            }
+            if placement.slot_vrf_proof.is_empty() {
+                placement.slot_vrf_proof = prover
+                    .prove_h_slot(trail_len, label, shard_log_capacity)
+                    .1
+                    .to_vec();
+            }
+        }
         let current = self.current_commitment();
         let merkle_path = current.merkle_path(shard_id as usize).to_vec();
         let shard_commit = current.per_shard[shard_id as usize].clone();
@@ -2998,6 +3066,7 @@ where
             rand_index_current_proof: full.freshness_proof,
             shard_commit,
             merkle_path,
+            probe_trail: full.trail_freshness,
         });
         Ok(ShardedLabelHistory {
             label: label.clone(),
@@ -3661,6 +3730,15 @@ pub struct VerifiedLookupLabelHistory {
 ///   4. Both merkle paths anchor against their respective sharded
 ///      roots, which we return for the caller's bulletin-board
 ///      cross-check.
+///   5. The probe trail: every position `H_slot(ctr, label)` the
+///      open-addressing walk skipped before the label's slot is
+///      re-derived from the label (with its VRF proof in ECVRF
+///      deployments), `placement.slot_bits` must be the next position
+///      of that walk, and `rand_index` at each skipped position must
+///      be the same at the placement epoch and now. A lookup stops at
+///      the first position holding `H_F(label)`, so this is what
+///      rules out a server writing the label into an earlier position
+///      and restoring it later.
 ///
 /// Returns empty (all `None`) when the bundle has no placement
 /// record (label unknown / racy pre-persist window).
@@ -3690,6 +3768,54 @@ where
                     "label history freshness references a different (shard, slot) than the placement",
                 ));
             }
+            // (5a) Re-derive the probe walk from the label. The
+            // stored trail must be exactly the positions for
+            // `ctr = 0 .. k`, and the label's slot must be position `k`.
+            if p.probe_trail.len() != fr.probe_trail.len() {
+                return Err(AegonError::Verification(
+                    "label history probe trail and its live openings have different lengths",
+                ));
+            }
+            let shard_log_capacity = ctx.shard_log_capacity();
+            let derive_slot = |ctr: u64, vrf_proof: &[u8]| -> Result<Vec<bool>, AegonError> {
+                match ctx.vrf_verifier.as_ref() {
+                    Some(verifier) => {
+                        if vrf_proof.is_empty() {
+                            return Err(AegonError::Verification(
+                                "label history: vrf-mode slot probe has empty vrf_proof",
+                            ));
+                        }
+                        verifier
+                            .verify_h_slot(ctr, &history.label, vrf_proof, shard_log_capacity)
+                            .map_err(|e| match e {
+                                super::hash::VrfVerifyError::Malformed(_) => {
+                                    AegonError::Verification(
+                                        "label history slot vrf_proof failed to parse",
+                                    )
+                                }
+                                super::hash::VrfVerifyError::InvalidProof(_) => {
+                                    AegonError::Verification(
+                                        "label history slot vrf_proof did not verify",
+                                    )
+                                }
+                            })
+                    }
+                    None => Ok(H::h_slot(ctr, &history.label, shard_log_capacity)),
+                }
+            };
+            for (ctr, probe) in p.probe_trail.iter().enumerate() {
+                if derive_slot(ctr as u64, &probe.vrf_proof)? != probe.slot_bits {
+                    return Err(AegonError::Verification(
+                        "label history probe trail slot bits disagree with H_slot",
+                    ));
+                }
+            }
+            if derive_slot(p.probe_trail.len() as u64, &p.slot_vrf_proof)? != p.slot_bits {
+                return Err(AegonError::Verification(
+                    "label history placement slot is not the next H_slot position after the probe trail",
+                ));
+            }
+
             // Re-anchor both leaves under their respective roots.
             let placement_root = verify_merkle_path::<E, P>(
                 &p.placement_shard_commit,
@@ -3744,11 +3870,47 @@ where
                 ));
             }
 
-            // Sanity: H is unused in this verifier (no value-bytes
-            // hashing to do — `index_poly`'s data value is bound by
-            // the lookup_label proof, not by us). Reference H to
-            // keep the type parameter live for the call site.
-            let _ = std::marker::PhantomData::<H>;
+            // (5b) Probe trail: `rand_index` at every skipped position
+            // must also be unchanged since placement. Otherwise a
+            // publish wrote one of them, and lookups for this label
+            // may have stopped there instead of at `slot_bits`.
+            for (stored, live) in p.probe_trail.iter().zip(fr.probe_trail.iter()) {
+                let probe_point = bool_index_to_point::<E::ScalarField>(&stored.slot_bits);
+                let mut tr_stored = IOPTranscript::<E::ScalarField>::new(b"aegon.rand_index.open");
+                let ok_stored = P::verify(
+                    &ctx.inner.verifier_param,
+                    &p.placement_shard_commit.rand_index_commitment,
+                    &probe_point,
+                    &stored.rand_index_eval,
+                    &stored.rand_index_proof,
+                    &mut tr_stored,
+                )?;
+                if !ok_stored {
+                    return Err(AegonError::Verification(
+                        "label history probe trail placement opening did not verify",
+                    ));
+                }
+                let mut tr_probe_live =
+                    IOPTranscript::<E::ScalarField>::new(b"aegon.rand_index.open");
+                let ok_probe_live = P::verify(
+                    &ctx.inner.verifier_param,
+                    &fr.shard_commit.rand_index_commitment,
+                    &probe_point,
+                    &live.rand_index_current_eval,
+                    &live.rand_index_current_proof,
+                    &mut tr_probe_live,
+                )?;
+                if !ok_probe_live {
+                    return Err(AegonError::Verification(
+                        "label history probe trail live opening did not verify",
+                    ));
+                }
+                if stored.rand_index_eval != live.rand_index_current_eval {
+                    return Err(AegonError::Verification(
+                        "label history probe trail check failed: live rand_index at an earlier probe position differs from its value at placement — a publish has written that position since",
+                    ));
+                }
+            }
 
             Ok(VerifiedLookupLabelHistory {
                 placement_root: Some(placement_root),

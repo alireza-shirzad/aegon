@@ -73,12 +73,12 @@ pub use sharded::{
     verify_lookup_label_two_layer, verify_lookup_value, verify_merkle_path,
     verify_sharded_consistency_two_layer, verify_sharded_invariance,
     verify_sharded_lookup_two_layer, EpochDigest, FreshnessAttestation, FreshnessAttestationLabel,
-    LabelSlot, ShardRoutingProbe, ShardSlotProbe, ShardSlotRandPair, ShardTransport, ShardedAegon,
-    ShardedAegonConfig, ShardedAegonConfigBuilder, ShardedConsistencyProofTwoLayer,
-    ShardedEpochCommitment, ShardedLabelHistory, ShardedLabelProofTwoLayer,
-    ShardedLookupProofTwoLayer, ShardedValueHistory, ShardedValueProof, ShardedVerifierContext,
-    SrsSource, StoredLabelPlacement, StoredValueHistoryEntry, VerifiedLookupHistory,
-    VerifiedLookupLabelHistory, HISTORY_WINDOW,
+    LabelSlot, LiveProbeOpening, ShardRoutingProbe, ShardSlotProbe, ShardSlotRandPair,
+    ShardTransport, ShardedAegon, ShardedAegonConfig, ShardedAegonConfigBuilder,
+    ShardedConsistencyProofTwoLayer, ShardedEpochCommitment, ShardedLabelHistory,
+    ShardedLabelProofTwoLayer, ShardedLookupProofTwoLayer, ShardedValueHistory, ShardedValueProof,
+    ShardedVerifierContext, SrsSource, StoredLabelPlacement, StoredProbeOpening,
+    StoredValueHistoryEntry, VerifiedLookupHistory, VerifiedLookupLabelHistory, HISTORY_WINDOW,
 };
 pub use sigma::BlindingEqProof;
 pub use types::{
