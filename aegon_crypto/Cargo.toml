@@ -11,7 +11,7 @@ repository = "https://github.com/alireza-shirzad/aegon"
 readme = "../README.md"
 
 [features]
-default = ["std"]
+default = ["std", "merlin"]
 # Parallel execution inside the crypto (KZH-k MSM, etc.)
 parallel = [
     "rayon",
@@ -34,6 +34,11 @@ std = [
 ]
 # serde derives on the ECVRF key types.
 serde_serialization = ["dep:serde", "ed25519-dalek/serde"]
+# `transcript::ArkTranscript`, an alternative Fiat-Shamir transcript.
+ark_transcript = ["dep:ark-transcript"]
+# `transcript::IOPTranscript` (Merlin), the default transcript. Build with
+# `default-features = false` and `ark_transcript` to drop the dependency.
+merlin = ["dep:merlin"]
 
 [dependencies]
 ark-bn254 = { workspace = true }
@@ -44,7 +49,8 @@ ark-serialize = { workspace = true }
 ark-std = { workspace = true }
 derivative = { workspace = true }
 displaydoc = { workspace = true }
-merlin = { version = "3", default-features = false }
+merlin = { version = "3", default-features = false, optional = true }
+ark-transcript = { version = "0.0.3", optional = true }
 ndarray = { workspace = true, features = ["serde"] }
 num-bigint = { workspace = true }
 num-traits = { workspace = true }

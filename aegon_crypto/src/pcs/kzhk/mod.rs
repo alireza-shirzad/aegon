@@ -38,7 +38,7 @@
 //!
 //! The unified [`KZHKConfig`] struct (fields `k` and `zk`) selects the
 //! variant when generating the SRS.
-use crate::transcript::IOPTranscript;
+use crate::transcript::{DefaultTranscript, FsTranscript};
 use crate::{
     pcs::{
         kzhk::{
@@ -89,16 +89,23 @@ mod test;
 /// Type-level handle for the KZH-k PCS. All methods are associated
 /// functions parameterized by the pairing engine `E`; the `k` field is
 /// unused and kept only for API symmetry.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct KZHK<E: Pairing> {
+#[derive(derivative::Derivative)]
+#[derivative(
+    Clone(bound = ""),
+    Debug(bound = ""),
+    PartialEq(bound = ""),
+    Eq(bound = "")
+)]
+pub struct KZHK<E: Pairing, T = DefaultTranscript<<E as Pairing>::ScalarField>> {
     #[doc(hidden)]
-    phantom: PhantomData<E>,
+    phantom: PhantomData<(E, fn() -> T)>,
     k: usize,
 }
 
-impl<E> PolynomialCommitmentScheme<E> for KZHK<E>
+impl<E, T> PolynomialCommitmentScheme<E> for KZHK<E, T>
 where
     E: Pairing,
+    T: FsTranscript<E::ScalarField>,
 {
     type Config = KZHKConfig;
     type ProverParam = KZHKProverParam<E>;
@@ -113,6 +120,7 @@ where
     type State = KZHKState<E>;
     type MaskingPackage = crate::pcs::kzhk::structs::KZHKMaskingPackage<E>;
     type HidingScalar = E::ScalarField;
+    type Transcript = T;
 
     /// `k` from [`KZHKConfig::optimal_k`].
     fn default_config(num_vars: usize, zk: bool) -> Self::Config {
@@ -301,7 +309,7 @@ where
         polynomial: DenseOrSparseMLERef<'_, E::ScalarField>,
         point: &Self::Point,
         state: &Self::State,
-        transcript: &mut IOPTranscript<E::ScalarField>,
+        transcript: &mut T,
     ) -> Result<(Self::Proof, Self::Evaluation), PCSError> {
         let result = if !prover_param.borrow().is_zk() {
             Self::open_non_zk(prover_param, commitment, polynomial, point, state)
@@ -328,7 +336,7 @@ where
         polynomials: &[DenseOrSparseMLERef<'_, E::ScalarField>],
         point: &Self::Point,
         states: &[Self::State],
-        transcript: &mut IOPTranscript<E::ScalarField>,
+        transcript: &mut T,
     ) -> Result<(Self::BatchProof, Self::Evaluation), PCSError> {
         Self::multi_open_non_zk(
             prover_param,
@@ -351,7 +359,7 @@ where
         point: &Self::Point,
         value: &E::ScalarField,
         proof: &Self::Proof,
-        transcript: &mut IOPTranscript<E::ScalarField>,
+        transcript: &mut T,
     ) -> Result<bool, PCSError> {
         let result = match (proof.get_r_hide(), proof.get_y_r(), proof.get_rho_prime()) {
             (Some(_), Some(_), Some(_)) => Self::verify_zk(
@@ -377,7 +385,7 @@ where
         point: &Self::Point,
         values: &[E::ScalarField],
         batch_proof: &Self::BatchProof,
-        transcript: &mut IOPTranscript<E::ScalarField>,
+        transcript: &mut T,
     ) -> Result<bool, PCSError> {
         Self::batch_verify_non_zk(
             verifier_param,
@@ -503,7 +511,7 @@ where
         polynomial: DenseOrSparseMLERef<'_, E::ScalarField>,
         point: &Self::Point,
         state: &Self::State,
-        transcript: &mut IOPTranscript<E::ScalarField>,
+        transcript: &mut T,
         package: &Self::MaskingPackage,
     ) -> Result<(Self::Proof, Self::Evaluation), PCSError> {
         let pp = prover_param.borrow();
@@ -542,7 +550,7 @@ where
         value: &E::ScalarField,
         non_zk_proof: Self::Proof,
         tau_f: &Self::HidingScalar,
-        transcript: &mut IOPTranscript<E::ScalarField>,
+        transcript: &mut T,
         package: &Self::MaskingPackage,
     ) -> Result<Self::Proof, PCSError> {
         let pp = prover_param.borrow();
@@ -559,7 +567,7 @@ where
     }
 }
 
-impl<E: Pairing> KZHK<E> {
+impl<E: Pairing, T: FsTranscript<E::ScalarField>> KZHK<E, T> {
     /// zk commitment from Appendix D: returns `C_hide = C + tau*h` where
     /// `tau` is a fresh blinding factor returned in the auxiliary info so
     /// the prover can later derandomize during opening.
@@ -668,7 +676,7 @@ impl<E: Pairing> KZHK<E> {
         polynomial: DenseOrSparseMLERef<'_, E::ScalarField>,
         point: &[E::ScalarField],
         state: &KZHKState<E>,
-        transcript: &mut IOPTranscript<E::ScalarField>,
+        transcript: &mut T,
     ) -> Result<(KZHKOpeningProof<E>, E::ScalarField), PCSError> {
         let prover_param: &KZHKProverParam<E> = prover_param.borrow();
         let (non_zk_opening, non_zk_value) =
@@ -715,7 +723,7 @@ impl<E: Pairing> KZHK<E> {
         value: &E::ScalarField,
         non_zk_opening: KZHKOpeningProof<E>,
         tau_f: &E::ScalarField,
-        transcript: &mut IOPTranscript<E::ScalarField>,
+        transcript: &mut T,
         package: &crate::pcs::kzhk::structs::KZHKMaskingPackage<E>,
     ) -> Result<KZHKOpeningProof<E>, PCSError> {
         let r_poly_wrapped = DenseOrSparseMLE::Sparse(package.r_poly.clone());
@@ -739,7 +747,7 @@ impl<E: Pairing> KZHK<E> {
     /// Both prover and verifier call this with the same inputs in the
     /// same order, so they agree on `alpha` without communication.
     fn derive_alpha(
-        transcript: &mut IOPTranscript<E::ScalarField>,
+        transcript: &mut T,
         commitment: &KZHKCommitment<E>,
         point: &[E::ScalarField],
         value: &E::ScalarField,
@@ -764,7 +772,7 @@ impl<E: Pairing> KZHK<E> {
         polynomials: &[DenseOrSparseMLERef<'_, E::ScalarField>],
         point: &Vec<E::ScalarField>,
         states: &[KZHKState<E>],
-        _transcript: &mut IOPTranscript<E::ScalarField>,
+        _transcript: &mut T,
     ) -> Result<(KZHKOpeningProof<E>, E::ScalarField), PCSError> {
         let num_vars = point.len();
         let mut aggr_state: KZHKState<E> = KZHKState::default();
@@ -820,7 +828,7 @@ impl<E: Pairing> KZHK<E> {
         value: &E::ScalarField,
         _state: Option<&KZHKState<E>>,
         proof: &KZHKOpeningProof<E>,
-        transcript: &mut IOPTranscript<E::ScalarField>,
+        transcript: &mut T,
     ) -> Result<bool, PCSError> {
         let r_hide = proof.get_r_hide().as_ref().unwrap();
         let alpha = Self::derive_alpha(transcript, commitment, point, value, r_hide)?;
@@ -941,7 +949,7 @@ impl<E: Pairing> KZHK<E> {
         point: &Vec<E::ScalarField>,
         values: &[E::ScalarField],
         batch_proof: &KZHKOpeningProof<E>,
-        _transcript: &mut IOPTranscript<E::ScalarField>,
+        _transcript: &mut T,
     ) -> Result<bool, PCSError> {
         let mut aggr_comm = KZHKCommitment::default();
         let mut aggr_value = E::ScalarField::zero();

@@ -19,7 +19,7 @@
 //!   evaluations. The point must depend on every commitment in the
 //!   relation so the prover cannot adaptively choose it.
 
-use aegon_crypto::transcript::IOPTranscript;
+use aegon_crypto::transcript::FsTranscript;
 use ark_ec::pairing::Pairing;
 use ark_ff::PrimeField;
 use ark_serialize::CanonicalSerialize;
@@ -27,12 +27,13 @@ use ark_serialize::CanonicalSerialize;
 /// Derive `r_n = O(prev_r, new_commitment)` per Fig. 3. The label
 /// distinguishes the index chain from the value chain so they can never
 /// collide.
-pub(crate) fn derive_chain_scalar<F, C>(label: &'static [u8], prev_r: F, new_commitment: &C) -> F
+pub(crate) fn derive_chain_scalar<T, F, C>(label: &'static [u8], prev_r: F, new_commitment: &C) -> F
 where
+    T: FsTranscript<F>,
     F: PrimeField,
     C: CanonicalSerialize,
 {
-    let mut t = IOPTranscript::<F>::new(label);
+    let mut t = T::new(label);
     t.append_field_element(b"prev_r", &prev_r)
         .expect("transcript append");
     t.append_serializable_element(b"new_com", new_commitment)
@@ -59,7 +60,7 @@ where
     E: Pairing,
     P: aegon_crypto::pcs::PolynomialCommitmentScheme<E>,
 {
-    let mut t = IOPTranscript::<E::ScalarField>::new(label);
+    let mut t = P::Transcript::new(label);
     t.append_serializable_element(b"prev_poly", prev_poly_com)
         .expect("transcript append");
     t.append_serializable_element(b"next_poly", next_poly_com)

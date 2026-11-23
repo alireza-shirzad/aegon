@@ -67,7 +67,7 @@ where
         ));
     }
 
-    let new_r_index = derive_chain_scalar::<E::ScalarField, P::Commitment>(
+    let new_r_index = derive_chain_scalar::<P::Transcript, E::ScalarField, P::Commitment>(
         b"aegon.fs.r_index",
         audit_state.r_index,
         &next.index_commitment,
@@ -89,7 +89,7 @@ where
         return Ok(false);
     }
 
-    let new_r_value = derive_chain_scalar::<E::ScalarField, P::Commitment>(
+    let new_r_value = derive_chain_scalar::<P::Transcript, E::ScalarField, P::Commitment>(
         b"aegon.fs.r_value",
         audit_state.r_value,
         &next.value_commitment,

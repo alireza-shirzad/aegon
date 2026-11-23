@@ -247,8 +247,8 @@ pub fn sha256_sigma_challenge<E: Pairing, P: AegonPcs<E>>(
     r_chain: E::ScalarField,
     r_commit: &P::Commitment,
 ) -> E::ScalarField {
-    use aegon_crypto::transcript::IOPTranscript;
-    let mut t = IOPTranscript::<E::ScalarField>::new(SIGMA_DOMAIN);
+    use aegon_crypto::transcript::FsTranscript;
+    let mut t = P::Transcript::new(SIGMA_DOMAIN);
     t.append_serializable_element(b"prev_val", prev_poly)
         .expect("transcript append");
     t.append_serializable_element(b"next_val", next_poly)

@@ -11,7 +11,12 @@ repository = "https://github.com/alireza-shirzad/aegon"
 readme = "../README.md"
 
 [features]
-default = []
+default = ["merlin"]
+# Fiat-Shamir transcript, forwarded to `aegon_crypto`. Use
+# `default-features = false, features = ["ark_transcript"]` to build
+# without Merlin.
+merlin = ["aegon_crypto/merlin"]
+ark_transcript = ["aegon_crypto/ark_transcript"]
 # Tracing instrumentation
 tracing = ["dep:tracing"]
 # Tracing-based instrumentation. Pulls in `tracing-subscriber` so the

@@ -9,7 +9,7 @@ pub mod prelude;
 mod structs;
 
 use crate::poly::DenseOrSparseMLERef;
-use crate::transcript::IOPTranscript;
+use crate::transcript::FsTranscript;
 use ark_ec::pairing::Pairing;
 use ark_ff::Field;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
@@ -64,6 +64,8 @@ pub trait PolynomialCommitmentScheme<E: Pairing> {
     /// PCSs this is the polynomial's blinding scalar `tau` at the time
     /// the non-ZK opening was produced.
     type HidingScalar: Clone + CanonicalSerialize + CanonicalDeserialize + Debug + Send + Sync;
+    /// Fiat-Shamir transcript used by openings and verifications.
+    type Transcript: FsTranscript<E::ScalarField>;
 
     /// A configuration suited to `num_vars`-variate polynomials with the
     /// given hiding flag, for callers that don't pick one. Backends
@@ -192,7 +194,7 @@ pub trait PolynomialCommitmentScheme<E: Pairing> {
         polynomial: DenseOrSparseMLERef<'_, E::ScalarField>,
         point: &Self::Point,
         state: &Self::State,
-        _transcript: &mut IOPTranscript<E::ScalarField>,
+        _transcript: &mut Self::Transcript,
     ) -> Result<(Self::Proof, Self::Evaluation), PCSError>;
 
     fn multi_open(
@@ -201,7 +203,7 @@ pub trait PolynomialCommitmentScheme<E: Pairing> {
         _polynomials: &[DenseOrSparseMLERef<'_, E::ScalarField>],
         _point: &Self::Point,
         _states: &[Self::State],
-        _transcript: &mut IOPTranscript<E::ScalarField>,
+        _transcript: &mut Self::Transcript,
     ) -> Result<(Self::BatchProof, Self::Evaluation), PCSError> {
         unimplemented!()
     }
@@ -212,7 +214,7 @@ pub trait PolynomialCommitmentScheme<E: Pairing> {
         point: &Self::Point,
         value: &E::ScalarField,
         proof: &Self::Proof,
-        _transcript: &mut IOPTranscript<E::ScalarField>,
+        _transcript: &mut Self::Transcript,
     ) -> Result<bool, PCSError>;
 
     fn batch_verify(
@@ -222,7 +224,7 @@ pub trait PolynomialCommitmentScheme<E: Pairing> {
         _point: &Self::Point,
         _values: &[E::ScalarField],
         _batch_proof: &Self::BatchProof,
-        _transcript: &mut IOPTranscript<E::ScalarField>,
+        _transcript: &mut Self::Transcript,
     ) -> Result<bool, PCSError> {
         unimplemented!()
     }
@@ -270,7 +272,7 @@ pub trait PolynomialCommitmentScheme<E: Pairing> {
         _polynomial: DenseOrSparseMLERef<'_, E::ScalarField>,
         _point: &Self::Point,
         _state: &Self::State,
-        _transcript: &mut IOPTranscript<E::ScalarField>,
+        _transcript: &mut Self::Transcript,
         _package: &Self::MaskingPackage,
     ) -> Result<(Self::Proof, Self::Evaluation), PCSError> {
         unimplemented!("PCS::open_zk_with_package has no default — implement on hiding PCSs that need the masking-server protocol")
@@ -344,7 +346,7 @@ pub trait PolynomialCommitmentScheme<E: Pairing> {
         _value: &E::ScalarField,
         _non_zk_proof: Self::Proof,
         _tau_f: &Self::HidingScalar,
-        _transcript: &mut IOPTranscript<E::ScalarField>,
+        _transcript: &mut Self::Transcript,
         _package: &Self::MaskingPackage,
     ) -> Result<Self::Proof, PCSError> {
         unimplemented!("PCS::remask_with_package has no default — implement on hiding PCSs that need the masking-server protocol")

@@ -17,7 +17,7 @@
 //!   - At `ctr = ctr0` : `index_n(x_ctr0) == H_F(label)`.
 //!   - The value opening verifies and equals `H_F(value)`.
 
-use aegon_crypto::transcript::IOPTranscript;
+use aegon_crypto::transcript::FsTranscript;
 use ark_ec::pairing::Pairing;
 use ark_ff::Zero;
 
@@ -60,7 +60,7 @@ where
         let probe_bits = H::h_bits(ctr as u64, label, ctx.log_capacity);
         let probe_point = bool_index_to_point::<E::ScalarField>(&probe_bits);
 
-        let mut tr = IOPTranscript::<E::ScalarField>::new(b"aegon.index.open");
+        let mut tr = P::Transcript::new(b"aegon.index.open");
         let ok = P::verify(
             &ctx.verifier_param,
             &commitment.index_commitment,
@@ -95,7 +95,7 @@ where
     let final_bits = H::h_bits(proof.ctr0, label, ctx.log_capacity);
     let value_point = bool_index_to_point::<E::ScalarField>(&final_bits);
 
-    let mut tr = IOPTranscript::<E::ScalarField>::new(b"aegon.value.open");
+    let mut tr = P::Transcript::new(b"aegon.value.open");
     let ok = P::verify(
         &ctx.verifier_param,
         &commitment.value_commitment,
