@@ -41,9 +41,7 @@ use sha2::{Digest, Sha256};
 
 use super::audit::verify_chain;
 use super::config::{AegonConfig, VerifierContext};
-use super::db::{
-    key_coord_state, key_epoch_commit, key_shard_fullness, Db, DbOp, DbSource, RedisDb,
-};
+use super::db::{key_coord_state, key_epoch_commit, key_shard_fullness, Db, DbOp, DbSource};
 use super::error::AegonError;
 use super::hash::{bool_index_to_point, HashSuite, Sha256Hash};
 use super::server::Aegon;
@@ -1642,7 +1640,7 @@ where
                                 .unwrap_or_else(|| "aegon".to_string());
                             shard_path.set_file_name(format!("{leaf}.shards"));
                             shard_path.push(format!("{i}"));
-                            aegon.set_db(Box::new(crate::db::RocksDb::open(&shard_path)?));
+                            aegon.set_db(crate::db::open_rocks(&shard_path)?);
                         }
                         DbSource::Redis(_) => {
                             return Err(AegonError::Config(format!(
@@ -1727,8 +1725,8 @@ where
         // URL fails at setup, not on the first publish.
         let db: Option<Box<dyn Db>> = match &config.db {
             DbSource::None => None,
-            DbSource::Redis(url) => Some(Box::new(RedisDb::connect(url)?)),
-            DbSource::Rocks(path) => Some(Box::new(crate::db::RocksDb::open(path)?)),
+            DbSource::Redis(url) => Some(crate::db::open_redis(url)?),
+            DbSource::Rocks(path) => Some(crate::db::open_rocks(path)?),
         };
 
         // Recovery path: if the connected DB already has coordinator

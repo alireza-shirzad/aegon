@@ -312,12 +312,12 @@ cmd_deploy() {
       bash -c "set -e; \
         apt-get update >/dev/null && \
         apt-get install -y --no-install-recommends protobuf-compiler ca-certificates >/dev/null && \
-        cargo build --release -p aegon --target x86_64-unknown-linux-gnu \
+        cargo build --release -p aegon --features redis --target x86_64-unknown-linux-gnu \
           --bin aegon_shard_server --bin aegon_coordinator_smoke"
     remote_bin_dir="$REPO_ROOT/target/x86_64-unknown-linux-gnu/release"
   else
     log "building release binaries"
-    (cd "$REPO_ROOT" && cargo build --release -p aegon \
+    (cd "$REPO_ROOT" && cargo build --release -p aegon --features redis \
       --bin aegon_srs_gen --bin aegon_shard_server --bin aegon_coordinator_smoke) \
       >/dev/null
   fi
