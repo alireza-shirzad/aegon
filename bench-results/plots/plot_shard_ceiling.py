@@ -18,6 +18,7 @@ import math
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+import paper_style  # noqa: F401  (sets the paper's fonts)
 import numpy as np
 
 REPO_ROOT = Path(__file__).resolve().parents[2]

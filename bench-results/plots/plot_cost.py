@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+import paper_style  # noqa: F401  (sets the paper's fonts)
 import numpy as np
 from matplotlib.ticker import ScalarFormatter
 
