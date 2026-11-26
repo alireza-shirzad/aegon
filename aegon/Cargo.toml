@@ -12,6 +12,8 @@ readme = "../README.md"
 
 [features]
 default = ["merlin"]
+# Insecure SRS generation for tests and benchmarks; off in normal builds.
+test-srs = ["aegon_crypto/test-srs"]
 # Fiat-Shamir transcript, forwarded to `aegon_crypto`. Use
 # `default-features = false, features = ["ark_transcript"]` to build
 # without Merlin.
@@ -88,6 +90,8 @@ tracing = { version = "0.1.40", optional = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
 
 [dev-dependencies]
+# Dependencies do not inherit cfg(test); enable their test SRS implementation.
+aegon = { path = ".", features = ["test-srs"] }
 # Fork adds per-sample JSON output (see aegon/benches/publish_sweep.rs).
 # Pinned to an exact revision for the same reason as the arkworks
 # patches in the workspace manifest: unpinned git deps silently move
@@ -125,6 +129,11 @@ required-features = ["rocksdb"]
 name = "aegon_ivc_bench"
 path = "src/bin/aegon_ivc_bench.rs"
 required-features = ["ivc_audit"]
+
+[[bin]]
+name = "aegon_srs_bootstrap"
+path = "src/bin/aegon_srs_bootstrap.rs"
+required-features = ["test-srs"]
 
 [build-dependencies]
 tonic-build = "0.12"

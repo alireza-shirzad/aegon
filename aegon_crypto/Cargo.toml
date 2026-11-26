@@ -12,6 +12,8 @@ readme = "../README.md"
 
 [features]
 default = ["std", "merlin"]
+# Insecure SRS generation for tests and benchmarks; never enable in production.
+test-srs = []
 # Parallel execution inside the crypto (KZH-k MSM, etc.)
 parallel = [
     "rayon",
