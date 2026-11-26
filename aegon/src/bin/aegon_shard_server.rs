@@ -220,6 +220,13 @@ async fn main() -> ExitCode {
     #[cfg(feature = "tracing_instrument")]
     aegon::tracing_init::init_tree_subscriber();
     let args = Args::parse();
+    let prover = match VrfProver::from_env() {
+        Ok(prover) => prover,
+        Err(error) => {
+            eprintln!("error: cannot load provisioned VRF key: {error}");
+            return ExitCode::from(2);
+        }
+    };
 
     aegon::instrument::set_rss_log(args.log_rss);
     aegon::instrument::log_rss("startup");
@@ -387,7 +394,7 @@ async fn main() -> ExitCode {
     // reverted to v14-style structure for this iteration so we can
     // tell whether the v15 regression came from the cache-aware
     // lookup branches.
-    aegon.set_vrf_prover(VrfProver::from_env());
+    aegon.set_vrf_prover(prover);
 
     // Distributed-gen path advances phase as we work through init +
     // prefill so any `WaitForReady` poll has a useful status string.

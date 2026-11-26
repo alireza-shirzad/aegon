@@ -32,30 +32,33 @@ use ark_bn254::Bn254;
 
 type Pcs = KZHK<Bn254>;
 
-fn build_cfg(log_capacity: usize, log_n_shards: usize) -> ShardedAegonConfig<Bn254, Pcs> {
-    ShardedAegonConfig::<Bn254, Pcs>::builder()
+fn build_cfg(
+    log_capacity: usize,
+    log_n_shards: usize,
+    vrf_prover: Option<VrfProver>,
+) -> ShardedAegonConfig<Bn254, Pcs> {
+    let mut builder = ShardedAegonConfig::<Bn254, Pcs>::builder()
         .log_capacity(log_capacity)
         .log_over_provisioning_factor(0)
         .log_n_shards(log_n_shards)
         .private(false)
         .kzh_k(2)
         .shards(ShardTransport::InProcess)
-        .db(DbSource::None)
-        .build()
-        .expect("config builds")
+        .db(DbSource::None);
+    if let Some(prover) = vrf_prover {
+        builder = builder.vrf_prover(prover);
+    }
+    builder.build().expect("config builds")
 }
 
 fn run_ecvrf_path() {
     println!("\n── ECVRF path ──");
-    let cfg = build_cfg(12, 1);
+    let cfg = build_cfg(12, 1, Some(VrfProver::from_seed(&BENCH_VRF_SEED)));
     let mut server: ShardedAegon<Bn254, Pcs, EcVrfHash> =
         ShardedAegon::<Bn254, Pcs, EcVrfHash>::setup(&cfg)
             .expect("ShardedAegon::setup with EcVrfHash");
 
-    // Wire the prover. Use the deterministic bench seed so the
-    // verifier-side can construct a matching public key from the
-    // server's `sharded_verifier_context()`.
-    server.set_vrf_prover(VrfProver::from_seed(&BENCH_VRF_SEED));
+    // The builder gives the coordinator and shards the same bench key.
     println!("  set VrfProver — server-side prove path active.");
 
     let updates: Vec<(Vec<u8>, Vec<u8>)> = (0..6)
@@ -131,7 +134,7 @@ fn run_ecvrf_path() {
     // ---- Negative test: a verifier with the wrong public key
     // rejects honest proofs from the legitimate server. The
     // two-layer routing model couples the COORD's per-instance
-    // prover to the SHARD's deployment-wide `H::h_slot` key (they
+    // prover to the SHARD's per-instance VRF key (they
     // must match for publish/lookup to round-trip), so the negative
     // case lives on the VERIFIER side: an unrelated public key
     // can't validate any honest VRF proof.
@@ -159,7 +162,7 @@ fn run_ecvrf_path() {
 
 fn run_sha256_path() {
     println!("\n── SHA-256 path ──");
-    let cfg = build_cfg(12, 1);
+    let cfg = build_cfg(12, 1, None);
     let mut server: ShardedAegon<Bn254, Pcs, Sha256Hash> =
         ShardedAegon::<Bn254, Pcs, Sha256Hash>::setup(&cfg).expect("setup");
 

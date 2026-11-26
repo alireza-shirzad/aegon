@@ -45,6 +45,7 @@ use std::time::Instant;
 
 use aegon::{
     DbSource, EcVrfHash, ShardTransport, ShardedAegon, ShardedAegonConfig, SrsSource, VrfProver,
+    BENCH_VRF_SEED,
 };
 use aegon_crypto::pcs::kzhk::KZHK;
 use ark_bn254::Bn254;
@@ -152,6 +153,14 @@ fn main() -> ExitCode {
     #[cfg(feature = "tracing_instrument")]
     aegon::tracing_init::init_tree_subscriber();
     let args = Args::parse();
+    let vrf_prover = match VrfProver::from_env() {
+        Ok(prover) => prover,
+        Err(aegon::VrfKeyError::MissingConfiguration) => VrfProver::from_seed(&BENCH_VRF_SEED),
+        Err(error) => {
+            eprintln!("error: VRF key configuration invalid: {error}");
+            return ExitCode::from(2);
+        }
+    };
 
     if !args.endpoints.len().is_power_of_two() {
         eprintln!(
@@ -172,6 +181,7 @@ fn main() -> ExitCode {
 
     let mut builder = ShardedAegonConfig::<Bn254, Pcs>::builder()
         .audit_fs(aegon::ivc::adapter::hooks_for(args.audit_fs))
+        .vrf_prover(vrf_prover)
         // --shard-log-capacity is the per-shard size; convert it to the
         // dictionary capacity it implies.
         .log_capacity(aegon::true_log_capacity_from_shard(args.shard_log_capacity) + log_n_shards)
@@ -219,7 +229,6 @@ fn main() -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    server.set_vrf_prover(VrfProver::from_env());
     let setup_ms = t_setup.elapsed().as_secs_f64() * 1000.0;
     eprintln!("coordinator setup OK in {setup_ms:.1} ms (ECVRF prover attached)");
 

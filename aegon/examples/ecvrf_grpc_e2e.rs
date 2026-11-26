@@ -42,6 +42,7 @@ fn build_cfg(shard_log_capacity: usize, log_n_shards: usize) -> ShardedAegonConf
         .kzh_k(2)
         .shards(ShardTransport::InProcess)
         .db(DbSource::None)
+        .vrf_prover(VrfProver::from_seed(&BENCH_VRF_SEED))
         .build()
         .expect("config builds")
 }
@@ -69,7 +70,6 @@ async fn main() {
     .await
     .expect("setup join");
 
-    state.set_vrf_prover(VrfProver::from_seed(&BENCH_VRF_SEED));
     let verifier_ctx_template: ShardedVerifierContext<Bn254, Pcs> =
         state.sharded_verifier_context();
     must(

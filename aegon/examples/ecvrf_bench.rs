@@ -3,9 +3,9 @@
 // This source code is licensed under the MIT license found in the
 // LICENSE file in the root directory of this source tree.
 
-//! Micro-benchmark for EcVrfHash vs Sha256Hash. Reports per-call ns.
+//! Micro-benchmark for keyed ECVRF vs Sha256Hash. Reports per-call ns.
 fn main() {
-    use aegon::{EcVrfHash, HashSuite, Sha256Hash};
+    use aegon::{HashSuite, Sha256Hash, VrfProver, BENCH_VRF_SEED};
     use ark_bn254::Fr;
     use std::time::Instant;
 
@@ -13,16 +13,18 @@ fn main() {
     let num_vars = 27usize;
     let iters = 2_000;
 
-    // Warm up the OnceLock + caches.
+    let prover = VrfProver::from_seed(&BENCH_VRF_SEED);
+
+    // Warm up the caches.
     for i in 0..200 {
-        let _ = <EcVrfHash as HashSuite<Fr>>::h_bits(i as u64, label, num_vars);
+        let _ = prover.evaluate_h_bits(i as u64, label, num_vars);
         let _ = <Sha256Hash as HashSuite<Fr>>::h_bits(i as u64, label, num_vars);
     }
 
     // ECVRF
     let t = Instant::now();
     for i in 0..iters {
-        let _ = <EcVrfHash as HashSuite<Fr>>::h_bits(i as u64, label, num_vars);
+        let _ = prover.evaluate_h_bits(i as u64, label, num_vars);
     }
     let ecvrf_ns = t.elapsed().as_nanos() / iters as u128;
 
@@ -33,7 +35,7 @@ fn main() {
     }
     let sha_ns = t.elapsed().as_nanos() / iters as u128;
 
-    println!("EcVrfHash::h_bits  : {} ns/call", ecvrf_ns);
+    println!("VrfProver::evaluate_h_bits : {} ns/call", ecvrf_ns);
     println!("Sha256Hash::h_bits : {} ns/call", sha_ns);
     println!(
         "slowdown factor    : {:.0}x",

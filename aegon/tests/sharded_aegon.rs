@@ -323,11 +323,11 @@ fn two_layer_publish_lookup_round_trip_ecvrf() {
         .log_n_shards(log_n_shards)
         .private(false)
         .kzh_k(2)
+        .vrf_prover(VrfProver::from_seed(&BENCH_VRF_SEED))
         .build()
         .expect("ecvrf cfg builds");
     let mut server: ShardedG<Bn254, Pcs, EcVrfHash> =
         ShardedG::<Bn254, Pcs, EcVrfHash>::setup(&cfg).expect("setup ecvrf");
-    server.set_vrf_prover(VrfProver::from_seed(&BENCH_VRF_SEED));
 
     let updates: Vec<(Vec<u8>, Vec<u8>)> = (0..12u32)
         .map(|i| {

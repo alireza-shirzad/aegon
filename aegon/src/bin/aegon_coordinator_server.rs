@@ -162,6 +162,13 @@ fn main() -> ExitCode {
     #[cfg(feature = "tracing_instrument")]
     aegon::tracing_init::init_tree_subscriber();
     let args = Args::parse();
+    let prover = match VrfProver::from_env() {
+        Ok(prover) => prover,
+        Err(error) => {
+            eprintln!("error: cannot load provisioned VRF key: {error}");
+            return ExitCode::from(2);
+        }
+    };
 
     if !args.endpoints.len().is_power_of_two() {
         eprintln!(
@@ -177,6 +184,7 @@ fn main() -> ExitCode {
     let log_n_shards = args.endpoints.len().trailing_zeros() as usize;
 
     let mut builder = ShardedAegonConfig::<Bn254, Pcs>::builder()
+        .vrf_prover(prover.clone())
         .audit_fs(aegon::ivc::adapter::hooks_for(args.audit_fs))
         // --shard-log-capacity is the per-shard size; convert it to the
         // dictionary capacity it implies.
@@ -223,17 +231,7 @@ fn main() -> ExitCode {
         t_setup.elapsed().as_secs_f64() * 1000.0
     );
 
-    // Initialise the ECVRF prover from the configured key source:
-    //   AEGON_VRF_SEED      — hex-encoded 32-byte Ed25519 secret;
-    //   AEGON_VRF_KEY_PATH  — sealed-file path (auto-generated on
-    //                         first run from /dev/urandom, persisted
-    //                         at mode 0600);
-    //   otherwise           — the published benchmark seed, useful
-    //                         only for tests and CI.
-    // The matching public key is automatically advertised in every
-    // `CurrentCommitment` response so clients can build a
-    // `VrfVerifier` without an out-of-band fetch.
-    let prover = VrfProver::from_env();
+    // Advertise the matching public key for the provisioned prover.
     let pk_hex = hex::encode(prover.public_key().as_bytes());
     state.set_vrf_prover(prover);
     eprintln!(
