@@ -224,6 +224,10 @@ async fn main() -> ExitCode {
     aegon::instrument::set_rss_log(args.log_rss);
     aegon::instrument::log_rss("startup");
 
+    if args.srs_bind.is_some() && !cfg!(feature = "test-srs") {
+        eprintln!("error: distributed test SRS generation requires the test-srs feature");
+        return ExitCode::from(2);
+    }
     if args.srs_path.is_none() && args.setup_seed.is_none() {
         eprintln!("error: provide either --srs-path or --setup-seed");
         return ExitCode::from(2);

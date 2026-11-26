@@ -21,13 +21,18 @@ use crate::{
     pcs::{kzhk::structs::Tensor, PCSGlobalParam},
     PCSError, StructuredReferenceString,
 };
-use ark_ec::{pairing::Pairing, scalar_mul::BatchMulPreprocessing, CurveGroup};
+use ark_ec::pairing::Pairing;
+#[cfg(any(test, feature = "test-srs"))]
+use ark_ec::{scalar_mul::BatchMulPreprocessing, CurveGroup};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
-use ark_std::{rand::Rng, One, UniformRand};
+use ark_std::One;
+#[cfg(any(test, feature = "test-srs"))]
+use ark_std::{rand::Rng, UniformRand};
+#[cfg(any(test, feature = "test-srs"))]
 use ndarray::{ArrayD, IxDyn};
 use num_bigint::BigUint;
 use num_traits::ToPrimitive;
-#[cfg(feature = "parallel")]
+#[cfg(all(feature = "parallel", any(test, feature = "test-srs")))]
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 
 /// Universal parameters for KZH-k.
@@ -285,6 +290,7 @@ impl<E: Pairing> StructuredReferenceString<E> for KZHKUniversalParams<E> {
     /// When `zk` is set, additionally records
     /// `hiding_sparsity = ceil(k * N^{1/k})` as prescribed by
     /// Lemmas 4 and 5 of Appendix D for the sparse masking polynomial.
+    #[cfg(any(test, feature = "test-srs"))]
     fn gen_srs_for_testing<R: Rng>(
         rng: &mut R,
         k: usize,

@@ -54,17 +54,20 @@ use crate::{
 use ark_ec::{pairing::Pairing, AffineRepr, CurveGroup, VariableBaseMSM};
 use ark_ff::One;
 use ark_poly::{DenseMultilinearExtension, MultilinearExtension, SparseMultilinearExtension};
+#[cfg(any(test, feature = "test-srs"))]
 use ark_serialize::CanonicalDeserialize;
-use ark_std::{cfg_into_iter, cfg_iter, cfg_iter_mut, rand::Rng, test_rng, Zero};
+#[cfg(any(test, feature = "test-srs"))]
+use ark_std::rand::Rng;
+use ark_std::{cfg_into_iter, cfg_iter, cfg_iter_mut, test_rng, Zero};
 #[cfg(feature = "parallel")]
 use rayon::iter::IntoParallelRefMutIterator;
 use std::collections::BTreeMap;
+use std::{borrow::Borrow, marker::PhantomData};
+#[cfg(any(test, feature = "test-srs"))]
 use std::{
-    borrow::Borrow,
     env::current_dir,
     fs::{create_dir_all, File},
     io::{BufReader, BufWriter, Write},
-    marker::PhantomData,
 };
 pub mod msm;
 pub mod srs;
@@ -77,6 +80,7 @@ use crate::arithmetic::{
     },
     virtual_polynomial::build_eq_x_r,
 };
+#[cfg(any(test, feature = "test-srs"))]
 use ark_serialize::CanonicalSerialize;
 use ark_std::UniformRand;
 #[cfg(feature = "parallel")]
@@ -136,6 +140,7 @@ where
     /// cached on disk under
     /// `../artifacts/srs/srs_{k}_{supported_size}_{zk}.bin` and reused on
     /// subsequent invocations of the same size.
+    #[cfg(any(test, feature = "test-srs"))]
     fn gen_srs_for_testing<R: Rng>(
         conf: Self::Config,
         _rng: &mut R,

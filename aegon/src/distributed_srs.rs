@@ -53,7 +53,9 @@ use std::time::{Duration, Instant};
 
 use ark_ec::{pairing::Pairing, scalar_mul::BatchMulPreprocessing, AffineRepr, CurveGroup};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
-use ark_std::{rand::Rng, One, UniformRand};
+use ark_std::One;
+#[cfg(any(test, feature = "test-srs"))]
+use ark_std::{rand::Rng, UniformRand};
 use futures::Stream;
 use ndarray::{ArrayD, IxDyn};
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
@@ -118,6 +120,7 @@ impl<E: Pairing> Trapdoors<E> {
     /// `KZHKUniversalParams::gen_srs_for_testing` so that, given a
     /// matched seed, the resulting SRS is byte-identical to what
     /// in-process gen would produce.
+    #[cfg(any(test, feature = "test-srs"))]
     pub fn sample<R: Rng>(rng: &mut R, k: usize, num_vars: usize) -> Self {
         let d = num_vars / k;
         let remainder_d = num_vars % k;

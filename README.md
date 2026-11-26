@@ -19,6 +19,13 @@ primitives. It started as a fork of [facebook/akd](https://github.com/facebook/a
 but none of AKD's directory, Merkle-tree backend, or API remains — only its
 ECVRF implementation (see `NOTICE`).
 
+Test SRS generation is disabled in normal builds. Use
+`cargo build -p aegon --features test-srs` for insecure test/benchmark setup;
+never enable this feature for production. Without it, generating setup/default
+paths return an error instead of generating or loading a cached test SRS.
+Cargo tests enable it through dev-dependencies. Production callers must supply
+trusted parameters; loading a test-generated file does not make it a ceremony SRS.
+
 ---
 
 ## What it does

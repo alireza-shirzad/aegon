@@ -75,11 +75,18 @@ pub trait PolynomialCommitmentScheme<E: Pairing> {
         Self::Config::default()
     }
 
+    /// Test-only generation. Disabled implementations fail closed without
+    /// touching the RNG or loading a cached test SRS.
     fn gen_srs_for_testing<R: Rng>(
         conf: Self::Config,
         rng: &mut R,
         supported_size: usize,
-    ) -> Result<Self::SRS, PCSError>;
+    ) -> Result<Self::SRS, PCSError> {
+        let _ = (conf, rng, supported_size);
+        Err(PCSError::InvalidParameters(
+            "test SRS generation requires the test-srs feature".into(),
+        ))
+    }
 
     fn trim(
         srs: impl Borrow<Self::SRS>,
@@ -392,7 +399,12 @@ pub trait StructuredReferenceString<E: Pairing>: Sized + PCSGlobalParam {
         k: usize,
         zk: bool,
         supported_size: usize,
-    ) -> Result<Self, PCSError>;
+    ) -> Result<Self, PCSError> {
+        let _ = (rng, k, zk, supported_size);
+        Err(PCSError::InvalidParameters(
+            "test SRS generation requires the test-srs feature".into(),
+        ))
+    }
 }
 
 pub trait PCSGlobalParam {
