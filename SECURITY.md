@@ -17,9 +17,12 @@ Concretely, before anyone relies on it:
   derivations, and the IVC step circuit have had no external review.
 * **Nothing here is constant-time.** No side-channel hardening has been
   attempted anywhere in the codebase.
-* **The VRF key is a fixed constant unless you override it.** `hash.rs`
-  falls back to the hard-coded `BENCH_VRF_SEED` when no seed is supplied
-  through the environment.
+* **VRF keys must be provisioned consistently.** The coordinator and shards
+  refuse missing/malformed key configuration and the published benchmark seed.
+  Configure the same key using `AEGON_VRF_SEED` (64 hex characters) or
+  `AEGON_VRF_KEY_PATH` (an existing file of exactly 32 bytes). Startup never
+  creates a replacement key; clients need the matching verification key.
+  Tests and benchmarks may explicitly use `VrfProver::from_seed`.
 * **Transport security is optional and off by default.** The shard and
   coordinator servers do support TLS (`ShardServerTlsConfig`,
   `CoordinatorServerTlsConfig`, and the matching client configs), but it is

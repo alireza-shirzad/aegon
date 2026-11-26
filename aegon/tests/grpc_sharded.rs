@@ -304,7 +304,9 @@ fn build_local_aegon_vrf(log_capacity: usize, seed: u64) -> AegonVrf {
         _e: PhantomData,
     };
     let mut rng = ChaCha20Rng::seed_from_u64(seed);
-    AegonVrf::setup(&mut rng, &cfg).expect("AegonVrf::setup")
+    let mut aegon = AegonVrf::setup(&mut rng, &cfg).expect("AegonVrf::setup");
+    aegon.set_vrf_prover(VrfProver::from_seed(&BENCH_VRF_SEED));
+    aegon
 }
 
 async fn spawn_shard_vrf(
@@ -354,13 +356,7 @@ async fn grpc_sharded_publish_lookup_verify_roundtrip_ecvrf() {
 
     let coordinator: Arc<tokio::sync::Mutex<ShardedVrf>> = tokio::task::spawn_blocking(move || {
         let mut s = ShardedVrf::setup(&cfg).expect("ShardedVrf::setup via gRPC");
-        // Attach the prover before any publish/lookup happens. The
-        // bench seed is deterministic, matching the shard processes'
-        // global `OnceLock` key in EcVrfHash::h_bits — so probe_at
-        // (called inside ShardedAegon during the publish trail walk)
-        // sees the same VRF output as the coordinator-side prover
-        // would compute. They MUST agree because the routing table
-        // is keyed by the bits.
+        // Match the explicit benchmark key attached to both shards.
         s.set_vrf_prover(VrfProver::from_seed(&BENCH_VRF_SEED));
         s
     })

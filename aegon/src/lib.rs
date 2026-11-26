@@ -62,8 +62,8 @@ pub use consistency::verify_consistency;
 pub use db::DbSource;
 pub use error::AegonError;
 pub use hash::{
-    EcVrfHash, HashSuite, Sha256Hash, VrfProver, VrfVerifier, VrfVerifyError, BENCH_VRF_SEED,
-    VRF_PROOF_BYTES, VRF_PUBLIC_KEY_BYTES,
+    EcVrfHash, HashSuite, Sha256Hash, VrfKeyError, VrfProver, VrfVerifier, VrfVerifyError,
+    BENCH_VRF_SEED, VRF_PROOF_BYTES, VRF_PUBLIC_KEY_BYTES,
 };
 pub use presets::optimal_kzh_k;
 pub use server::Aegon;

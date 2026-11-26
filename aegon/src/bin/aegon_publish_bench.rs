@@ -48,7 +48,7 @@ use std::time::Instant;
 
 use aegon::{
     optimal_kzh_k, AegonError, DbSource, EcVrfHash, ShardTransport, ShardedAegon,
-    ShardedAegonConfig, SrsSource, VrfProver,
+    ShardedAegonConfig, SrsSource, VrfProver, BENCH_VRF_SEED,
 };
 use aegon_crypto::pcs::kzhk::KZHK;
 use ark_bn254::Bn254;
@@ -224,6 +224,14 @@ fn main() -> ExitCode {
     #[cfg(feature = "tracing_instrument")]
     aegon::tracing_init::init_tree_subscriber();
     let args = Args::parse();
+    let vrf_prover = match VrfProver::from_env() {
+        Ok(prover) => prover,
+        Err(aegon::VrfKeyError::MissingConfiguration) => VrfProver::from_seed(&BENCH_VRF_SEED),
+        Err(error) => {
+            eprintln!("error: VRF key configuration invalid: {error}");
+            return ExitCode::from(2);
+        }
+    };
 
     if args.batch_sizes.is_empty() {
         eprintln!("error: --batch-sizes must list at least one value");
@@ -278,14 +286,13 @@ fn main() -> ExitCode {
     );
 
     // ---- build the ShardedAegon ----
-    let mut server = match build_server(&args, k, log_n_shards) {
+    let mut server = match build_server(&args, k, log_n_shards, vrf_prover) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("[publish-bench] setup error: {e}");
             return ExitCode::from(1);
         }
     };
-    server.set_vrf_prover(VrfProver::from_env());
 
     // ---- sweep ----
     // Stages are walked in sorted order. Between stages we run real
@@ -484,9 +491,15 @@ fn main() -> ExitCode {
 /// remote-shards transport otherwise. The setup-seed path is used
 /// for in-process gen so the bench is reproducible without needing
 /// a pre-generated SRS file.
-fn build_server(args: &Args, k: usize, log_n_shards: usize) -> Result<Sharded, AegonError> {
+fn build_server(
+    args: &Args,
+    k: usize,
+    log_n_shards: usize,
+    vrf_prover: VrfProver,
+) -> Result<Sharded, AegonError> {
     let mut builder = ShardedAegonConfig::<Bn254, Pcs>::builder()
         .audit_fs(aegon::ivc::adapter::hooks_for(args.audit_fs))
+        .vrf_prover(vrf_prover)
         // --shard-log-capacity is the per-shard size; convert it to the
         // dictionary capacity it implies.
         .log_capacity(aegon::true_log_capacity_from_shard(args.shard_log_capacity) + log_n_shards)
