@@ -6,13 +6,13 @@
 //! End-to-end integration test for the production-shape ECVRF wiring.
 //!
 //! Exercises:
-//!   1. `VrfProver::from_seed` / `VrfProver::from_env`  — key setup.
+//!   1. `VrfProver::from_seed` — explicit benchmark key setup.
 //!   2. `VrfProver::prove_h_bits(ctr, label, num_vars)` — server side.
 //!   3. Public-key transport: pk bytes -> `VrfVerifier::from_public_key_bytes`.
 //!   4. `VrfVerifier::verify_h_bits(ctr, label, proof, num_vars)` — client side.
 //!   5. Adversarial cases: tampered proof, wrong label, wrong counter.
-//!   6. `EcVrfHash::h_bits` (static) agrees with `VrfProver::prove_h_bits`
-//!      bit-for-bit so existing call sites get the same answers.
+//!   6. `VrfProver::evaluate_h_bits` agrees with `VrfProver::prove_h_bits`
+//!      bit-for-bit so bits-only call sites get the same answers.
 //!   7. Full open-addressing-trail simulation: walk N probes, attach the
 //!      N proofs, client verifies each and recovers the bits the server
 //!      used at publish time — the exact pattern the gRPC wire format
@@ -94,19 +94,15 @@ fn main() {
         matches!(res, Err(VrfVerifyError::InvalidProof(_))),
     );
 
-    // ---- 6. Static HashSuite agrees with keyed VrfProver. ----
+    // ---- 6. Bits-only evaluation agrees with keyed VRF proofs. ----
     //
-    // This is the load-bearing invariant: every existing static call site
-    // that today uses `EcVrfHash::h_bits` can be swapped for a keyed
-    // `VrfProver::prove_h_bits(...)` on the server and a
-    // `VrfVerifier::verify_h_bits(...)` on the client *without changing
-    // the bits anyone sees*. The two paths must produce the same bytes
-    // for the same (ctr, label, num_vars) when given the same key.
+    // Both paths use the same explicit key and must produce the same
+    // bits for the same (ctr, label, num_vars).
     for ctr in 0u64..5 {
-        let static_bits = <EcVrfHash as HashSuite<Fr>>::h_bits(ctr, label, num_vars);
+        let static_bits = prover.evaluate_h_bits(ctr, label, num_vars);
         let (keyed_bits, _) = prover.prove_h_bits(ctr, label, num_vars);
         must(
-            &format!("EcVrfHash agrees with VrfProver at ctr={ctr}"),
+            &format!("VrfProver evaluation agrees with proof at ctr={ctr}"),
             static_bits == keyed_bits,
         );
     }

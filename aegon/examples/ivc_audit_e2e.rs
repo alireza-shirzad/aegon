@@ -71,12 +71,12 @@ fn main() {
         .db(DbSource::None)
         // Both the server and every verifier must agree on this.
         .audit_fs(poseidon_audit_fs())
+        .vrf_prover(VrfProver::from_seed(&BENCH_VRF_SEED))
         .build()
         .expect("config builds");
 
     let mut server: ShardedAegon<Bn254, Pcs, EcVrfHash> =
         ShardedAegon::<Bn254, Pcs, EcVrfHash>::setup(&cfg).expect("setup");
-    server.set_vrf_prover(VrfProver::from_seed(&BENCH_VRF_SEED));
 
     let ctx = server.sharded_verifier_context();
     let h = ctx.inner.verifier_param.get_h();

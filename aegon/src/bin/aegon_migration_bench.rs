@@ -33,7 +33,7 @@ use std::time::Instant;
 
 use aegon::{
     optimal_kzh_k, AegonError, DbSource, EcVrfHash, ShardTransport, ShardedAegon,
-    ShardedAegonConfig, SrsSource, VrfProver,
+    ShardedAegonConfig, SrsSource, VrfProver, BENCH_VRF_SEED,
 };
 use aegon_crypto::pcs::kzhk::KZHK;
 use ark_bn254::Bn254;
@@ -188,9 +188,15 @@ struct MilestoneRecord {
     throughput_users_per_sec: f64,
 }
 
-fn build_server(args: &Args, k: usize, log_n_shards: usize) -> Result<Sharded, AegonError> {
+fn build_server(
+    args: &Args,
+    k: usize,
+    log_n_shards: usize,
+    vrf_prover: VrfProver,
+) -> Result<Sharded, AegonError> {
     let mut builder = ShardedAegonConfig::<Bn254, Pcs>::builder()
         .audit_fs(aegon::ivc::adapter::hooks_for(args.audit_fs))
+        .vrf_prover(vrf_prover)
         // --shard-log-capacity is the per-shard size; convert it to the
         // dictionary capacity it implies.
         .log_capacity(aegon::true_log_capacity_from_shard(args.shard_log_capacity) + log_n_shards)
@@ -364,6 +370,14 @@ fn main() -> ExitCode {
     #[cfg(feature = "tracing_instrument")]
     aegon::tracing_init::init_tree_subscriber();
     let args = Args::parse();
+    let vrf_prover = match VrfProver::from_env() {
+        Ok(prover) => prover,
+        Err(aegon::VrfKeyError::MissingConfiguration) => VrfProver::from_seed(&BENCH_VRF_SEED),
+        Err(error) => {
+            eprintln!("error: VRF key configuration invalid: {error}");
+            return ExitCode::from(2);
+        }
+    };
 
     // ---- validation ------------------------------------------------
     if args.chunk_sizes.is_empty() {
@@ -493,14 +507,13 @@ fn main() -> ExitCode {
 
     // ---- setup -----------------------------------------------------
     let setup_t0 = Instant::now();
-    let mut server = match build_server(&args, k, log_n_shards) {
+    let mut server = match build_server(&args, k, log_n_shards, vrf_prover) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("[migration-bench] setup error: {e}");
             return ExitCode::from(1);
         }
     };
-    server.set_vrf_prover(VrfProver::from_env());
     let setup_secs = setup_t0.elapsed().as_secs_f64();
     eprintln!("[migration-bench] setup done in {setup_secs:.1}s");
 

@@ -265,104 +265,113 @@ fn output_to_bits(out_bytes: &[u8], num_vars: usize) -> Vec<bool> {
     bits
 }
 
-/// Configuration controlling where `EcVrfHash`'s server-side VRF
-/// private key comes from. The lookup is performed once per process
-/// (on first `vrf_secret_key()` call) and cached in a `OnceLock`.
+/// Provisioned key sources for the per-process `EcVrfHash` key.
 ///
-/// Priority order:
-///   1. `AEGON_VRF_SEED` env var — 64 hex chars of a 32-byte Ed25519 seed.
-///   2. `AEGON_VRF_KEY_PATH` env var — path to a 32-byte sealed seed
-///      file; if the path does not exist, a fresh seed is generated
-///      via `OsRng` and persisted there with mode `0600`.
-///   3. The hard-coded benchmark seed `BENCH_VRF_SEED` — used only by
-///      tests and microbenches, never by a production binary.
-///
-/// Production deployments should set either `AEGON_VRF_SEED` (when an
-/// out-of-band key-management system, HSM, or KMS feeds the seed at
-/// process start) or `AEGON_VRF_KEY_PATH` (for self-managed sealed
-/// storage on the coordinator host). The pubkey is derived
-/// deterministically from the secret and exposed via
-/// `EcVrfHash::public_key()` so it can be packaged with the SRS or
-/// served via a `/vrf-pubkey` endpoint to clients.
+/// `AEGON_VRF_SEED` takes precedence and must contain 64 hexadecimal
+/// characters. Otherwise `AEGON_VRF_KEY_PATH` must name an existing file
+/// containing exactly 32 seed bytes. Missing or malformed configuration and
+/// the published benchmark seed are rejected; loading never creates a key.
+/// The coordinator and all shards must be provisioned with the same key,
+/// and clients must receive its matching verification key.
 pub mod vrf_key_source {
     /// Env var name for the 32-byte hex-encoded seed.
     pub const SEED_HEX_ENV: &str = "AEGON_VRF_SEED";
-    /// Env var name for the on-disk sealed-seed path.
+    /// Env var name for the on-disk provisioned-seed path.
     pub const KEY_PATH_ENV: &str = "AEGON_VRF_KEY_PATH";
 }
 
-/// Hard-coded VRF seed used by benches and unit tests when neither
-/// env var is set. Never use in production — it's published in this
-/// source file.
+/// Failure to load a provisioned VRF key. Error messages never contain seed bytes.
+#[derive(Debug, thiserror::Error)]
+pub enum VrfKeyError {
+    /// Neither supported key source was configured.
+    #[error("configure AEGON_VRF_SEED or AEGON_VRF_KEY_PATH with a provisioned VRF key")]
+    MissingConfiguration,
+    /// The configured seed is not a 32-byte hexadecimal value.
+    #[error("AEGON_VRF_SEED must contain exactly 64 hexadecimal characters")]
+    InvalidSeed,
+    /// The configured key-file path is empty.
+    #[error("AEGON_VRF_KEY_PATH must name an existing provisioned VRF key file")]
+    InvalidKeyPath,
+    /// The configured key file could not be opened or read.
+    #[error("cannot read provisioned VRF key file: {0}")]
+    KeyFile(#[source] std::io::Error),
+    /// The file does not contain exactly 32 seed bytes.
+    #[error("provisioned VRF key file must contain exactly 32 bytes")]
+    InvalidKeyFile,
+    /// The configured key is the publicly known benchmark key.
+    #[error("the published benchmark VRF seed is not a provisioned service key")]
+    BenchmarkSeed,
+}
+
+/// Published VRF seed for explicit use by tests and benchmarks through
+/// `VrfProver::from_seed`. Provisioned key loading rejects it.
 pub const BENCH_VRF_SEED: [u8; 32] = *b"aegon-bench-ecvrf-edwards25519!\0";
 
-fn load_seed_from_env() -> Option<[u8; 32]> {
+fn load_seed_from_env() -> Result<[u8; 32], VrfKeyError> {
     use std::env;
-    if let Ok(hex) = env::var(vrf_key_source::SEED_HEX_ENV) {
-        let mut buf = [0u8; 32];
-        if hex::decode_to_slice(hex.trim(), &mut buf).is_ok() {
-            return Some(buf);
-        } else {
-            eprintln!(
-                "warning: {} set but not a valid 64-char hex string; \
-                 falling back",
-                vrf_key_source::SEED_HEX_ENV
-            );
-        }
-    }
-    if let Ok(path) = env::var(vrf_key_source::KEY_PATH_ENV) {
-        return Some(load_or_create_seed_file(&path));
-    }
-    None
+    let seed_hex = match env::var(vrf_key_source::SEED_HEX_ENV) {
+        Ok(value) => Some(value),
+        Err(env::VarError::NotPresent) => None,
+        Err(env::VarError::NotUnicode(_)) => return Err(VrfKeyError::InvalidSeed),
+    };
+    let key_path = env::var_os(vrf_key_source::KEY_PATH_ENV).map(std::path::PathBuf::from);
+    load_seed(seed_hex.as_deref(), key_path.as_deref())
 }
 
-fn load_or_create_seed_file(path: &str) -> [u8; 32] {
-    use std::fs;
+fn load_seed(
+    seed_hex: Option<&str>,
+    key_path: Option<&std::path::Path>,
+) -> Result<[u8; 32], VrfKeyError> {
     use std::io::Read;
-    use std::os::unix::fs::OpenOptionsExt;
-    use std::path::Path;
-
-    let p = Path::new(path);
-    if p.exists() {
-        let mut f = fs::File::open(p).expect("VRF key path readable");
-        let mut buf = [0u8; 32];
-        f.read_exact(&mut buf)
-            .expect("VRF key file must be exactly 32 bytes");
-        return buf;
+    let mut seed = [0u8; 32];
+    if let Some(value) = seed_hex {
+        // A malformed higher-priority source must not fall through to a file.
+        hex::decode_to_slice(value.trim(), &mut seed).map_err(|_| VrfKeyError::InvalidSeed)?;
+    } else {
+        let path = key_path.ok_or(VrfKeyError::MissingConfiguration)?;
+        if path.as_os_str().is_empty() {
+            return Err(VrfKeyError::InvalidKeyPath);
+        }
+        if !std::fs::metadata(path)
+            .map_err(VrfKeyError::KeyFile)?
+            .is_file()
+        {
+            return Err(VrfKeyError::InvalidKeyFile);
+        }
+        // One extra byte detects oversized files without reading an unbounded
+        // amount of data. Open read-only: missing files are never generated.
+        let mut file = std::fs::File::open(path)
+            .map_err(VrfKeyError::KeyFile)?
+            .take(33);
+        let mut bytes = Vec::with_capacity(33);
+        file.read_to_end(&mut bytes).map_err(VrfKeyError::KeyFile)?;
+        if bytes.len() != seed.len() {
+            return Err(VrfKeyError::InvalidKeyFile);
+        }
+        seed.copy_from_slice(&bytes);
     }
-    // Fresh seed: 32 bytes from the OS entropy source, persisted at
-    // mode 0600. Read from /dev/urandom directly to avoid pulling in
-    // a new feature-gated dependency on `rand`.
-    let mut buf = [0u8; 32];
-    let mut urandom =
-        fs::File::open("/dev/urandom").expect("/dev/urandom available for VRF key generation");
-    urandom
-        .read_exact(&mut buf)
-        .expect("read 32 bytes from /dev/urandom");
-    if let Some(parent) = p.parent() {
-        let _ = fs::create_dir_all(parent);
+    if seed == BENCH_VRF_SEED {
+        return Err(VrfKeyError::BenchmarkSeed);
     }
-    let mut opts = fs::OpenOptions::new();
-    opts.write(true).create_new(true).mode(0o600);
-    let mut f = opts
-        .open(p)
-        .expect("could not create new VRF key file at AEGON_VRF_KEY_PATH");
-    use std::io::Write;
-    f.write_all(&buf).expect("write VRF seed");
-    buf
+    Ok(seed)
 }
 
-/// Lazily-initialized per-process VRF private key for `EcVrfHash`.
-/// Initialized on first call from the configured key source.
+/// Lazily initialized per-process key for the infallible legacy hash API.
+/// Invalid provisioning fails closed rather than selecting a fallback key.
 fn vrf_secret_key() -> &'static aegon_crypto::ecvrf::VRFPrivateKey {
     use aegon_crypto::ecvrf::VRFPrivateKey;
     use std::sync::OnceLock;
     static KEY: OnceLock<VRFPrivateKey> = OnceLock::new();
     KEY.get_or_init(|| {
-        let seed = load_seed_from_env().unwrap_or(BENCH_VRF_SEED);
-        VRFPrivateKey::try_from(seed.as_slice()).expect("32-byte seed is a valid Ed25519 secret")
+        VrfProver::from_env()
+            .expect("EcVrfHash requires a valid, provisioned VRF key")
+            .sk
     })
 }
+
+#[cfg(test)]
+#[path = "hash_key_tests.rs"]
+mod key_source_tests;
 
 // ---------------------------------------------------------------------------
 // Keyed prover / verifier API. These are the types call-sites in
@@ -376,9 +385,8 @@ fn vrf_secret_key() -> &'static aegon_crypto::ecvrf::VRFPrivateKey {
 ///
 /// A `VrfProver` is created once per coordinator/shard process,
 /// typically by:
-///   - `VrfProver::from_env()`     — read from env / file per
-///     `vrf_key_source` priority order, generate-and-persist a fresh
-///     key when neither is set;
+///   - `VrfProver::from_env()` — fallible loading of a provisioned
+///     key from the configured environment/file source, never generation;
 ///   - `VrfProver::from_seed(&[u8; 32])` — explicit injection for
 ///     deterministic testing.
 #[derive(Clone)]
@@ -396,12 +404,12 @@ impl VrfProver {
         Self { sk, pk }
     }
 
-    /// Build a prover using the same priority order as
-    /// `EcVrfHash::public_key()` — env var, then key-file, then
-    /// `BENCH_VRF_SEED`.
-    pub fn from_env() -> Self {
-        let seed = load_seed_from_env().unwrap_or(BENCH_VRF_SEED);
-        Self::from_seed(&seed)
+    /// Load a provisioned key using the `vrf_key_source` priority order.
+    /// Missing/malformed sources and the published benchmark seed are errors.
+    /// This never generates a key or writes a file.
+    pub fn from_env() -> Result<Self, VrfKeyError> {
+        let seed = load_seed_from_env()?;
+        Ok(Self::from_seed(&seed))
     }
 
     /// Public key paired with this prover. Ship to clients via the
@@ -640,7 +648,9 @@ impl VrfVerifier {
 /// `HashSuite` for the static call sites (benchmarks, the existing
 /// in-process flow). Computes the same bits as a `VrfProver` would,
 /// but drops the proof on the floor because the `HashSuite` trait is
-/// stateless. To surface proofs to the wire, replace call sites with
+/// stateless. This legacy API panics if provisioned key loading fails;
+/// it never falls back to a benchmark key. To surface proofs to the wire,
+/// replace call sites with
 /// `VrfProver::prove_h_bits` and the matching
 /// `VrfVerifier::verify_h_bits`.
 ///
@@ -660,7 +670,7 @@ impl EcVrfHash {
 
     /// Convenience: produce both the bits and the VRF proof for
     /// `(ctr, label)`, using the per-process key. Equivalent to
-    /// `VrfProver::from_env().prove_h_bits(...)` but reuses the
+    /// `VrfProver::from_env()?.prove_h_bits(...)` but reuses the
     /// process-wide `OnceLock` key.
     pub fn prove_h_bits(
         ctr: u64,
@@ -827,11 +837,19 @@ mod ecvrf_tests {
 
     #[test]
     fn ecvrf_hash_matches_prover() {
+        const TEST_NAME: &str = "hash::ecvrf_tests::ecvrf_hash_matches_prover";
+        let seed = [7u8; 32];
+        if !super::key_source_tests::in_test_subprocess(TEST_NAME) {
+            let mut command = super::key_source_tests::isolated_test_command(TEST_NAME);
+            command.env(vrf_key_source::SEED_HEX_ENV, hex::encode(seed));
+            super::key_source_tests::assert_test_success(&mut command);
+            return;
+        }
         // EcVrfHash::h_bits and VrfProver::prove_h_bits with the same
         // seed must produce identical bits — this is the invariant
         // that lets us refactor static call sites to surface proofs
         // without changing the bits they see.
-        let prover = VrfProver::from_seed(&BENCH_VRF_SEED);
+        let prover = VrfProver::from_seed(&seed);
         for ctr in 0u64..3 {
             let bits_static = <EcVrfHash as HashSuite<Fr>>::h_bits(ctr, b"frank", 27);
             let (bits_keyed, _proof) = prover.prove_h_bits(ctr, b"frank", 27);

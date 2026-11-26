@@ -99,6 +99,7 @@ fn main() {
         .shards(ShardTransport::InProcess)
         .db(DbSource::None)
         .audit_fs(poseidon_audit_fs())
+        .vrf_prover(VrfProver::from_seed(&BENCH_VRF_SEED))
         // The one line that changes the protocol: derive chain
         // scalars per group instead of directory-wide.
         .chain_groups(chain_groups)
@@ -107,7 +108,6 @@ fn main() {
 
     let mut server: ShardedAegon<Bn254, Pcs, EcVrfHash> =
         ShardedAegon::<Bn254, Pcs, EcVrfHash>::setup(&cfg).expect("setup");
-    server.set_vrf_prover(VrfProver::from_seed(&BENCH_VRF_SEED));
 
     let ctx = server.sharded_verifier_context();
     assert_eq!(

@@ -38,6 +38,7 @@ fn build_cfg(log_capacity: usize, log_n_shards: usize, zk: bool) -> ShardedAegon
         .kzh_k(2)
         .shards(ShardTransport::InProcess)
         .db(DbSource::None)
+        .vrf_prover(VrfProver::from_seed(&BENCH_VRF_SEED))
         .build()
         .expect("config builds")
 }
@@ -47,7 +48,6 @@ fn run_zk_path() {
     let cfg = build_cfg(12, 1, true);
     let mut server: ShardedAegon<Bn254, Pcs, EcVrfHash> =
         ShardedAegon::<Bn254, Pcs, EcVrfHash>::setup(&cfg).expect("setup zk");
-    server.set_vrf_prover(VrfProver::from_seed(&BENCH_VRF_SEED));
 
     let ctx = server.sharded_verifier_context();
     let prev = server.epoch_commitment(0).expect("epoch-0 commit retained");
@@ -122,7 +122,6 @@ fn run_non_zk_path() {
     let cfg = build_cfg(12, 1, false);
     let mut server: ShardedAegon<Bn254, Pcs, EcVrfHash> =
         ShardedAegon::<Bn254, Pcs, EcVrfHash>::setup(&cfg).expect("setup non-zk");
-    server.set_vrf_prover(VrfProver::from_seed(&BENCH_VRF_SEED));
 
     let ctx = server.sharded_verifier_context();
     let prev = server.epoch_commitment(0).expect("epoch 0");
