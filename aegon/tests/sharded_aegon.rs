@@ -549,6 +549,134 @@ fn private_mode_publish_lookup_round_trip() {
     let _ = commit_v1;
 }
 
+/// Shared body for the label-history probe-trail tests. Fills a small
+/// directory so that some labels land past their first `H_slot` probe,
+/// then checks that label history covers the skipped positions:
+/// honest bundles verify, and a bundle whose trail is tampered with or
+/// stripped is rejected.
+#[cfg(feature = "rocksdb")]
+macro_rules! label_history_probe_trail_case {
+    ($hash:ty, $tag:expr, $vrf:expr) => {{
+        use aegon::{verify_lookup_label_history, DbSource, ShardedAegon as ShardedG};
+
+        let nonce: u64 = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0xDEADBEEF);
+        let db_path = std::env::temp_dir().join(format!(
+            "aegon-rocks-trail-{}-{}-{nonce}",
+            $tag,
+            std::process::id()
+        ));
+        if db_path.exists() {
+            std::fs::remove_dir_all(&db_path).ok();
+        }
+        // 2 shards of 32 slots each; 24 labels gives enough intra-shard
+        // collisions that several labels have a non-empty probe trail.
+        let mut builder = ShardedAegonConfig::<Bn254, Pcs>::builder()
+            .log_capacity(6)
+            .log_over_provisioning_factor(0)
+            .log_n_shards(1)
+            .private(false)
+            .kzh_k(2)
+            .db(DbSource::Rocks(db_path.clone()));
+        let vrf: Option<aegon::VrfProver> = $vrf;
+        if let Some(prover) = vrf {
+            builder = builder.vrf_prover(prover);
+        }
+        let cfg = builder.build().expect("config builds (probe trail)");
+        let mut server: ShardedG<Bn254, Pcs, $hash> =
+            ShardedG::<Bn254, Pcs, $hash>::setup(&cfg).expect("setup");
+
+        let labels: Vec<Vec<u8>> = (0..24u32)
+            .map(|i| format!("user-{i}").into_bytes())
+            .collect();
+        // Three batches, so that placements and later publishes
+        // interleave: labels placed in batch 1 must still verify after
+        // batches 2 and 3 write other slots.
+        for chunk in labels.chunks(8) {
+            let updates: Vec<(Vec<u8>, Vec<u8>)> = chunk
+                .iter()
+                .map(|l| (l.clone(), [l.as_slice(), b"-v1"].concat()))
+                .collect();
+            server.publish_two_layer(&updates).expect("publish");
+        }
+        // A value-only publish must not disturb any label-side check.
+        server
+            .publish_two_layer(&[(labels[0].clone(), b"user-0-v2".to_vec())])
+            .expect("value update");
+
+        let ctx = server.sharded_verifier_context();
+        let current_root = server.current_commitment().merkle_root;
+        let mut with_trail = None;
+        for label in &labels {
+            let hist = server.lookup_label_history(label).expect("label history");
+            let placement = hist.placement.as_ref().expect("placement present");
+            let fresh = hist.freshness.as_ref().expect("freshness present");
+            assert_eq!(
+                placement.probe_trail.len(),
+                fresh.probe_trail.len(),
+                "stored and live probe trails are parallel"
+            );
+            let verified = verify_lookup_label_history::<Bn254, Pcs, $hash>(&ctx, &hist)
+                .expect("honest label history verifies");
+            assert_eq!(verified.live_root, Some(current_root));
+            if !placement.probe_trail.is_empty() && with_trail.is_none() {
+                with_trail = Some(hist);
+            }
+        }
+        let hist = with_trail.expect("at least one label landed past its first probe");
+
+        // (a) A changed live evaluation at an earlier probe position:
+        // what the client would see if that position had been written
+        // since placement.
+        {
+            let mut tampered = hist.clone();
+            tampered.freshness.as_mut().unwrap().probe_trail[0].rand_index_current_eval +=
+                <Bn254 as Pairing>::ScalarField::from(1u64);
+            let err = verify_lookup_label_history::<Bn254, Pcs, $hash>(&ctx, &tampered)
+                .expect_err("tampered probe-trail opening must be rejected");
+            let msg = format!("{err}");
+            assert!(
+                msg.contains("probe trail"),
+                "expected probe-trail rejection, got: {msg}"
+            );
+        }
+        // (b) A server that withholds the trail entirely: the
+        // placement slot is then not the first `H_slot` position.
+        {
+            let mut stripped = hist.clone();
+            stripped.placement.as_mut().unwrap().probe_trail.clear();
+            stripped.freshness.as_mut().unwrap().probe_trail.clear();
+            verify_lookup_label_history::<Bn254, Pcs, $hash>(&ctx, &stripped)
+                .expect_err("label history without its probe trail must be rejected");
+        }
+        // (c) Stored and live trails of different lengths.
+        {
+            let mut uneven = hist.clone();
+            uneven.freshness.as_mut().unwrap().probe_trail.clear();
+            verify_lookup_label_history::<Bn254, Pcs, $hash>(&ctx, &uneven)
+                .expect_err("mismatched probe-trail lengths must be rejected");
+        }
+
+        drop(server);
+        let _ = std::fs::remove_dir_all(&db_path);
+    }};
+}
+
+#[test]
+#[cfg(feature = "rocksdb")]
+fn label_history_covers_probe_trail() {
+    label_history_probe_trail_case!(Sha256Hash, "sha", None);
+}
+
+#[test]
+#[cfg(feature = "rocksdb")]
+fn label_history_covers_probe_trail_ecvrf() {
+    use aegon::{EcVrfHash, VrfProver};
+    label_history_probe_trail_case!(EcVrfHash, "ecvrf", Some(VrfProver::from_seed(&[7u8; 32])));
+}
+
 #[test]
 #[cfg(feature = "rocksdb")]
 fn private_mode_lookup_history_round_trip() {

@@ -464,10 +464,20 @@ where
             .map_err(|e| AegonError::Database(format!("decode label placement: {e}")))?;
         let (freshness_eval, freshness_proof) =
             self.open_rand_index_at_slot_current(&placement.slot_bits)?;
+        let mut trail_freshness = Vec::with_capacity(placement.probe_trail.len());
+        for probe in &placement.probe_trail {
+            let (rand_index_current_eval, rand_index_current_proof) =
+                self.open_rand_index_at_slot_current(&probe.slot_bits)?;
+            trail_freshness.push(super::sharded::LiveProbeOpening {
+                rand_index_current_eval,
+                rand_index_current_proof,
+            });
+        }
         Ok(Some(super::sharded::FullLabelHistory {
             placement,
             freshness_eval,
             freshness_proof,
+            trail_freshness,
         }))
     }
 
@@ -1490,10 +1500,21 @@ where
         let (freshness_eval, freshness_proof) = aegon
             .open_rand_index_at_slot_current(&placement.slot_bits)
             .map_err(err_to_status)?;
+        let mut trail_freshness = Vec::with_capacity(placement.probe_trail.len());
+        for probe in &placement.probe_trail {
+            let (rand_index_current_eval, rand_index_current_proof) = aegon
+                .open_rand_index_at_slot_current(&probe.slot_bits)
+                .map_err(err_to_status)?;
+            trail_freshness.push(super::sharded::LiveProbeOpening {
+                rand_index_current_eval,
+                rand_index_current_proof,
+            });
+        }
         let full = super::sharded::FullLabelHistory::<E, P> {
             placement,
             freshness_eval,
             freshness_proof,
+            trail_freshness,
         };
         Ok(Response::new(proto::FetchFullLabelHistoryResponse {
             found: true,

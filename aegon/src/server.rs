@@ -2587,8 +2587,11 @@ where
 
         let mut slot_to_label: HashMap<Vec<bool>, &Label> =
             HashMap::with_capacity(cached_placements.len());
+        let mut slot_to_ctr: HashMap<Vec<bool>, u64> =
+            HashMap::with_capacity(cached_placements.len());
         for p in &cached_placements {
             slot_to_label.insert(p.slot_bits.clone(), &p.label);
+            slot_to_ctr.insert(p.slot_bits.clone(), p.slot_ctr);
         }
         let mut label_to_value: HashMap<&[u8], &[u8]> =
             HashMap::with_capacity(cached_updates.len());
@@ -2661,6 +2664,38 @@ where
                     entry.slot_bits
                 ))
             })?;
+            // Probe trail: the positions `H_slot(ctr, label)` for
+            // `ctr < slot_ctr` that the open-addressing walk skipped.
+            // `self.rand_index_poly` is already at the new epoch here,
+            // so these open against `post_shard_commit`, like
+            // `rand_index_post_proof`. Empty for a first-probe
+            // placement, which is the common case at low fill.
+            let slot_ctr = slot_to_ctr.get(&entry.slot_bits).copied().unwrap_or(0);
+            let cached_vrf = self.label_vrf_proofs.get(*label);
+            let slot_vrf_proof_at = |ctr: u64| -> Vec<u8> {
+                if let Some(proof) = cached_vrf.and_then(|c| c.vrf_proofs_slot.get(ctr as usize)) {
+                    return proof.clone();
+                }
+                match self.vrf_prover.as_ref() {
+                    Some(prover) => prover
+                        .prove_h_slot(ctr, label, self.log_capacity)
+                        .1
+                        .to_vec(),
+                    None => Vec::new(),
+                }
+            };
+            let mut probe_trail = Vec::with_capacity(slot_ctr as usize);
+            for ctr in 0..slot_ctr {
+                let probe_bits = self.slot_bits(ctr, label);
+                let (rand_index_eval, rand_index_proof) =
+                    self.open_rand_index_at_slot_current(&probe_bits)?;
+                probe_trail.push(super::sharded::StoredProbeOpening::<E, P> {
+                    slot_bits: probe_bits,
+                    vrf_proof: slot_vrf_proof_at(ctr),
+                    rand_index_eval,
+                    rand_index_proof,
+                });
+            }
             let stored = StoredLabelPlacement::<E, P> {
                 epoch: pending_epoch,
                 shard_id,
@@ -2669,6 +2704,8 @@ where
                 rand_index_proof: entry.rand_index_post_proof.clone(),
                 placement_shard_commit: post_shard_commit.clone(),
                 placement_merkle_path: empty_path.clone(),
+                slot_vrf_proof: slot_vrf_proof_at(slot_ctr),
+                probe_trail,
             };
             let mut bytes = Vec::new();
             stored
