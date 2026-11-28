@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+import paper_style  # noqa: F401  (sets the paper's fonts)
 import numpy as np
 from matplotlib.ticker import LogLocator, ScalarFormatter
 
@@ -271,6 +272,72 @@ def _label_axis_endpoints(ax: plt.Axes, formatter=None) -> None:
         # labels and clutters the panel. The major endpoint labels carry
         # the bounds information the reader needs.
         axis.set_minor_formatter(plt.NullFormatter())
+
+
+def _format_two_digits(v: float, _pos: int = 0) -> str:
+    """Tick label with at most two significant digits.
+
+    Values in [0.1, 100) print as plain decimals ("34", "6.5", "0.25").
+    Anything outside that band prints as a power of ten with a mantissa
+    of at most two digits ("$10^{4}$", "$4.9\\times10^{3}$"), so no
+    tick ever shows more than two digits; the magnitude belongs in the
+    axis unit or the exponent, not in a long tick number.
+    """
+    import math
+    if v == 0 or not np.isfinite(v):
+        return "0"
+    av = abs(v)
+    mag = math.floor(math.log10(av))
+    mant = round(av / 10 ** mag, 1)
+    if mant >= 10:          # 9.96 rounds up to 10.0
+        mant, mag = 1.0, mag + 1
+    sign = "-" if v < 0 else ""
+    if -1 <= mag < 2:
+        val = mant * 10 ** mag
+        txt = f"{val:.{max(0, 1 - mag)}f}"
+        if "." in txt:
+            txt = txt.rstrip("0").rstrip(".")
+        return sign + txt
+    m = f"{mant:.1f}".rstrip("0").rstrip(".")
+    if m == "1":
+        return rf"${sign}10^{{{mag}}}$"
+    return rf"${sign}{m}\times10^{{{mag}}}$"
+
+
+def _two_digit_ticks(ax: plt.Axes, which: str = "xy") -> None:
+    """Apply `_format_two_digits` to the axes of `ax` named in `which`
+    ("x", "y" or "xy"). Pass "y" when the x tick labels were written by
+    hand with set_xticklabels, so they are not overwritten."""
+    axes = [a for n, a in (("x", ax.xaxis), ("y", ax.yaxis)) if n in which]
+    for axis in axes:
+        axis.set_major_formatter(plt.FuncFormatter(_format_two_digits))
+        axis.set_minor_formatter(plt.NullFormatter())
+
+
+def _decade_ticks(axis, max_ticks: int = 5) -> None:
+    """Label a log axis at whole decades only.
+
+    `_label_axis_endpoints` labels the exact ends of the axis, which on
+    an axis spanning many decades come out as wide scientific numbers
+    ("$4.9\\times10^{3}$"). Here the limits are widened to the enclosing
+    decades instead, so every label is a bare power of ten ("0.1", "10",
+    "$10^{3}$"). If that gives more than `max_ticks` labels, every
+    second decade is labelled."""
+    import math
+    if axis.get_scale() != "log":
+        return
+    lo, hi = sorted(axis.get_view_interval())
+    if lo <= 0 or not (np.isfinite(lo) and np.isfinite(hi)):
+        return
+    k_lo, k_hi = math.floor(math.log10(lo)), math.ceil(math.log10(hi))
+    step = 1 if (k_hi - k_lo + 1) <= max_ticks else 2
+    if (k_hi - k_lo) % step:
+        k_hi += 1           # keep both ends on a labelled decade
+    axis.axes.set_ylim(10.0 ** k_lo, 10.0 ** k_hi) if axis.axis_name == "y" \
+        else axis.axes.set_xlim(10.0 ** k_lo, 10.0 ** k_hi)
+    axis.set_ticks([10.0 ** k for k in range(k_lo, k_hi + 1, step)])
+    axis.set_major_formatter(plt.FuncFormatter(_format_two_digits))
+    axis.set_minor_formatter(plt.NullFormatter())
 
 
 def _format_axis_value(v: float, _pos: int = 0) -> str:
@@ -912,6 +979,7 @@ def _plot_server_lookup_panels(
     row2 = [(h, l) for h, l in pairs if l.startswith("large")]
     for ax in fig.axes:
         _label_axis_endpoints(ax)
+        _two_digit_ticks(ax)
     fig.tight_layout(rect=(0, 0.14, 1, 1))
     if row1:
         fig.legend(
@@ -995,7 +1063,7 @@ def plot_audit_vs_fill(
         # leftmost, so it needs less horizontal margin per panel).
         # Empirically 2.34 in / panel puts the visible axes at ~1.71
         # in wide, matching setup.
-        fig, (ax_time, ax_size) = plt.subplots(1, 2, figsize=(4.68, 2.03))
+        fig, (ax_time, ax_size) = plt.subplots(1, 2, figsize=(0.72 * paper_style.COLUMN_WIDTH_IN, 1.5))  # included at 0.72\\linewidth
     else:
         fig, (ax_time, ax_size) = plt.subplots(1, 2, figsize=(5.5, 2.4))
 
@@ -1034,8 +1102,8 @@ def plot_audit_vs_fill(
             ax_time.fill_between(xs, low, high, color=style["color"], alpha=0.18, linewidth=0)
         ax_time.plot(
             xs, central,
-            color=style["color"], marker=style["marker"], linewidth=1.8,
-            markersize=6, label=_short_label(style["label"], subset),
+            color=style["color"], marker=style["marker"], linewidth=1.2,
+            markersize=3.5, label=_short_label(style["label"], subset),
         )
 
     if render_large:
@@ -1055,12 +1123,12 @@ def plot_audit_vs_fill(
                 color=large_style["color"], marker=large_style["marker"],
                 markerfacecolor=large_style["color"] if is_clean_kind else "none",
                 linestyle="-" if is_clean_kind else "--",
-                linewidth=1.8 if is_clean_kind else 1.4,
-                markersize=6, alpha=1.0 if is_clean_kind else 0.85,
+                linewidth=1.2 if is_clean_kind else 1.4,
+                markersize=3.5, alpha=1.0 if is_clean_kind else 0.85,
                 label="_nolegend_" if is_clean_kind else "aegon large",
             )
 
-    ax_time.set_xlabel("preload fill (% of true capacity)", fontsize=7, labelpad=2)
+    ax_time.set_xlabel("fill (%)", fontsize=7, labelpad=2)
     ax_time.set_ylabel(f"audit latency ({time_unit})"
                        if is_clean_kind
                        else f"{_agg_label(agg)} auditor verify\nlatency ({time_unit})",
@@ -1085,8 +1153,8 @@ def plot_audit_vs_fill(
         central = np.array([percentile(_project_audit_bytes(lvl.audit_bytes), q_mid) for lvl in regime_levels]) * size_scale
         ax_size.plot(
             xs, central,
-            color=style["color"], marker=style["marker"], linewidth=1.8,
-            markersize=6, label=_short_label(style["label"], subset),
+            color=style["color"], marker=style["marker"], linewidth=1.2,
+            markersize=3.5, label=_short_label(style["label"], subset),
         )
 
     # Large proof-size extrapolation. The audit proof structure carries
@@ -1111,12 +1179,12 @@ def plot_audit_vs_fill(
             color=large_style["color"], marker=large_style["marker"],
             markerfacecolor=large_style["color"] if is_clean_kind else "none",
             linestyle="-" if is_clean_kind else "--",
-            linewidth=1.8 if is_clean_kind else 1.4,
-            markersize=6, alpha=1.0 if is_clean_kind else 0.85,
+            linewidth=1.2 if is_clean_kind else 1.4,
+            markersize=3.5, alpha=1.0 if is_clean_kind else 0.85,
             label="_nolegend_" if is_clean_kind else "aegon large",
         )
 
-    ax_size.set_xlabel("preload fill (% of true capacity)", fontsize=7, labelpad=2)
+    ax_size.set_xlabel("fill (%)", fontsize=7, labelpad=2)
     ax_size.set_ylabel(f"audit proof ({size_unit})"
                        if is_clean_kind
                        else f"{_agg_label(agg)} audit proof\nsize ({size_unit})",
@@ -1142,7 +1210,7 @@ def plot_audit_vs_fill(
                     xs, central,
                     color=astyle["color"], marker=akd_marker,
                     linestyle=astyle["linestyle"], markerfacecolor="none",
-                    linewidth=1.6, markersize=6, label=_short_label(astyle["label"], subset),
+                    linewidth=1.2, markersize=3.5, label=_short_label(astyle["label"], subset),
                 )
             lvls_size = [lvl for lvl in akd_levels if lvl.audit_bytes]
             if lvls_size:
@@ -1152,7 +1220,7 @@ def plot_audit_vs_fill(
                     xs, central,
                     color=astyle["color"], marker=akd_marker,
                     linestyle=astyle["linestyle"], markerfacecolor="none",
-                    linewidth=1.6, markersize=6, label=_short_label(astyle["label"], subset),
+                    linewidth=1.2, markersize=3.5, label=_short_label(astyle["label"], subset),
                 )
         # Aegon audit costs are O(shards) bytes / ~1 ms; AKD's are
         # O(epoch delta) MB / ~100 ms. Linear axes would collapse the
@@ -1185,7 +1253,7 @@ def plot_audit_vs_fill(
                     iron_xs, np.full_like(iron_xs, iron.audit_ms * time_scale),
                     color=iron_line_color, linestyle=istyle["linestyle"],
                     marker=istyle["marker"], markerfacecolor="none",
-                    linewidth=1.6, markersize=6, label=_short_label(istyle["label"], subset),
+                    linewidth=1.2, markersize=3.5, label=_short_label(istyle["label"], subset),
                 )
                 any_iron_time = True
             if iron.audit_bytes is not None:
@@ -1194,7 +1262,7 @@ def plot_audit_vs_fill(
                     iron_xs, np.full_like(iron_xs, v_scaled),
                     color=iron_line_color, linestyle=istyle["linestyle"],
                     marker=istyle["marker"], markerfacecolor="none",
-                    linewidth=1.6, markersize=6, label=_short_label(istyle["label"], subset),
+                    linewidth=1.2, markersize=3.5, label=_short_label(istyle["label"], subset),
                 )
                 any_iron_size = True
         ax_time.set_xlim(iron_xlim_time)
@@ -1207,16 +1275,21 @@ def plot_audit_vs_fill(
     handles, labels = ax_time.get_legend_handles_labels()
     for ax in fig.axes:
         _label_axis_endpoints(ax)
+        _two_digit_ticks(ax)
+        if is_clean_kind:
+            # Both y axes span five or more decades here; whole-decade
+            # labels are far narrower than exact scientific endpoints.
+            _decade_ticks(ax.yaxis)
     if is_clean_kind:
         # Same panel/legend geometry as the lookup and bench_summary
         # large figures: subplots_adjust wspace matches setup so each
         # panel comes out at 1.71 x 1.35 in axes.
-        fig.subplots_adjust(wspace=0.35)
-        fig.tight_layout(rect=(0, 0.14, 1, 1), pad=0.4, w_pad=0.6)
+        fig.tight_layout(rect=(0, 0.11, 1, 1), pad=0.3, w_pad=0.5)
         if handles:
             fig.legend(handles, labels, loc="lower center",
-                       ncol=min(len(handles), 5),
-                       bbox_to_anchor=(0.5, 0.0), frameon=False)
+                       ncol=min(len(handles), 5), fontsize=paper_style.LABEL_PT,
+                       handlelength=1.4, handletextpad=0.3, columnspacing=0.9,
+                       bbox_to_anchor=(0.5, -0.02), frameon=False)
     else:
         # Two-row shared legend (matches the server / client / proof-
         # size layout): small + medium on top, large + large-extrapolated
@@ -1712,6 +1785,7 @@ def _plot_client_lookup_panels(
     row2 = [(h, l) for h, l in pairs if l.startswith("large")]
     for ax in fig.axes:
         _label_axis_endpoints(ax)
+        _two_digit_ticks(ax)
     fig.tight_layout(rect=(0, 0.14, 1, 1))
     if row1:
         fig.legend(
@@ -1996,6 +2070,7 @@ def _plot_proof_size_panels(
     row2 = [(h, l) for h, l in pairs if l.startswith("large")]
     for ax in fig.axes:
         _label_axis_endpoints(ax)
+        _two_digit_ticks(ax)
     fig.tight_layout(rect=(0, 0.14, 1, 1))
     if row1:
         fig.legend(
@@ -2125,6 +2200,108 @@ def plot_combined_history_large(
     )
 
 
+def _synth_combined_lookup_levels(
+    levels: list[LevelStats], sum_aegon: bool = True,
+) -> list[LevelStats]:
+    """Return a new list of LevelStats where each level carries a
+    "combined" metric under server_ms / client_ms / proof_bytes: the
+    cost of one full point lookup (label + value).
+
+    - `sum_aegon=True`  (aegon input): quantile-wise sum of the level's
+      `label` and `value` samples. Aegon exposes the label (slot) lookup
+      and the value lookup as two endpoints, so a full lookup pays for
+      both. Levels whose label-lookup server median is a probe-chain /
+      VRF-cache outlier (> 2x the fleet median, same filter as the
+      standalone label figure) are dropped so the spikes do not leak
+      into the sum.
+    - `sum_aegon=False` (AKD input): AKD's `Directory::lookup` binds
+      label and value in one call, so `value` is copied as-is.
+
+    IronDict's single lookup_prove is overlaid through `IronStats`
+    scalars, which ignore the key -- no synthesis needed."""
+    if sum_aegon:
+        meds = [float(np.median(l.server_ms["label"]))
+                for l in levels if l.server_ms.get("label")]
+        if meds:
+            threshold = 2.0 * float(np.median(meds))
+            levels = [
+                l for l in levels
+                if not l.server_ms.get("label")
+                or float(np.median(l.server_ms["label"])) <= threshold
+            ]
+    out: list[LevelStats] = []
+    for lvl in levels:
+        def _combine(store: dict) -> list:
+            lb = store.get("label", []) or []
+            vl = store.get("value", []) or []
+            if not sum_aegon:
+                return list(vl) if vl else list(lb)
+            if lb and vl:
+                # The two endpoints are measured in separate runs, so
+                # sample i of one is unrelated to sample i of the other
+                # and an elementwise sum is meaningless (both lists are
+                # heavy-tailed, which inflates the median of the sum far
+                # above the sum of the medians). Add them quantile by
+                # quantile instead: the combined median is then exactly
+                # median(label) + median(value), and likewise for every
+                # other percentile the plot reads.
+                qs = np.linspace(0.0, 1.0, 101)
+                return list(np.quantile(lb, qs) + np.quantile(vl, qs))
+            return []
+
+        srv = dict(lvl.server_ms)
+        cli = dict(lvl.client_ms)
+        pb = dict(lvl.proof_bytes)
+        srv["combined"] = _combine(lvl.server_ms)
+        cli["combined"] = _combine(lvl.client_ms)
+        pb["combined"] = _combine(lvl.proof_bytes)
+        if sum_aegon and not (srv["combined"] and cli["combined"] and pb["combined"]):
+            continue
+        out.append(LevelStats(
+            fill_percent=lvl.fill_percent,
+            true_log_capacity=lvl.true_log_capacity,
+            server_ms=srv,
+            client_ms=cli,
+            proof_bytes=pb,
+            publish_ms=lvl.publish_ms,
+            audit_ms=lvl.audit_ms,
+            audit_bytes=lvl.audit_bytes,
+            concurrency_sweep_kind=lvl.concurrency_sweep_kind,
+            concurrency_sweep=lvl.concurrency_sweep,
+        ))
+    return out
+
+
+def plot_combined_lookup_large(
+    small: list[LevelStats],
+    medium: list[LevelStats],
+    large: list[LevelStats],
+    akd: dict[str, list[LevelStats]] | None = None,
+    irondict: dict[str, IronStats] | None = None,
+) -> Path:
+    """Render lookup_combined_large.pdf: one 3-panel point-lookup figure
+    replacing the separate label and value figures. Aegon's curve is the
+    SUM of its label and value lookups; AKD and IronDict are shown at
+    their native single-call cost."""
+    akd_syn: dict[str, list[LevelStats]] | None = None
+    if akd:
+        akd_syn = {}
+        for name, levels in akd.items():
+            if levels:
+                akd_syn[name] = _synth_combined_lookup_levels(levels, sum_aegon=False)
+    return _plot_one_lookup_op(
+        _synth_combined_lookup_levels(small, sum_aegon=True),
+        _synth_combined_lookup_levels(medium, sum_aegon=True),
+        _synth_combined_lookup_levels(large, sum_aegon=True),
+        key="combined",
+        title="lookup",
+        subset=("large",),
+        agg=AGG_MEDIAN,
+        akd=akd_syn,
+        irondict=irondict,
+    )
+
+
 def _plot_one_lookup_op(
     small: list[LevelStats],
     medium: list[LevelStats],
@@ -2159,7 +2336,8 @@ def _plot_one_lookup_op(
     # the evaluation text (single-machine maximum QPS per system), so
     # there is no more special-case 4-panel or 2x2 layout to handle.
     n_panels = 3
-    figsize = (2.17 * n_panels, 2.03)
+    # Drawn at column width (see paper_style) so label sizes are real.
+    figsize = (paper_style.COLUMN_WIDTH_IN, 1.5)
     fig, axes = plt.subplots(1, n_panels, figsize=figsize, sharex=False)
     ax_srv, ax_cli, ax_size = axes[0], axes[1], axes[2]
     ax_knee = None
@@ -2167,9 +2345,11 @@ def _plot_one_lookup_op(
     is_history_large_kind = key == "history" and subset == ("large",)
     is_label_history_large_kind = key == "label_history" and subset == ("large",)
     is_combined_history_large_kind = key == "combined_history" and subset == ("large",)
+    is_combined_large_kind = key == "combined" and subset == ("large",)
     HISTORY_KINDS = {"label_history", "history", "combined_history"}
-    proof_scale = 1.0 if key in HISTORY_KINDS else (1.0 / 1024.0)
-    proof_unit = "bytes" if key in HISTORY_KINDS else "KB"
+    # Always KB: in bytes the monitoring proofs need five-digit ticks.
+    proof_scale = 1.0 / 1024.0
+    proof_unit = "KB"
 
     # "Clean" kinds (label, and value-large in the main body): aegon
     # in blue, irondict in black, no shaded p10..p90 envelope, solid
@@ -2181,7 +2361,8 @@ def _plot_one_lookup_op(
     is_label_kind = key == "label"
     is_clean_kind = (is_label_kind or is_value_large_kind
                      or is_history_large_kind or is_label_history_large_kind
-                     or is_combined_history_large_kind)
+                     or is_combined_history_large_kind
+                     or is_combined_large_kind)
     def _aegon_color(regime_name: str) -> str:
         return "#1f77b4" if is_clean_kind else REGIME_STYLES[regime_name]["color"]
     iron_line_color = "#000000" if is_clean_kind else "#444444"
@@ -2242,7 +2423,7 @@ def _plot_one_lookup_op(
         if not is_clean_kind:
             ax_srv.fill_between(xs, low, high, color=style["color"], alpha=0.18, linewidth=0)
         ax_srv.plot(xs, central, color=style["color"], marker=style["marker"],
-                    linewidth=1.8, markersize=6, label=_short_label(style["label"], subset))
+                    linewidth=1.2, markersize=3.5, label=_short_label(style["label"], subset))
     ext = _large_metric_theoretical_extrapolation(large, lambda lvl, k=key: lvl.server_ms.get(k, []), reducer=reducer) if extrap_large else None
     if ext is not None:
         xs_ext, ys_ext = ext
@@ -2258,12 +2439,12 @@ def _plot_one_lookup_op(
                     color=large_style["color"], marker=large_style["marker"],
                     markerfacecolor=large_style["color"] if is_clean_kind else "none",
                     linestyle="-" if is_clean_kind else "--",
-                    linewidth=1.8 if is_clean_kind else 1.4,
-                    markersize=6, alpha=1.0 if is_clean_kind else 0.85,
+                    linewidth=1.2 if is_clean_kind else 1.4,
+                    markersize=3.5, alpha=1.0 if is_clean_kind else 0.85,
                     label="_nolegend_")
-    ax_srv.set_xlabel("preload fill (% of true capacity)", fontsize=7, labelpad=2)
-    ax_srv.set_ylabel("server latency (ms)", fontsize=6, labelpad=1)
-    ax_srv.tick_params(axis="both", labelsize=5, pad=1)
+    ax_srv.set_xlabel("fill (%)", fontsize=7, labelpad=2)
+    ax_srv.set_ylabel("server time (ms)", fontsize=7, labelpad=1)
+    ax_srv.tick_params(axis="both", labelsize=6, pad=1)
     ax_srv.grid(True, which="both", alpha=0.3)
     ax_srv.set_xticks([1, 30, 60, 90])
 
@@ -2283,7 +2464,7 @@ def _plot_one_lookup_op(
         if not is_clean_kind:
             ax_cli.fill_between(xs, low, high, color=style["color"], alpha=0.18, linewidth=0)
         ax_cli.plot(xs, central, color=style["color"], marker=style["marker"],
-                    linewidth=1.8, markersize=6, label=_short_label(style["label"], subset))
+                    linewidth=1.2, markersize=3.5, label=_short_label(style["label"], subset))
     ext = _large_metric_theoretical_extrapolation(large, lambda lvl, k=key: lvl.client_ms.get(k, []), reducer=reducer) if extrap_large else None
     if ext is not None:
         xs_ext, ys_ext = ext
@@ -2299,11 +2480,11 @@ def _plot_one_lookup_op(
                     color=large_style["color"], marker=large_style["marker"],
                     markerfacecolor=large_style["color"] if is_clean_kind else "none",
                     linestyle="-" if is_clean_kind else "--",
-                    linewidth=1.8 if is_clean_kind else 1.4,
-                    markersize=6, alpha=1.0 if is_clean_kind else 0.85,
+                    linewidth=1.2 if is_clean_kind else 1.4,
+                    markersize=3.5, alpha=1.0 if is_clean_kind else 0.85,
                     label="_nolegend_")
-    ax_cli.set_xlabel("preload fill (% of true capacity)", fontsize=7, labelpad=2)
-    ax_cli.set_ylabel("client latency (ms)", fontsize=7, labelpad=2)
+    ax_cli.set_xlabel("fill (%)", fontsize=7, labelpad=2)
+    ax_cli.set_ylabel("client time (ms)", fontsize=7, labelpad=1)
     ax_cli.tick_params(axis="both", labelsize=6, pad=1)
     ax_cli.grid(True, which="both", alpha=0.3)
     ax_cli.set_xticks([1, 30, 60, 90])
@@ -2322,7 +2503,7 @@ def _plot_one_lookup_op(
         if not is_clean_kind:
             ax_size.fill_between(xs, low, high, color=style["color"], alpha=0.18, linewidth=0)
         ax_size.plot(xs, central, color=style["color"], marker=style["marker"],
-                     linewidth=1.8, markersize=6, label=_short_label(style["label"], subset))
+                     linewidth=1.2, markersize=3.5, label=_short_label(style["label"], subset))
     ext = _large_proof_extrapolation(large, medium, key, reducer=reducer) if extrap_large else None
     if extrap_large and is_combined_history_large_kind:
         # combined-history proof size is bounded by the two 5-entry
@@ -2352,10 +2533,10 @@ def _plot_one_lookup_op(
                      color=large_style["color"], marker=large_style["marker"],
                      markerfacecolor=large_style["color"] if is_clean_kind else "none",
                      linestyle="-" if is_clean_kind else "--",
-                     linewidth=1.8 if is_clean_kind else 1.4,
-                     markersize=6, alpha=1.0 if is_clean_kind else 0.85,
+                     linewidth=1.2 if is_clean_kind else 1.4,
+                     markersize=3.5, alpha=1.0 if is_clean_kind else 0.85,
                      label="_nolegend_")
-    ax_size.set_xlabel("preload fill (% of true capacity)", fontsize=7, labelpad=2)
+    ax_size.set_xlabel("fill (%)", fontsize=7, labelpad=2)
     ax_size.set_ylabel(f"proof size ({proof_unit})", fontsize=7, labelpad=2)
     ax_size.tick_params(axis="both", labelsize=6, pad=1)
     ax_size.grid(True, which="both", alpha=0.3)
@@ -2381,7 +2562,7 @@ def _plot_one_lookup_op(
             ax_knee.fill_between(qps, p50, p99, color=color, alpha=0.22, linewidth=0,
                                  label="p99")
             ax_knee.plot(qps, p50, color=color, marker=large_style["marker"],
-                         markersize=6, linewidth=1.8, label="p50")
+                         markersize=3.5, linewidth=1.2, label="p50")
         # Estimated per-machine QPS ceilings for AKD and IronDict on
         # their respective large-regime hardware. Each ceiling is
         # `n_vcpu / server_lookup_ms` — the maximum sustained rate at
@@ -2401,12 +2582,12 @@ def _plot_one_lookup_op(
         ax_knee.axvline(AKD_QPS_K, color="#d62728", linestyle="--",
                         linewidth=0.9, alpha=0.6)
         ax_knee.plot([AKD_QPS_K], [AKD_LAT_MS], color="#d62728", marker="o",
-                     markersize=6, markerfacecolor="none", linestyle="none",
+                     markersize=3.5, markerfacecolor="none", linestyle="none",
                      label="AKD ceiling")
         ax_knee.axvline(IRON_QPS_K, color="#000000", linestyle="--",
                         linewidth=0.9, alpha=0.6)
         ax_knee.plot([IRON_QPS_K], [IRON_LAT_MS], color="#000000", marker="o",
-                     markersize=6, markerfacecolor="none", linestyle="none",
+                     markersize=3.5, markerfacecolor="none", linestyle="none",
                      label="irondict ceiling")
         ax_knee.set_xlabel("achieved QPS ($\\times 10^3$)", fontsize=7, labelpad=2)
         ax_knee.set_ylabel("lookup latency (ms)", fontsize=7, labelpad=2)
@@ -2465,7 +2646,7 @@ def _plot_one_lookup_op(
                     xs, ys,
                     color=astyle["color"], marker=akd_marker,
                     linestyle=astyle["linestyle"], markerfacecolor="none",
-                    linewidth=1.6, markersize=6, label=akd_label,
+                    linewidth=1.2, markersize=3.5, label=akd_label,
                 )
         if akd_in_subset:
             ax_size.set_yscale("log")
@@ -2497,7 +2678,7 @@ def _plot_one_lookup_op(
                     iron_xs, np.full_like(iron_xs, iron.server_lookup_ms),
                     color=iron_line_color, linestyle=istyle["linestyle"],
                     marker=istyle["marker"], markerfacecolor="none",
-                    linewidth=1.6, markersize=6, label=_short_label(istyle["label"], subset),
+                    linewidth=1.2, markersize=3.5, label=_short_label(istyle["label"], subset),
                 )
                 any_iron_value = True
             if iron.client_lookup_ms is not None:
@@ -2505,7 +2686,7 @@ def _plot_one_lookup_op(
                     iron_xs, np.full_like(iron_xs, iron.client_lookup_ms),
                     color=iron_line_color, linestyle=istyle["linestyle"],
                     marker=istyle["marker"], markerfacecolor="none",
-                    linewidth=1.6, markersize=6, label=_short_label(istyle["label"], subset),
+                    linewidth=1.2, markersize=3.5, label=_short_label(istyle["label"], subset),
                 )
                 any_iron_value = True
             if iron.proof_bytes is not None:
@@ -2514,7 +2695,7 @@ def _plot_one_lookup_op(
                     iron_xs, np.full_like(iron_xs, v),
                     color=iron_line_color, linestyle=istyle["linestyle"],
                     marker=istyle["marker"], markerfacecolor="none",
-                    linewidth=1.6, markersize=6, label=_short_label(istyle["label"], subset),
+                    linewidth=1.2, markersize=3.5, label=_short_label(istyle["label"], subset),
                 )
                 any_iron_value = True
         ax_srv.set_xlim(srv_xlim)
@@ -2537,12 +2718,13 @@ def _plot_one_lookup_op(
     handles, labels = ax_srv.get_legend_handles_labels()
     for ax in fig.axes:
         _label_axis_endpoints(ax)
-    fig.subplots_adjust(wspace=0.35)
-    fig.tight_layout(rect=(0, 0.14, 1, 1), pad=0.4, w_pad=0.6)
+        _two_digit_ticks(ax)
+    fig.tight_layout(rect=(0, 0.11, 1, 1), pad=0.3, w_pad=0.5)
     if handles:
         fig.legend(handles, labels, loc="lower center",
-                   ncol=min(len(handles), 5),
-                   bbox_to_anchor=(0.5, 0.0), frameon=False)
+                   ncol=min(len(handles), 5), fontsize=paper_style.LABEL_PT,
+                   handlelength=1.6, handletextpad=0.4, columnspacing=1.2,
+                   bbox_to_anchor=(0.5, -0.02), frameon=False)
 
     out_path = PLOTS_DIR / f"lookup_{key}{_subset_suffix(subset)}{_agg_suffix(agg)}.pdf"
     fig.savefig(out_path, format="pdf", bbox_inches="tight")
@@ -2837,7 +3019,7 @@ def plot_bench_summary(
     #     (per-panel = 2.17 in wide x 1.70 in visible axes -- match)
     # The paper then includes setup at width=\linewidth and this
     # figure at width=0.667\linewidth so the scale factors also match.
-    fig, (ax_pub, ax_mig) = plt.subplots(1, 2, figsize=(4.33, 1.97))
+    fig, (ax_pub, ax_mig) = plt.subplots(1, 2, figsize=(paper_style.COLUMN_WIDTH_IN, 1.6))
 
     # ------ Panel 1: publish latency vs batch size (log y) ------
     # Show a compact story: aegon 1% and aegon 90% as
@@ -2934,13 +3116,13 @@ def plot_bench_summary(
     # crowded multi-digit tick numbers.
     if is_large:
         pub_xt = [10_000, 100_000]
-        pub_xt_labels = ["10k", "100k"]
+        pub_xt_labels = [r"$10^{4}$", r"$10^{5}$"]
     elif regime_name == "medium":
         pub_xt = [100, 1_000]
-        pub_xt_labels = ["100", "1k"]
+        pub_xt_labels = [r"$10^{2}$", r"$10^{3}$"]
     else:  # small
         pub_xt = [10, 100]
-        pub_xt_labels = ["10", "100"]
+        pub_xt_labels = ["10", r"$10^{2}$"]
     ax_pub.set_xticks(pub_xt)
     ax_pub.set_xticklabels(pub_xt_labels, fontsize=6)
     ax_pub.set_xlabel("batch size", fontsize=7, labelpad=2)
@@ -2997,13 +3179,13 @@ def plot_bench_summary(
         # up to the machine RAM ceiling.
         if is_large:
             mig_xt = [10, 1_000, 100_000]
-            mig_xt_labels = ["10k", "1M", "100M"]
+            mig_xt_labels = [r"$10^{4}$", r"$10^{6}$", r"$10^{8}$"]
         elif regime_name == "medium":
             mig_xt = [10, 100, 1_000]
-            mig_xt_labels = ["10k", "100k", "1M"]
+            mig_xt_labels = [r"$10^{4}$", r"$10^{5}$", r"$10^{6}$"]
         else:  # small
             mig_xt = [1, 10, 100]
-            mig_xt_labels = ["1k", "10k", "100k"]
+            mig_xt_labels = [r"$10^{3}$", r"$10^{4}$", r"$10^{5}$"]
         ax_mig.set_xticks(mig_xt)
         ax_mig.set_xticklabels(mig_xt_labels, fontsize=6)
 
@@ -3080,6 +3262,8 @@ def plot_bench_summary(
     ax_mig.grid(True, which="both", axis="both", linestyle=":", alpha=0.4)
     ax_mig.set_axisbelow(True)
 
+    _two_digit_ticks(ax_pub, "y")
+    _two_digit_ticks(ax_mig, "y")
     fig.tight_layout(pad=0.4, w_pad=0.6, rect=(0, 0.14, 1, 1))
     # Shared legend at the bottom of the figure, spanning the full
     # width — pulled from ax_pub since that's the only panel with
@@ -3188,6 +3372,14 @@ def main() -> None:
     # is the SUM of those two operations. AKD's key_history and
     # IronDict's single lookup_prove are shown at their native cost.
     written.append(plot_combined_history_large(
+        small, medium, large,
+        akd=akd_overlay,
+        irondict=irondict_overlay,
+    ))
+
+    # Combined point-lookup figure: one full lookup = label + value
+    # for aegon (two endpoints), a single call for AKD and IronDict.
+    written.append(plot_combined_lookup_large(
         small, medium, large,
         akd=akd_overlay,
         irondict=irondict_overlay,
