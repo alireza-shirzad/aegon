@@ -28,7 +28,7 @@ use ndarray::{ArrayD, IxDyn};
 use num_bigint::BigUint;
 use num_traits::ToPrimitive;
 #[cfg(feature = "parallel")]
-use rayon::iter::{IntoParallelIterator, ParallelIterator};
+use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator};
 
 /// Universal parameters for KZH-k.
 ///
@@ -347,6 +347,39 @@ impl<E: Pairing> StructuredReferenceString<E> for KZHKUniversalParams<E> {
                 strides[a] = strides[a + 1] * shape[a + 1];
             }
 
+            // Cache products for a bounded suffix of whole tensor axes.
+            // Every preceding axis is constant within a `suffix_len` tile
+            // in C-order, so its product can be shared by all tile entries.
+            // At nv=25/k=8 this covers the last three blocks (512 scalars).
+            const SUFFIX_ENTRIES_MAX: usize = 512;
+            let mut suffix_start = m;
+            let mut suffix_len = 1usize;
+            while suffix_start > 0 {
+                let axis_len = shape[suffix_start - 1];
+                if axis_len > SUFFIX_ENTRIES_MAX / suffix_len {
+                    break;
+                }
+                suffix_start -= 1;
+                suffix_len *= axis_len;
+            }
+            let suffix_products: Option<Vec<E::ScalarField>> = if suffix_start < m && suffix_len > 1
+            {
+                Some(
+                    (0..suffix_len)
+                        .map(|offset| {
+                            let mut prod = E::ScalarField::one();
+                            for a in suffix_start..m {
+                                let idx = (offset / strides[a]) % shape[a];
+                                prod *= mu_mat[t + a][idx];
+                            }
+                            prod
+                        })
+                        .collect(),
+                )
+            } else {
+                None
+            };
+
             // Build the prep table once per `t` and reuse across chunks.
             // The window is sized for `chunk_len`, not `len` — that's a
             // performance hint only; `batch_mul` is correct for any slice
@@ -365,7 +398,43 @@ impl<E: Pairing> StructuredReferenceString<E> for KZHKUniversalParams<E> {
                 // The `mu_mat` slices for one block are at most a few
                 // hundred elements (2^{d_j} ≤ 16 in practice), so the
                 // inner per-element loop hits cache cleanly.
-                let exps_chunk: Vec<E::ScalarField> = {
+                let exps_chunk: Vec<E::ScalarField> = if let Some(suffix) = &suffix_products {
+                    if suffix_start == 0 {
+                        // The entire tensor fits the small suffix table.
+                        suffix[chunk_start..chunk_start + this_chunk].to_vec()
+                    } else {
+                        // Preserve indexed collect's single output allocation.
+                        // Each worker caches a prefix until its tile changes;
+                        // deriving the tile from the global index also handles
+                        // a chunk beginning or ending inside a suffix tile.
+                        let scalar_at = |cache: &mut (usize, E::ScalarField), c: usize| {
+                            let global = chunk_start + c;
+                            let tile = global / suffix_len;
+                            if cache.0 != tile {
+                                let mut prefix = E::ScalarField::one();
+                                for a in 0..suffix_start {
+                                    let idx = (global / strides[a]) % shape[a];
+                                    prefix *= mu_mat[t + a][idx];
+                                }
+                                *cache = (tile, prefix);
+                            }
+                            cache.1 * suffix[global % suffix_len]
+                        };
+                        #[cfg(feature = "parallel")]
+                        {
+                            (0..this_chunk)
+                                .into_par_iter()
+                                .with_min_len(suffix_len)
+                                .map_init(|| (usize::MAX, E::ScalarField::one()), scalar_at)
+                                .collect()
+                        }
+                        #[cfg(not(feature = "parallel"))]
+                        {
+                            let mut cache = (usize::MAX, E::ScalarField::one());
+                            (0..this_chunk).map(|c| scalar_at(&mut cache, c)).collect()
+                        }
+                    }
+                } else {
                     #[cfg(feature = "parallel")]
                     {
                         (0..this_chunk)
