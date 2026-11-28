@@ -40,6 +40,11 @@ aegon_crypto/*.json
 # home directory paths.
 bench-results/*.log.v*-killed
 bench-results/*.log.v*-up-failed
+# Per-run logs and console captures written by scripts/run-*.sh.
+bench-results/run-*.log.*
+bench-results/run-*.out
+# Stray output of aegon_lookup_bench when run from the repo root.
+/aegon-lookup-bench.json
 
 # macOS / iCloud Drive conflict copies ("lib 2.rs", "Cargo 2.toml"), which
 # appear when a synced folder is rewritten mid-sync.
