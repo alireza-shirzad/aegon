@@ -904,8 +904,19 @@ impl<E: Pairing, T: FsTranscript<E::ScalarField>> KZHK<E, T> {
                 return Ok(false);
             }
 
-            let eq_poly = build_eq_x_r(point_part).unwrap();
-            cj = msm::<E::G1>(&proof.get_d()[j], &eq_poly.evaluations).into_affine();
+            cj = if point_part.iter().all(|x| x.is_zero() || x.is_one()) {
+                // Boolean equality weights select one entry in little-endian
+                // order. The pairing above still checks the entire row.
+                // A row too short to hold that entry is a malformed proof:
+                // reject it instead of indexing out of bounds.
+                match proof.get_d()[j].get(bits_le_to_usize(point_part)) {
+                    Some(entry) => *entry,
+                    None => return Ok(false),
+                }
+            } else {
+                let eq_poly = build_eq_x_r(point_part).unwrap();
+                msm::<E::G1>(&proof.get_d()[j], &eq_poly.evaluations).into_affine()
+            };
         }
         drop(pairing_loop_guard);
         // Checking c_{k-1}
