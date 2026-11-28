@@ -28,7 +28,7 @@ use std::collections::HashSet;
 use std::marker::PhantomData;
 
 use aegon_crypto::pcs::PCSGlobalParam;
-use aegon_crypto::transcript::IOPTranscript;
+use aegon_crypto::transcript::FsTranscript;
 use ark_ec::pairing::Pairing;
 use ark_ff::{Field, Zero};
 use ark_serialize::{
@@ -41,9 +41,7 @@ use sha2::{Digest, Sha256};
 
 use super::audit::verify_chain;
 use super::config::{AegonConfig, VerifierContext};
-use super::db::{
-    key_coord_state, key_epoch_commit, key_shard_fullness, Db, DbOp, DbSource, RedisDb,
-};
+use super::db::{key_coord_state, key_epoch_commit, key_shard_fullness, Db, DbOp, DbSource};
 use super::error::AegonError;
 use super::hash::{bool_index_to_point, HashSuite, Sha256Hash};
 use super::server::Aegon;
@@ -1689,7 +1687,7 @@ where
                                 .unwrap_or_else(|| "aegon".to_string());
                             shard_path.set_file_name(format!("{leaf}.shards"));
                             shard_path.push(format!("{i}"));
-                            aegon.set_db(Box::new(crate::db::RocksDb::open(&shard_path)?));
+                            aegon.set_db(crate::db::open_rocks(&shard_path)?);
                         }
                         DbSource::Redis(_) => {
                             return Err(AegonError::Config(format!(
@@ -1774,8 +1772,8 @@ where
         // URL fails at setup, not on the first publish.
         let db: Option<Box<dyn Db>> = match &config.db {
             DbSource::None => None,
-            DbSource::Redis(url) => Some(Box::new(RedisDb::connect(url)?)),
-            DbSource::Rocks(path) => Some(Box::new(crate::db::RocksDb::open(path)?)),
+            DbSource::Redis(url) => Some(crate::db::open_redis(url)?),
+            DbSource::Rocks(path) => Some(crate::db::open_rocks(path)?),
         };
 
         // Recovery path: if the connected DB already has coordinator
@@ -3482,7 +3480,7 @@ where
     }
     // PCS opening against the shard's value commitment at the slot.
     let value_point = bool_index_to_point::<E::ScalarField>(&proof.slot_bits);
-    let mut tr = IOPTranscript::<E::ScalarField>::new(b"aegon.value.open");
+    let mut tr = P::Transcript::new(b"aegon.value.open");
     let ok = P::verify(
         &ctx.inner.verifier_param,
         &proof.leaf.value_commitment,
@@ -3578,7 +3576,7 @@ where
         let point = bool_index_to_point::<E::ScalarField>(&entry.slot_bits);
 
         // rand_value_pre against prev rand_value commitment.
-        let mut tr_pre = IOPTranscript::<E::ScalarField>::new(b"aegon.rand_value.open");
+        let mut tr_pre = P::Transcript::new(b"aegon.rand_value.open");
         let ok_pre = P::verify(
             &ctx.inner.verifier_param,
             &entry.prev_shard_commit.rand_value_commitment,
@@ -3594,7 +3592,7 @@ where
         }
 
         // rand_value_post against post rand_value commitment.
-        let mut tr_post = IOPTranscript::<E::ScalarField>::new(b"aegon.rand_value.open");
+        let mut tr_post = P::Transcript::new(b"aegon.rand_value.open");
         let ok_post = P::verify(
             &ctx.inner.verifier_param,
             &entry.post_shard_commit.rand_value_commitment,
@@ -3610,7 +3608,7 @@ where
         }
 
         // value_post against post value commitment.
-        let mut tr_val = IOPTranscript::<E::ScalarField>::new(b"aegon.value.open");
+        let mut tr_val = P::Transcript::new(b"aegon.value.open");
         let ok_val = P::verify(
             &ctx.inner.verifier_param,
             &entry.post_shard_commit.value_commitment,
@@ -3662,7 +3660,7 @@ where
                 verify_merkle_path::<E, P>(&fr.shard_commit, fr.shard_id as usize, &fr.merkle_path);
             // Live `rand_value(slot)` opens under the live shard commit.
             let point = bool_index_to_point::<E::ScalarField>(&fr.slot_bits);
-            let mut tr_live = IOPTranscript::<E::ScalarField>::new(b"aegon.rand_value.open");
+            let mut tr_live = P::Transcript::new(b"aegon.rand_value.open");
             let ok_live = P::verify(
                 &ctx.inner.verifier_param,
                 &fr.shard_commit.rand_value_commitment,
@@ -3828,7 +3826,7 @@ where
             let point = bool_index_to_point::<E::ScalarField>(&p.slot_bits);
 
             // (1) Placement rand_index opening.
-            let mut tr_placement = IOPTranscript::<E::ScalarField>::new(b"aegon.rand_index.open");
+            let mut tr_placement = P::Transcript::new(b"aegon.rand_index.open");
             let ok_placement = P::verify(
                 &ctx.inner.verifier_param,
                 &p.placement_shard_commit.rand_index_commitment,
@@ -3844,7 +3842,7 @@ where
             }
 
             // (2) Live rand_index opening.
-            let mut tr_live = IOPTranscript::<E::ScalarField>::new(b"aegon.rand_index.open");
+            let mut tr_live = P::Transcript::new(b"aegon.rand_index.open");
             let ok_live = P::verify(
                 &ctx.inner.verifier_param,
                 &fr.shard_commit.rand_index_commitment,
@@ -4064,7 +4062,7 @@ where
         }
         // PCS opening against the destination shard's index_poly.
         let point = bool_index_to_point::<E::ScalarField>(&sprobe.slot_bits);
-        let mut tr = IOPTranscript::<E::ScalarField>::new(b"aegon.index.open");
+        let mut tr = P::Transcript::new(b"aegon.index.open");
         let ok = P::verify(
             &ctx.inner.verifier_param,
             &proof.dest_leaf.index_commitment,
@@ -4284,7 +4282,7 @@ where
             ));
         }
         let point = bool_index_to_point::<E::ScalarField>(&sprobe.slot_bits);
-        let mut tr_s0 = IOPTranscript::<E::ScalarField>::new(b"aegon.rand_index.open");
+        let mut tr_s0 = P::Transcript::new(b"aegon.rand_index.open");
         let ok_s0 = P::verify(
             &ctx.inner.verifier_param,
             &proof.dest_leaf_s0.rand_index_commitment,
@@ -4293,7 +4291,7 @@ where
             &sprobe.rand_index_s0_proof,
             &mut tr_s0,
         )?;
-        let mut tr_s1 = IOPTranscript::<E::ScalarField>::new(b"aegon.rand_index.open");
+        let mut tr_s1 = P::Transcript::new(b"aegon.rand_index.open");
         let ok_s1 = P::verify(
             &ctx.inner.verifier_param,
             &proof.dest_leaf_s1.rand_index_commitment,
@@ -4318,7 +4316,7 @@ where
 
     // (4) rand_value at the final slot.
     let value_point = bool_index_to_point::<E::ScalarField>(&final_slot);
-    let mut tr_v_s0 = IOPTranscript::<E::ScalarField>::new(b"aegon.rand_value.open");
+    let mut tr_v_s0 = P::Transcript::new(b"aegon.rand_value.open");
     let ok_v_s0 = P::verify(
         &ctx.inner.verifier_param,
         &proof.dest_leaf_s0.rand_value_commitment,
@@ -4327,7 +4325,7 @@ where
         &proof.value_rand_s0_proof,
         &mut tr_v_s0,
     )?;
-    let mut tr_v_s1 = IOPTranscript::<E::ScalarField>::new(b"aegon.rand_value.open");
+    let mut tr_v_s1 = P::Transcript::new(b"aegon.rand_value.open");
     let ok_v_s1 = P::verify(
         &ctx.inner.verifier_param,
         &proof.dest_leaf_s1.rand_value_commitment,

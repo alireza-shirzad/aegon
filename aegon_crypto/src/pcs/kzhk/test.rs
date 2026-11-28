@@ -5,6 +5,7 @@
 
 use super::*;
 use crate::pcs::kzhk::structs::KZHKConfig;
+use crate::transcript::IOPTranscript;
 use ark_bn254::{Bn254 as E, Fr};
 use ark_std::{test_rng, vec::Vec, UniformRand};
 
@@ -23,7 +24,7 @@ fn test_single_helper(
     };
     let mut prover_transcript = IOPTranscript::new(b"test_kzhk");
     let params = KZHK::<E>::gen_srs_for_testing(KZHKConfig::new(k, zk), &mut rng, nv)?;
-    let (ck, vk) = KZHK::trim(params, None, Some(nv))?;
+    let (ck, vk) = KZHK::<E>::trim(params, None, Some(nv))?;
     let point = match is_boolean {
         true => (0..nv)
             .map(|_| Fr::from((usize::rand(&mut rng) % 2) as i64))
@@ -630,7 +631,7 @@ fn masking_package_open_zk_round_trip() -> Result<(), PCSError> {
     let mut rng = test_rng();
     let poly = DenseOrSparseMLE::Sparse(SparseMultilinearExtension::<Fr>::rand(nv, &mut rng));
     let params = KZHK::<E>::gen_srs_for_testing(KZHKConfig::new(k, true), &mut rng, nv)?;
-    let (ck, vk) = KZHK::trim(params, None, Some(nv))?;
+    let (ck, vk) = KZHK::<E>::trim(params, None, Some(nv))?;
     let point: Vec<Fr> = (0..nv).map(|_| Fr::rand(&mut rng)).collect();
 
     let (com, mut state) = KZHK::<E>::commit(&ck, &poly)?;
@@ -676,7 +677,7 @@ fn masking_package_remask_non_zk_proof() -> Result<(), PCSError> {
     let mut rng = test_rng();
     let poly = DenseOrSparseMLE::Sparse(SparseMultilinearExtension::<Fr>::rand(nv, &mut rng));
     let params = KZHK::<E>::gen_srs_for_testing(KZHKConfig::new(k, true), &mut rng, nv)?;
-    let (ck, vk) = KZHK::trim(params, None, Some(nv))?;
+    let (ck, vk) = KZHK::<E>::trim(params, None, Some(nv))?;
     let point: Vec<Fr> = (0..nv).map(|_| Fr::rand(&mut rng)).collect();
 
     let (com, mut state) = KZHK::<E>::commit(&ck, &poly)?;

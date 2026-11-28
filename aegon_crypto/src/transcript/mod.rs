@@ -12,6 +12,23 @@
 mod errors;
 pub use errors::TranscriptError;
 
+#[cfg(feature = "ark_transcript")]
+mod ark_backend;
+#[cfg(feature = "ark_transcript")]
+pub use ark_backend::ArkTranscript;
+#[cfg(all(test, feature = "ark_transcript"))]
+mod ark_tests;
+
+#[cfg(not(any(feature = "merlin", feature = "ark_transcript")))]
+compile_error!("aegon_crypto needs a transcript: enable `merlin` or `ark_transcript`");
+
+/// The transcript `KZHK<E>` uses when none is named: [`IOPTranscript`]
+/// with the `merlin` feature, otherwise `ArkTranscript`.
+#[cfg(feature = "merlin")]
+pub type DefaultTranscript<F> = IOPTranscript<F>;
+#[cfg(not(feature = "merlin"))]
+pub type DefaultTranscript<F> = ArkTranscript<F>;
+
 use ark_ff::PrimeField;
 use ark_serialize::CanonicalSerialize;
 
@@ -26,8 +43,56 @@ fn to_bytes<T: CanonicalSerialize>(value: &T) -> Result<Vec<u8>, TranscriptError
         .map_err(|e| TranscriptError::InvalidTranscript(format!("serialize_compressed: {e}")))?;
     Ok(buf)
 }
+#[cfg(feature = "merlin")]
 use merlin::Transcript;
+#[cfg(feature = "merlin")]
 use std::marker::PhantomData;
+
+/// A Fiat-Shamir transcript producing challenges over the prime field `F`.
+///
+/// Implementations: [`IOPTranscript`] (Merlin, the default) and, behind the
+/// `ark_transcript` feature, `ArkTranscript`. The transcript in use is chosen
+/// by the PCS through `PolynomialCommitmentScheme::Transcript`.
+pub trait FsTranscript<F: PrimeField>: Sized + Send + Sync {
+    /// Create a new transcript.
+    fn new(label: &'static [u8]) -> Self;
+
+    /// Append the message to the transcript.
+    fn append_message(&mut self, label: &'static [u8], msg: &[u8]) -> Result<(), TranscriptError>;
+
+    /// Generate a challenge from the current transcript and append it to the
+    /// transcript. Must fail if the transcript is empty.
+    fn get_and_append_challenge(&mut self, label: &'static [u8]) -> Result<F, TranscriptError>;
+
+    /// Append a field element to the transcript.
+    fn append_field_element(
+        &mut self,
+        label: &'static [u8],
+        field_elem: &F,
+    ) -> Result<(), TranscriptError> {
+        self.append_message(label, &to_bytes(field_elem)?)
+    }
+
+    /// Append a serializable element to the transcript.
+    fn append_serializable_element<S: CanonicalSerialize>(
+        &mut self,
+        label: &'static [u8],
+        group_elem: &S,
+    ) -> Result<(), TranscriptError> {
+        self.append_message(label, &to_bytes(group_elem)?)
+    }
+
+    /// Generate a list of challenges, each appended to the transcript.
+    fn get_and_append_challenge_vectors(
+        &mut self,
+        label: &'static [u8],
+        len: usize,
+    ) -> Result<Vec<F>, TranscriptError> {
+        (0..len)
+            .map(|_| self.get_and_append_challenge(label))
+            .collect()
+    }
+}
 
 /// An IOP transcript consists of a Merlin transcript and a flag `is_empty` to
 /// indicate that if the transcript is empty.
@@ -38,6 +103,7 @@ use std::marker::PhantomData;
 /// The `is_empty` flag is useful in the case where a protocol is initiated by
 /// the verifier, in which case the prover should start its phase by receiving a
 /// `non-empty` transcript.
+#[cfg(feature = "merlin")]
 #[derive(Clone)]
 pub struct IOPTranscript<F: PrimeField> {
     transcript: Transcript,
@@ -46,10 +112,10 @@ pub struct IOPTranscript<F: PrimeField> {
     phantom: PhantomData<F>,
 }
 
-// TODO: Make this into a Trait
-impl<F: PrimeField> IOPTranscript<F> {
+#[cfg(feature = "merlin")]
+impl<F: PrimeField> FsTranscript<F> for IOPTranscript<F> {
     /// Create a new IOP transcript.
-    pub fn new(label: &'static [u8]) -> Self {
+    fn new(label: &'static [u8]) -> Self {
         Self {
             transcript: Transcript::new(label),
             is_empty: true,
@@ -58,32 +124,10 @@ impl<F: PrimeField> IOPTranscript<F> {
     }
 
     // Append the message to the transcript.
-    pub fn append_message(
-        &mut self,
-        label: &'static [u8],
-        msg: &[u8],
-    ) -> Result<(), TranscriptError> {
+    fn append_message(&mut self, label: &'static [u8], msg: &[u8]) -> Result<(), TranscriptError> {
         self.transcript.append_message(label, msg);
         self.is_empty = false;
         Ok(())
-    }
-
-    // Append the message to the transcript.
-    pub fn append_field_element(
-        &mut self,
-        label: &'static [u8],
-        field_elem: &F,
-    ) -> Result<(), TranscriptError> {
-        self.append_message(label, &to_bytes(field_elem)?)
-    }
-
-    // Append the message to the transcript.
-    pub fn append_serializable_element<S: CanonicalSerialize>(
-        &mut self,
-        label: &'static [u8],
-        group_elem: &S,
-    ) -> Result<(), TranscriptError> {
-        self.append_message(label, &to_bytes(group_elem)?)
     }
 
     // Generate the challenge from the current transcript
@@ -91,7 +135,7 @@ impl<F: PrimeField> IOPTranscript<F> {
     //
     // The output field element is statistical uniform as long
     // as the field has a size less than 2^384.
-    pub fn get_and_append_challenge(&mut self, label: &'static [u8]) -> Result<F, TranscriptError> {
+    fn get_and_append_challenge(&mut self, label: &'static [u8]) -> Result<F, TranscriptError> {
         //  we need to reject when transcript is empty
         if self.is_empty {
             return Err(TranscriptError::InvalidTranscript(
@@ -111,7 +155,7 @@ impl<F: PrimeField> IOPTranscript<F> {
     //
     // The output field element are statistical uniform as long
     // as the field has a size less than 2^384.
-    pub fn get_and_append_challenge_vectors(
+    fn get_and_append_challenge_vectors(
         &mut self,
         label: &'static [u8],
         len: usize,

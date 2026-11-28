@@ -138,6 +138,7 @@ fn two_layer_publish_lookup_round_trip_multi_shard() {
 }
 
 #[test]
+#[cfg(feature = "rocksdb")]
 fn two_layer_publish_lookup_history_round_trip() {
     use aegon::{verify_lookup_history, verify_lookup_label_history, DbSource};
 
@@ -674,6 +675,7 @@ fn label_history_covers_probe_trail_ecvrf() {
 }
 
 #[test]
+#[cfg(feature = "rocksdb")]
 fn private_mode_lookup_history_round_trip() {
     // Heavier round-trip under private=true with RocksDB: publish
     // twice, fetch lookup_history (which produces per-epoch §6.4
@@ -1020,6 +1022,7 @@ fn print_rss(stage: &str) {
 }
 
 #[test]
+#[cfg(feature = "rocksdb")]
 fn rocks_backend_publish_lookup_history_round_trip() {
     use aegon::{verify_lookup_history, verify_lookup_label_history, DbSource};
 

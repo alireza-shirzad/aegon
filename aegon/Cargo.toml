@@ -11,7 +11,12 @@ repository = "https://github.com/alireza-shirzad/aegon"
 readme = "../README.md"
 
 [features]
-default = []
+default = ["merlin"]
+# Fiat-Shamir transcript, forwarded to `aegon_crypto`. Use
+# `default-features = false, features = ["ark_transcript"]` to build
+# without Merlin.
+merlin = ["aegon_crypto/merlin"]
+ark_transcript = ["aegon_crypto/ark_transcript"]
 # Tracing instrumentation
 tracing = ["dep:tracing"]
 # Tracing-based instrumentation. Pulls in `tracing-subscriber` so the
@@ -29,6 +34,9 @@ mimalloc_alloc = []
 # default. The native Poseidon transcript is always compiled in; only
 # the folding circuit and prover sit behind this feature.
 ivc_audit = ["dep:bincode"]
+# Storage backends for `DbSource::Redis` / `DbSource::Rocks`.
+redis = ["dep:redis"]
+rocksdb = ["dep:rocksdb"]
 
 [dependencies]
 aegon_crypto = { version = "0.1.0", path = "../aegon_crypto", default-features = false, features = [
@@ -55,10 +63,10 @@ clap = { version = "4", features = ["derive"] }
 mimalloc = { version = "0.1", default-features = false }
 prost = "0.13"
 rayon = { workspace = true }
-redis = { version = "0.27", default-features = false }
+redis = { version = "0.27", default-features = false, optional = true }
 # RocksDB engine for the second `Db` impl. Single-process, disk-backed
 # LSM store; selected via `DbSource::Rocks(PathBuf)`.
-rocksdb = { version = "0.24", default-features = false, features = ["lz4"] }
+rocksdb = { version = "0.24", default-features = false, features = ["lz4"], optional = true }
 sha2 = { workspace = true }
 thiserror = { workspace = true }
 tokio = { version = "1", features = ["sync", "time", "rt", "rt-multi-thread", "net", "macros"] }
@@ -106,6 +114,10 @@ required-features = ["ivc_audit"]
 [[example]]
 name = "laptop_dictionary"
 required-features = ["ivc_audit"]
+
+[[test]]
+name = "grpc_sharded"
+required-features = ["rocksdb"]
 
 # Gated so a plain `cargo check --workspace` does not try to build the
 # IVC bench without the Nova stack. Other binaries stay auto-discovered.

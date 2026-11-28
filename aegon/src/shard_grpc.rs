@@ -38,7 +38,7 @@ use tonic::{Request, Response, Status};
 use super::config::VerifierContext;
 use super::db::{
     key_history_openings_local, key_label_placement, key_shard_state, key_value, key_value_history,
-    Db, DbOp, DbSource, RedisDb,
+    Db, DbOp, DbSource,
 };
 use super::error::AegonError;
 use super::hash::{HashSuite, Sha256Hash};
@@ -934,8 +934,8 @@ where
                     "ShardServer::new_with_checkpoint requires a Redis or Rocks DbSource".into(),
                 ));
             }
-            DbSource::Redis(url) => Arc::new(RedisDb::connect(&url)?),
-            DbSource::Rocks(path) => Arc::new(crate::db::RocksDb::open(&path)?),
+            DbSource::Redis(url) => Arc::from(crate::db::open_redis(&url)?),
+            DbSource::Rocks(path) => Arc::from(crate::db::open_rocks(&path)?),
         };
         Ok(Self {
             aegon: Arc::new(AsyncRwLock::new(aegon)),
