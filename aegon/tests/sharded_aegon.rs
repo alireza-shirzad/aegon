@@ -554,6 +554,7 @@ fn private_mode_publish_lookup_round_trip() {
 /// then checks that label history covers the skipped positions:
 /// honest bundles verify, and a bundle whose trail is tampered with or
 /// stripped is rejected.
+#[cfg(feature = "rocksdb")]
 macro_rules! label_history_probe_trail_case {
     ($hash:ty, $tag:expr, $vrf:expr) => {{
         use aegon::{verify_lookup_label_history, DbSource, ShardedAegon as ShardedG};
@@ -664,11 +665,13 @@ macro_rules! label_history_probe_trail_case {
 }
 
 #[test]
+#[cfg(feature = "rocksdb")]
 fn label_history_covers_probe_trail() {
     label_history_probe_trail_case!(Sha256Hash, "sha", None);
 }
 
 #[test]
+#[cfg(feature = "rocksdb")]
 fn label_history_covers_probe_trail_ecvrf() {
     use aegon::{EcVrfHash, VrfProver};
     label_history_probe_trail_case!(EcVrfHash, "ecvrf", Some(VrfProver::from_seed(&[7u8; 32])));

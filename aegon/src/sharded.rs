@@ -3874,7 +3874,7 @@ where
             // may have stopped there instead of at `slot_bits`.
             for (stored, live) in p.probe_trail.iter().zip(fr.probe_trail.iter()) {
                 let probe_point = bool_index_to_point::<E::ScalarField>(&stored.slot_bits);
-                let mut tr_stored = IOPTranscript::<E::ScalarField>::new(b"aegon.rand_index.open");
+                let mut tr_stored = P::Transcript::new(b"aegon.rand_index.open");
                 let ok_stored = P::verify(
                     &ctx.inner.verifier_param,
                     &p.placement_shard_commit.rand_index_commitment,
@@ -3888,8 +3888,7 @@ where
                         "label history probe trail placement opening did not verify",
                     ));
                 }
-                let mut tr_probe_live =
-                    IOPTranscript::<E::ScalarField>::new(b"aegon.rand_index.open");
+                let mut tr_probe_live = P::Transcript::new(b"aegon.rand_index.open");
                 let ok_probe_live = P::verify(
                     &ctx.inner.verifier_param,
                     &fr.shard_commit.rand_index_commitment,
