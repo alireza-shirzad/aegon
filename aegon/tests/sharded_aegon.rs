@@ -679,6 +679,75 @@ fn label_history_covers_probe_trail_ecvrf() {
 
 #[test]
 #[cfg(feature = "rocksdb")]
+fn lookup_history_rejects_omitted_change() {
+    // A server that hides a value change must not pass
+    // `verify_lookup_history`. Alice's value changes three times; the
+    // honest bundle verifies, and the same bundle with the middle
+    // change removed (every remaining opening still valid on its own)
+    // is rejected by the chain check between adjacent entries.
+    use aegon::{verify_lookup_history, DbSource};
+
+    // Value history is only persisted with a DB backend, so use a
+    // throwaway RocksDB like the other history tests.
+    let nonce: u64 = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0xDEADBEEF);
+    let db_path = std::env::temp_dir().join(format!(
+        "aegon-rocks-omitted-{}-{nonce}",
+        std::process::id()
+    ));
+    if db_path.exists() {
+        std::fs::remove_dir_all(&db_path).ok();
+    }
+    let cfg = ShardedAegonConfig::<Bn254, Pcs>::builder()
+        .log_capacity(8)
+        .log_over_provisioning_factor(0)
+        .log_n_shards(1)
+        .private(false)
+        .kzh_k(2)
+        .db(DbSource::Rocks(db_path.clone()))
+        .build()
+        .expect("config builds (omitted-change history)");
+    let mut server = Sharded::setup(&cfg).expect("setup");
+    for v in [&b"alice-v1"[..], b"alice-v2", b"alice-v3"] {
+        server
+            .publish_two_layer(&[(b"alice".to_vec(), v.to_vec())])
+            .expect("publish");
+    }
+
+    let ctx = server.sharded_verifier_context();
+    let hist = server
+        .lookup_history(&b"alice".to_vec())
+        .expect("alice history");
+    assert_eq!(hist.entries.len(), 3, "alice has 3 history entries");
+    verify_lookup_history::<Bn254, Pcs, Sha256Hash>(&ctx, &hist)
+        .expect("honest three-entry history verifies");
+
+    // Hide the middle change (v2). Freshness still matches the latest
+    // entry, and each remaining entry's openings are untouched.
+    let mut omitted = hist.clone();
+    omitted.entries.remove(1);
+    let err = verify_lookup_history::<Bn254, Pcs, Sha256Hash>(&ctx, &omitted)
+        .expect_err("history with an omitted change must be rejected");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("history chain check failed"),
+        "expected chain-check rejection, got: {msg}"
+    );
+
+    // Reordered entries are rejected too.
+    let mut reordered = hist.clone();
+    reordered.entries.swap(1, 2);
+    verify_lookup_history::<Bn254, Pcs, Sha256Hash>(&ctx, &reordered)
+        .expect_err("out-of-order history must be rejected");
+
+    drop(server);
+    let _ = std::fs::remove_dir_all(&db_path);
+}
+
+#[test]
+#[cfg(feature = "rocksdb")]
 fn private_mode_lookup_history_round_trip() {
     // Heavier round-trip under private=true with RocksDB: publish
     // twice, fetch lookup_history (which produces per-epoch §6.4
